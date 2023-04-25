@@ -1,7 +1,7 @@
 [TOC]
 
-## Compass Opportune Post-training Tools
-Compass Opportune Post-training Tools, 简称**OPT**, 内部开发代号optimizer, 是周易 Compass Neural Network Compiler (Python包名为AIPUBuilder) 工具链的一部分，主要负责将[Compass Unified Parser](https://github.com/Arm-China/Compass_Unified_Parser)转换后的浮点模型中间表示（IR），进一步优化（通过量化，计算图优化等手段）为适合在周易NPU硬件平台上执行的量化模型或混合精度模型中间表示。关于Compass IR规范及Compass SDK的更多介绍，参见https://aijishu.com/a/1060000000215443。
+## Compass Optimizer
+Compass Optimizer, 简称**OPT**, 是周易 Compass Neural Network Compiler (Python包名为AIPUBuilder) 工具链的一部分，主要负责将[Compass Unified Parser](https://github.com/Arm-China/Compass_Unified_Parser)转换后的浮点模型中间表示（IR），进一步优化（通过量化，计算图优化等手段）为适合在周易NPU硬件平台上执行的量化模型或混合精度模型中间表示。关于Compass IR规范及Compass SDK的更多介绍，参见https://aijishu.com/a/1060000000215443。
 
 除本概要说明以外，还可以参阅`tutorial.pdf`的详细介绍。
 
