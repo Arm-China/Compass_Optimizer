@@ -14,9 +14,9 @@ register_optype('MISH')
 
 
 def mish_func(inp):
-    softplus = torch.log(1 + torch.exp(inp.float()))
+    softplus = torch.log(1 + torch.exp(inp.double()))
     output = inp * torch.tanh(softplus)
-    return output
+    return output.float()
 
 
 @quant_register(OpType.MISH)

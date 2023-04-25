@@ -27,7 +27,7 @@ def softplus_quantize(self, *args):
     iqmin, iqmax = dtype2range(inp.dtype)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     lut = linear_dequantize(torch.linspace(iqmin, iqmax, steps=lsteps), inp.scale, inp.zerop)
-    lut = torch.log(1+torch.exp(lut))
+    lut = torch.log(1+torch.exp(lut.double()))
     lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
 
     self.constants["lut"] = PyTensor(self.name+"/softplus_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
@@ -48,5 +48,5 @@ def softplus(self, *args):
         y = lookup_lut_powerof2(x, lut, lut_in_bits, in_is_signed, lut_out_bits, out_is_signed)
         out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        out.betensor = torch.log(1+torch.exp(inp.betensor))
+        out.betensor = torch.log(1+torch.exp(inp.betensor.double())).float()
     return out.betensor

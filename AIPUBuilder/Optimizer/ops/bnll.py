@@ -26,8 +26,8 @@ def bnll_quantize(self, *args):
         out, q_mode_activation, out.qbits, out_sign)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
-    pos = lut + torch.log(1 + (-lut).exp())
-    neg = torch.log(1 + lut.exp())
+    pos = lut + torch.log(1 + (-lut).double().exp())
+    neg = torch.log(1 + lut.double().exp())
     condition = (lut > 0)
     y = torch.where(condition, pos, neg)
     lut = linear_quantize_clip(y, out.scale, out.zerop, out.qmin, out.qmax)
@@ -54,8 +54,8 @@ def bnll(self, *args):
             self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
         out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        pos = inp.betensor + torch.log(1 + (-inp.betensor).exp())
-        neg = torch.log(1 + inp.betensor.exp())
+        pos = inp.betensor + torch.log(1 + (-inp.betensor).double().exp())
+        neg = torch.log(1 + inp.betensor.double().exp())
         condition = (inp.betensor > 0)
-        out.betensor = torch.where(condition, pos, neg)
+        out.betensor = torch.where(condition, pos, neg).float()
     return out.betensor
