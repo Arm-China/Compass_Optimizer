@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from AIPUBuilder.Optimizer.ops.pad import pad
+from AIPUBuilder.Optimizer.ops.multibox_transform_Loc import calculate_box_quantization, apply_box_deltas, apply_box_deltas_q
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 
@@ -9,115 +10,13 @@ from AIPUBuilder.Optimizer.logger import OPT_DEBUG, OPT_INFO, OPT_ERROR
 
 # IR
 # layer_name=mrcnn_detecion/decodebox
-# layer_type=DetectionBox
+# layer_type=BoundingBox
 # layer_bottom=[post_nms1_proposal_bbox_tensor,mrcnn_detecion/reshape_max_deltas_output]
 # layer_bottom_shape=[[1,1000,4],[1,1000,4]]
 # layer_bottom_type=[float32,float32]
 # layer_top=[mrcnn_detecion/decodebox_output]
 # layer_top_shape=[[1,1000,4]]
 # layer_top_type=[float32]
-
-
-def apply_box_deltas(self, boxes, deltas):
-    ycenter_a = (boxes[0, :, 0] + boxes[0, :, 2]) / 2
-    xcenter_a = (boxes[0, :, 1] + boxes[0, :, 3]) / 2
-    ha = boxes[0, :, 2] - boxes[0, :, 0]
-    wa = boxes[0, :, 3] - boxes[0, :, 1]
-
-    std_div = self.get_param('std_div', optional=True, default_value=[10, 10, 5, 5])
-
-    dy = deltas[0, :, 0] / std_div[0]
-    dx = deltas[0, :, 1] / std_div[1]
-    dh = deltas[0, :, 2] / std_div[2]
-    dw = deltas[0, :, 3] / std_div[3]
-
-    # adjust achors size and position
-    ycenter = dy * ha + ycenter_a
-    xcenter = dx * wa + xcenter_a
-    h = torch.exp(dh) * ha
-    w = torch.exp(dw) * wa
-
-    ymin = ycenter - h / 2.
-    xmin = xcenter - w / 2.
-    ymax = ycenter + h / 2.
-    xmax = xcenter + w / 2.
-    box = torch.zeros_like(boxes)
-    box[-1:] = torch.stack([ymin, xmin, ymax, xmax], dim=1)
-    # print("box(after apply delta) before clip:",np.min(box), np.max(box))
-    # clip in normalized size[0~1.0]
-    #  window: (y1, x1, y2, x2)
-    box[0, :, 0][box[0, :, 0] < 0] = 0
-    box[0, :, 1][box[0, :, 1] < 0] = 0
-    box[0, :, 2][box[0, :, 2] < 0] = 0
-    box[0, :, 3][box[0, :, 3] < 0] = 0
-    box[0, :, 0][box[0, :, 0] > 1] = 1
-    box[0, :, 1][box[0, :, 1] > 1] = 1
-    box[0, :, 2][box[0, :, 2] > 1] = 1
-    box[0, :, 3][box[0, :, 3] > 1] = 1
-
-    return box
-
-
-def apply_box_deltas_q(self, boxes, deltas):
-    if self.quantized:
-        # check input delta box bits
-        qbits = dtype2bits(self.inputs[1].dtype)
-        if qbits not in [8, 16]:
-            OPT_ERROR(f"qbits={qbits} does not support in BoundingBox layer")
-        scales = self.params["scale_value"]
-        shifts = self.params["shift_value"]
-
-        ycenter = (boxes[0, :, 0] + boxes[0, :, 2]).int() >> 1
-        xcenter = (boxes[0, :, 1] + boxes[0, :, 3]).int() >> 1
-        h = boxes[0, :, 2] - boxes[0, :, 0]
-        w = boxes[0, :, 3] - boxes[0, :, 1]
-
-        dy = deltas[0, :, 0].int()
-        dx = deltas[0, :, 1].int()
-        dh = deltas[0, :, 2].int()
-        dw = deltas[0, :, 3].int()
-        scale_txty_out = scales[0]
-        shift_txty_out = shifts[0]
-        # sat_bits is to avoid lib calculation saturation,here,so it need (qbits*2+16-32)
-        # assume scale is 16bits, max bits 32, currently, only support 8bits and 16bits box
-        sat_bits = 2*qbits+16-32
-        round_shift = 1 << (shift_txty_out-sat_bits-1)
-        clip_min, clip_max = bits2range(32, True)
-
-        h_scale = (h * scale_txty_out) >> sat_bits
-        w_scale = (w * scale_txty_out) >> sat_bits
-        ycenter_q = torch.clip(((dy * h_scale+round_shift) >> (shift_txty_out-sat_bits)) + ycenter, clip_min, clip_max)
-        xcenter_q = torch.clip(((dx * w_scale+round_shift) >> (shift_txty_out-sat_bits)) + xcenter, clip_min, clip_max)
-
-        lut = self.constants['lut'].betensor
-        scale_thtw_out = scales[1]
-        shift_thtw_out = shifts[1]
-        lut_offset = 1 << (qbits-1)
-        clip_min, clip_max = bits2range((qbits*2), False)
-        lut_dh_scale = ((lut[dh.long()+lut_offset] * scale_thtw_out) * 2**(-16)).int()
-        lut_dw_scale = ((lut[dw.long()+lut_offset] * scale_thtw_out) * 2**(-16)).int()
-        h_half_q = torch.clip((h * lut_dh_scale * 2**(16-shift_thtw_out)), clip_min, clip_max)
-        w_half_q = torch.clip((w * lut_dw_scale * 2**(16-shift_thtw_out)), clip_min, clip_max)
-
-        scale_anchor = scales[2]
-        shift_anchor = shifts[2]
-        round_shift = 0
-        if shift_anchor > 1:
-            round_shift = 1 << (shift_anchor-1)
-
-        ymin_q32 = (ycenter_q - h_half_q).int() * scale_anchor+round_shift >> shift_anchor
-        xmin_q32 = (xcenter_q - w_half_q).int() * scale_anchor+round_shift >> shift_anchor
-        ymax_q32 = (ycenter_q + h_half_q).int() * scale_anchor+round_shift >> shift_anchor
-        xmax_q32 = (xcenter_q + w_half_q).int() * scale_anchor+round_shift >> shift_anchor
-
-        box_q32 = torch.stack([ymin_q32, xmin_q32, ymax_q32, xmax_q32], dim=1)
-        box_q16 = torch.zeros_like(boxes)
-        box_q16[-1:] = torch.clip(box_q32, 0, 32767)  # clip to 0~1.0
-
-        return box_q16
-    else:
-        OPT_ERROR("in detection quantize routine, node should be quantized.")
-
 
 register_optype('BoundingBox')
 
@@ -133,7 +32,12 @@ def boundingbox(self, *args):
     else:
         # x,y (box_delta[0:2]) need convert to symetric,dh,dw as lut index, zerop is aborbed to lut
         box_delta[..., 0:2] = box_delta[..., 0:2]+torch.tensor(self.inputs[1].zerop)
-        refined_box = apply_box_deltas_q(self, proposal_box, box_delta)
+        refined_box = apply_box_deltas_q(self, proposal_box, box_delta, self.inputs[0].dtype, self.inputs[1].dtype)
+        '''
+        #x,y (box_delta[0:2]) need convert to symetric,dh,dw as lut index, zerop is aborbed to lut
+        box_delta[...,0:2] = box_delta[...,0:2]+torch.tensor(self.inputs[1].zerop)
+        refined_box = apply_box_deltas_q(self, proposal_box, box_delta, self.inputs[0].dtype, self.inputs[1].dtype)
+        '''
     self.outputs[0].betensor = refined_box
     return refined_box
 
@@ -147,6 +51,8 @@ def boundingbox_quantize(self, *args):
     # ################################get initial params###########################################
     STD_DIV = self.params['std_div'] if 'std_div' in self.params else [10, 10, 5, 5]
 
+    calculate_box_quantization(self, inp[0], inp[1], STD_DIV)
+    '''
     # ##############################apply deltas part######################################
     # # input scale
     # batch_inp_scores_scales, batch_inp_scores_zp =  inp[0].scale, inp[0].zerop
@@ -208,11 +114,15 @@ def boundingbox_quantize(self, *args):
     self.params["scale_type"] = [xy_scale_type, hw_scale_tyep, anchor_scale_type]
     self.params["shift_value"] = [int(xy_shift), int(hw_shift), int(anchor_shift)]
     self.params["shift_type"] = [xy_shift_type, hw_shift_type, anchor_shift_type]
-
+    #calculate_box_quantization(self, inp[0], inp[1], STD_DIV)
+    '''
     # set dtpye and qbits
     out[0].scale, out[0].zerop, out[0].dtype, out[0].qbits = 32767, 0, Dtype.INT16, 16     # box
     out[0].qinvariant = inp[0].qinvariant
-    out[1].scale, out[1].zerop, out[1].dtype, out[1].qbits = 1, 0, Dtype.UINT16, 16   # score
-    out[1].qinvariant = True
-    out[2].scale, out[2].zerop, out[2].dtype, out[2].qbits = 1, 0, Dtype.UINT16, 16
-    out[2].qinvariant = True
+    # out[1] and out[2] will be deleted in IR
+    for idx in range(1, len(self.outputs)):
+        out[idx].scale = 1
+        out[idx].zerop = 0
+        out[idx].dtype = Dtype.UINT16
+        out[idx].qbits = 16
+        out[idx].qinvariant = True

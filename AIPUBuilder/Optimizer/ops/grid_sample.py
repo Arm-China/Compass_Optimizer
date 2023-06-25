@@ -171,7 +171,7 @@ def gridsample_quantize(self, *args):
 
     doscale = int(doscale)
     doshift1 = int(doshift)
-    feature_size = max(inp.betensor.shape[1], inp.betensor.shape[2])
+    feature_size = max(inp.ir_shape[1], inp.ir_shape[2])
     feature_bits = math.ceil(math.log2(feature_size))
     scale_bits = math.ceil(math.log2(doscale))
     inp1_bits = inp1.qbits + (1 if inp1.zerop or not is_signed(inp1.dtype) else 0)

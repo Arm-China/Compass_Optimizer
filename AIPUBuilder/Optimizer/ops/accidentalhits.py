@@ -59,7 +59,7 @@ def accidentalhits_quantize(self, *args):
         out.zerop = 0
         out.qinvariant = True
 
-        out_numel = inp.betensor.shape[0]
+        out_numel = inp.ir_shape[0]
         out_bits, _ = range2dtype(0, out_numel, force_int=self.force_dtype_int)
         out.qbits = max(16, out_bits)
         out.dtype = bits2dtype(out.qbits, False or self.force_dtype_int)

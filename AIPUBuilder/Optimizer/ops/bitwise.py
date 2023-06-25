@@ -88,7 +88,7 @@ def bitwise(self, *args):
     if method not in method_d:
         OPT_FATAL("unsupported method: %s for Bitwise in node:%s" % (method, self.name))
     else:
-        outp = method_d[method](*func_args)
+        outp = np.array(method_d[method](*func_args))
 
     outp = outp.astype(np_out_dtype)
     pytensor = PyTensor('out', outp)

@@ -23,7 +23,10 @@ def reshape(self, *args):
     # shape[0] = -1 # left batch -1
     if batch_axis != 0:
         OPT_WARN('layer_id=%s, type=%s, the batch axis is not 0, making the result unpredictable possibly' %
-                 (self.attrs['layer_id'], str(self.type)))
+                 (self.attrs['layer_id'], str(self.type)), log_once=True)
+    if ir_batch != 0 and len(shape) != 0:
+        # have batch_dim
+        shape[batch_axis] = -1
     out.betensor = torch.reshape(inp, shape)
     return out.betensor
 

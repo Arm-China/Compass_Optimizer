@@ -168,3 +168,7 @@ from . import get_valid_count
 from . import normal_moments
 from . import embedding_lookup_sparse
 from . import generateproposal
+from . import collapse_repeated
+from . import sufficientStatistics
+from . import heatmapMaxkeypoint
+from . import rms_norm

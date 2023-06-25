@@ -7,8 +7,6 @@ from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import *
 import torch
 
-g_eltwise_scale_bits = 8
-
 
 @quant_register(OpType.SquaredDifference)
 def squareddifference_quantizes(self, *args):
@@ -25,70 +23,53 @@ def squareddifference_quantizes(self, *args):
             'one input is quantize invariant and other one input is not, which may cause accuracy issue. layer_id=%s, %s' % (
                 self.attrs['layer_id'], self.name),
             workflow_name='quantize', op_name=str(self.type))
+    if inp0.qbits != inp1.qbits:
+        OPT_WARN(
+            'qbits of two inputs are not equal , which may cause accuracy issue. better set cast_dtypes_for_lib=True in opt cfg. layer_id=%s, %s' % (
+                self.attrs['layer_id'], self.name),
+            workflow_name='quantize', op_name=str(self.type))
 
     if inp0.qinvariant and inp1.qinvariant:
         out.scale = 1.0
         out.zerop = 0
-        out.qbits, _ = range2dtype(out.extrema_min, out.extrema_max, force_int=out_signed)
-        out.qbits = max(out.qbits, max(inp0.qbits, inp1.qbits))
+        out.qbits = 32
         out.dtype = bits2dtype(out.qbits, is_signed=out_signed)
+        out.qmin, out.qmax = dtype2range(out.dtype)
         out.qinvariant = True
+
+        self.params["shift_value"] = [0, 0, 0]
+        self.params["shift_type"] = [Dtype.INT8, Dtype.INT8, Dtype.INT8]
+        self.params["scale_value"] = [1, 1, 1]
+        self.params["scale_type"] = [Dtype.UINT16, Dtype.UINT16, Dtype.UINT16]
     else:
         out.qinvariant = False
         out.qbits = q_bits_activation
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
             out, q_mode_activation, out.qbits, is_signed=out_signed)
 
-    oscale = out.scale
-    # SUB
-    inp_scale_max = max(inp0.scale, inp1.scale)
-    # due to aiff don't support uint16 max 65535,so we use INT16 replace UINT16
-    _, clip_max = dtype2range(Dtype.INT16)
-    # avoid to warning occurrence, we need ignore the relative extreme big/small scale, so
-    # proof_min_ration is defined
-    proof_min_ration = (2**g_eltwise_scale_bits)/clip_max
-    inp0_scale = inp0.scale
-    inp1_scale = inp1.scale
-    if inp0.scale/inp1.scale < proof_min_ration or inp1.scale/inp0.scale < proof_min_ration:
-        inp0_scale = min(max(inp0.scale, 1./clip_max), clip_max)
-        inp1_scale = min(max(inp1.scale, 1./clip_max), clip_max)
-        inp_scale_max = max(inp0_scale, inp1_scale)
+        oscale = out.scale
+        inp0_qbits_max, _ = range2bits(inp0.qmin+inp0.zerop, inp0.qmax+inp0.zerop, force_int=True)
+        inp1_qbits_max, _ = range2bits(inp1.qmin+inp1.zerop, inp1.qmax+inp1.zerop, force_int=True)
+        reduce_multiplier = max(2 * (max(inp0_qbits_max, inp1_qbits_max) - 15), 1)
+        left_shift = min(int(max(0, 15 - inp0_qbits_max)), int(max(0, 15 - inp1_qbits_max)))
+        inp_scale_min = min(inp0.scale, inp1.scale) / reduce_multiplier
+        input0__multiplier = inp_scale_min / inp0.scale * 2**left_shift
+        input1__multiplier = inp_scale_min / inp1.scale * 2**left_shift
+        output__multiplier = oscale / (inp_scale_min * inp_scale_min) / 2**(2 * left_shift)
+        input0_scale, input0_scale_type, input0_shift, input0_shift_type = \
+            get_scale_approximation_params(input0__multiplier, mult_bits=16,
+                                           force_shift_positive=self.force_shift_positive)
+        input1_scale, input1_scale_type, input1_shift, input1_shift_type = \
+            get_scale_approximation_params(input1__multiplier, mult_bits=16,
+                                           force_shift_positive=self.force_shift_positive)
+        out_scale, out_scale_type, out_shift, out_shift_type = \
+            get_scale_approximation_params(output__multiplier, mult_bits=16,
+                                           force_shift_positive=self.force_shift_positive)
 
-    if inp0.qinvariant and not inp1.qinvariant:
-        inp_scale_max = inp0.scale
-    if inp1.qinvariant and not inp0.qinvariant:
-        inp_scale_max = inp1.scale
-
-    scale0 = (inp_scale_max / inp0_scale) * (2**g_eltwise_scale_bits)
-    scale1 = (inp_scale_max / inp1_scale) * (2**g_eltwise_scale_bits)
-
-    if int(scale0) > clip_max:
-        (OPT_DEBUG('layer_id=%s, layer_type=%s the first scale=%d of eltwise has out range [0, 65535], please attention.'
-                   % (self.attrs['layer_id'], str(self.type), int(scale0))))
-        scale0 = min(scale0, clip_max)
-    if int(scale1) > clip_max:
-        (OPT_DEBUG('layer_id=%s, layer_type=%s the second scale=%d of eltwise has out range [0, 65535], please attention.'
-                   % (self.attrs['layer_id'], str(self.type), int(scale1))))
-        scale1 = min(scale1, clip_max)
-
-    placeholders = self.placeholders[0]
-    placeholders.qbits = 16
-    placeholders.scale, placeholders.zerop, placeholders.qmin, placeholders.qmax, placeholders.dtype = get_linear_quant_params_from_tensor(
-        placeholders, QuantMode.to_symmetric(q_mode_activation), placeholders.qbits, is_signed=True)
-    placeholders.qinvariant = False
-    scale_minus = placeholders.scale
-
-    local_rescale = oscale / (scale_minus*scale_minus)
-    do_scale_minus, do_scale_minus_type, do_shift_minus, do_shift_minus_type = \
-        get_scale_approximation_params(scale_minus/inp_scale_max, mult_bits=16,
-                                       force_shift_positive=self.force_shift_positive)
-    do_scale, do_scale_type, do_shift, do_shift_type = \
-        get_scale_approximation_params(local_rescale, mult_bits=q_bits_activation,
-                                       force_shift_positive=self.force_shift_positive)
-    self.params["shift_value"] = [int(do_shift), int(do_shift_minus + g_eltwise_scale_bits)]
-    self.params["shift_type"] = [do_shift_type, do_shift_minus_type]
-    self.params["scale_value"] = [int(do_scale), int(scale0), int(scale1), int(do_scale_minus)]
-    self.params["scale_type"] = [do_scale_type, Dtype.UINT16, Dtype.UINT16, do_scale_minus_type]
+        self.params["shift_value"] = [int(out_shift), int(input0_shift), int(input1_shift)]
+        self.params["shift_type"] = [out_shift_type, input0_shift_type, input1_shift_type]
+        self.params["scale_value"] = [int(out_scale), int(input0_scale), int(input1_scale)]
+        self.params["scale_type"] = [out_scale_type, input0_scale_type, input1_scale_type]
 
 
 @op_register(OpType.SquaredDifference)
@@ -101,17 +82,19 @@ def squareddifference(self, *args):
     x1 = inp1.betensor + (torch.tensor(0) if not self.quantized else torch.tensor(self.inputs[1].zerop))
 
     if self.quantized:
-        scale0, scale1, scale2, scale3 = self.params["scale_value"]
-        shift0, shift1 = self.params["shift_value"]
+        out_scale, input0_scale, input1_scale = self.params["scale_value"]
+        out_shift, input0_shift, input1_shift = self.params["shift_value"]
+
         act_qmin, act_qmax = -2 ** 31, 2 ** 31 - 1
-        Qy1 = linear_requantize((x0*scale1 - x1*scale2), scale3, shift1, 0, act_qmin, act_qmax)
-        out.betensor = linear_requantize(Qy1*Qy1, scale0, shift0, out.zerop, out.qmin, out.qmax)
+        # In fact, the true value domain of x0 and x1 after requantize is within the range of int15
+        x0 = linear_requantize(x0, input0_scale, input0_shift, 0, act_qmin, act_qmax).long()
+        x1 = linear_requantize(x1, input1_scale, input1_shift, 0, act_qmin, act_qmax).long()
+        diff = x0 - x1
+        squared_diff = (diff * diff).long()
+        # diff is in the range of int16, so the result after square is in the range of 32bit
+        squared_diff = torch.clamp(squared_diff, 0, 2**32-1)
+        out.betensor = linear_requantize(squared_diff, out_scale, out_shift, out.zerop, out.qmin, out.qmax).long()
     else:
         minus = x0 - x1
         out.betensor = minus * minus
-        if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/minus_outputs", minus.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            self.placeholders.append(ph0)
-        self.placeholders[0].betensor = minus
-
     return out.betensor

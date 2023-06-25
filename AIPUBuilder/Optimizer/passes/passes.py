@@ -73,6 +73,23 @@ def adapt_float_subgraph_pass(graph, config):
             else:
                 ot.scale = qn.constants['quantize_scale'].betensor
                 ot.zerop = qn.constants['quantize_zp'].betensor
+            if len(qn.children) == 1 and qn.children[0].type == OpType.Cast:
+                cn = qn.children[0].clone()
+                cn.quantize()
+                ct = cn.outputs[0]
+                ot.dtype = ct.dtype
+                ot.scale = ct.scale
+                ot.zerop = ct.zerop
+                ot.qinvariant = ct.qinvariant
+                ot.qmin = ct.qmin
+                ot.qmax = ct.qmax
+                ot.qbits = ct.qbits
+                if 'quantize_scale' in qn.params:
+                    qn.params['quantize_scale'] = ct.scale
+                    qn.params['quantize_zp'] = ct.zerop
+                else:
+                    qn.constants['quantize_scale'].betensor = ct.scale
+                    qn.constants['quantize_zp'].betensor = ct.zerop
 
         fd = qn.attrs['trigger_float_op'].name if Dtype == type(
             qn.attrs['trigger_float_op']) else str(qn.attrs['trigger_float_op']).lower().strip()
@@ -84,6 +101,9 @@ def adapt_float_subgraph_pass(graph, config):
             for ot in qn.outputs:
                 if is_float(ot.dtype):
                     ot.dtype = o_dtype
+            for key, ct in qn.constants.items():
+                if is_float(ct.dtype):
+                    ct.dtype = Dtype.FP32 if 'biases' == key else o_dtype
 
 
 def unify_scales_for_multi_inputs_op_pass(graph, config):

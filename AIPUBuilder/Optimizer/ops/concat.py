@@ -15,7 +15,9 @@ def concat_quantize(self, *args):
     q_bits_activation = self.attrs["q_bits_activation"]
     # #decide the output tensors' key properties related to quantization
     out = self.outputs[0]
-    onumel = out.betensor.numel()
+    onumel = 1
+    for s in out.ir_shape:
+        onumel *= s
     min_scale = float("inf")
     min_index = 0
     max_scale = float("-inf")
@@ -39,7 +41,9 @@ def concat_quantize(self, *args):
             max_index = i
         if is_signed(inp.dtype):
             sign_branches += 1
-        bnumel = inp.betensor.numel()
+        bnumel = 1
+        for s in inp.ir_shape:
+            bnumel *= s
         if bnumel > majority:
             majority = bnumel
             majority_index = i

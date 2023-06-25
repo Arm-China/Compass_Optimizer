@@ -83,6 +83,7 @@ class InsertCastOp(BaseInsertOp):
             lambda node, parent_node, edge_tensor:
             (parent_node.attrs['q_bits_activation'] != node.attrs['q_bits_activation'])
             and (not self.whether_an_inserted_cast_layer(parent_node))
+            and (not self.whether_an_inserted_cast_layer(node))
             and (not node.get_param('unquantifiable', optional=True, default_value=False))
             and (not parent_node.get_param('unquantifiable', optional=True, default_value=False)),
             # insert cast op for lib's dtypes spec
@@ -90,14 +91,12 @@ class InsertCastOp(BaseInsertOp):
             (node.type in self.op_need_cast_dtypes_for_lib)
             and (not self.whether_an_inserted_cast_layer(parent_node))
             and self.whether_need_adapt_input_dtype(node, parent_node, edge_tensor)
-            and (not node.get_param('unquantifiable', optional=True, default_value=False))
-            and (not parent_node.get_param('unquantifiable', optional=True, default_value=False)),
+            and (not node.get_param('unquantifiable', optional=True, default_value=False)),
             # insert cast op for OPs like lstm, gru which ask for specific inputs be quantized with symmetric mode
             lambda node, parent_node, edge_tensor:
             (node.type in ASYM2SYM_OP_DICT)
             and (not self.whether_an_inserted_cast_layer(parent_node))
-            and (not node.get_param('unquantifiable', optional=True, default_value=False))
-            and (not parent_node.get_param('unquantifiable', optional=True, default_value=False)),
+            and (not node.get_param('unquantifiable', optional=True, default_value=False)),
         ]
         return _conditions
 
@@ -117,7 +116,7 @@ class InsertCastOp(BaseInsertOp):
                 for node in self.g.nodes:
                     self.op_need_cast_dtypes_for_lib.add(node.type)
             else:  # op list
-                op_list = [x.lower() for x in re.split(r',|\s+', cast_dtypes_for_lib) if x]
+                op_list = [x.lower().strip() for x in re.split(r',|\s+', cast_dtypes_for_lib) if x.lower().strip()]
                 for node in self.g.nodes:
                     if str(node.type)[7:].lower() in op_list:
                         self.op_need_cast_dtypes_for_lib.add(node.type)
@@ -144,6 +143,13 @@ class InsertCastOp(BaseInsertOp):
             backups = []
             for spec in dtype_spec:
                 spec_output_type = spec.out_dtypes
+                dt_int = True
+                for dt in spec.out_dtypes + spec.in_dtypes:
+                    if is_float(dt):
+                        dt_int = False
+                        break
+                if not dt_int:
+                    continue
                 if output_dtype == spec_output_type:
                     candidates.append([spec.in_dtypes, 0.0])
                 backups.append([spec.in_dtypes, 0.0])
@@ -159,6 +165,11 @@ class InsertCastOp(BaseInsertOp):
                                         is_signed(node.children[0].inputs[j].dtype))
                     else:
                         dt = node.children[0].inputs[j].dtype
+                        for cp in node.children[0].parents:
+                            if cp != node and cp.type == OpType.Cast and cp.additional and cp.outputs[0] == node.children[0].inputs[j]:
+                                dt = cp.params['to_dtype']
+                                break
+
                     if is_signed(dt) == is_signed(in_dtype):
                         score += 0.01
                     if dt == in_dtype:
@@ -202,6 +213,13 @@ class InsertCastOp(BaseInsertOp):
         self.before_pass()
         self.insert()
         self.after_pass()
+        self.inserted_cast_layers = []
+        # update tensors' quantization info becasue some layers' dtype may change
+        # after inserting cast and more cast layers will be needed
+        self.g.set_tensor_quantization_attrs()
+        self.insert()
+        self.after_pass()
+        self.inserted_cast_layers = []
 
 
 class InsertQuantizeOp(BaseInsertOp):
@@ -214,8 +232,8 @@ class InsertQuantizeOp(BaseInsertOp):
         _condition = [
             lambda node, parent_node, edge_tensor:
             (parent_node.params['unquantifiable'] == True and node.params['unquantifiable'] == False)
-            and (not edge_tensor.qinvariant)
         ]
+        # qinvariant tensors with scale=1.0, zp=0 are safe to pass through
         return _condition
 
     def after_insert(self):
@@ -267,8 +285,8 @@ class InsertDeQuantizeOp(BaseInsertOp):
         _condition = [
             lambda node, parent_node, edge_tensor:
             (parent_node.params['unquantifiable'] == False and node.params['unquantifiable'] == True)
-            and (not edge_tensor.qinvariant)
         ]
+        # qinvariant tensors with scale=1.0, zp=0 are safe to pass through
         return _condition
 
     def after_insert(self):

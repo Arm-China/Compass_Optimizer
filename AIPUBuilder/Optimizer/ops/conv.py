@@ -25,7 +25,8 @@ def _conv2d_torch_impl(self, *args):
     if self.quantized:
         # input's zerop has been absorbed to bias.
         # inp += self.inputs[0].zerop
-        pad_val = -self.inputs[0].zerop
+        inp_zp = self.inputs[0].zerop if isinstance(self.inputs[0].zerop, (float, int)) else self.inputs[0].zerop[0]
+        pad_val = -inp_zp
         w_zp = self.constants["weights"].zerop
         w_zshape = [1] * weights.dim()
         w_zshape[0] = -1
@@ -110,8 +111,8 @@ def conv2d_quantize(self, *args):
         self.constants.pop('WinogradWeights')
     else:
         linear_op_quantize(self, *args)
-    absorb_input_zp_to_bias(self, *args)
-    clear_lower_bits_for_bias(self, *args)
+
+    absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args)
 
 
 def linear_op_quantize(self, *args):
@@ -219,43 +220,46 @@ def linear_op_quantize(self, *args):
     w.qbits = q_bits_weight
     w.qinvariant = False
 
-    # quantize bias
-    b = self.constants["biases"]
-    # if self.get_param('with_activation', optional=True, default_value='none').lower() in with_activation_allow_merge_out_zerop_to_bias :
-    #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_q + zp_b)s_ws_x/s_b) s_y/s_ws_x - zp_y
-    #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_f - zp_y/s_y)s_ws_x) s_y/s_ws_x
-    #     b.betensor = b.betensor - linear_dequantize(0, out.scale, out.zerop)
-    b.scale = inp.scale * w.scale
-    b.zerop = 0
-    b.qmin = -2**(q_bits_bias-1)
-    b.qmax = 2**(q_bits_bias-1) - 1
-    b.qbits = q_bits_bias
-    if isinstance(b.scale, torch.Tensor):
-        b_scale_shape = [b.shape[ax] if ax == b.key_axis_c else 1 for ax in range(len(b.shape))]
-        b.scale = torch.reshape(b.scale, b_scale_shape)
-    b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
-    # AIFF will scale down biases to 16bit and rescale it back to 32bit later due to hardware restricts
-    bmin = min(b.betensor.min().item(), -1)
-    bmax = max(b.betensor.max().item(), 1)
-    lmin, lmax = bits2range(self.attrs['bias_effective_bits'], is_signed=True)
-    lbits = math.ceil(max(math.log2(bmax/lmax), math.log2(bmin/lmin)))
-    if lbits > 0:
-        b.betensor = ((b.betensor.long() >> lbits) << lbits).float()
+    if 'biases' in self.constants:
+        b = self.constants["biases"]
+        # if self.get_param('with_activation', optional=True, default_value='none').lower() in with_activation_allow_merge_out_zerop_to_bias :
+        #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_q + zp_b)s_ws_x/s_b) s_y/s_ws_x - zp_y
+        #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_f - zp_y/s_y)s_ws_x) s_y/s_ws_x
+        #     b.betensor = b.betensor - linear_dequantize(0, out.scale, out.zerop)
+        b.scale = inp.scale * w.scale
+        b.zerop = 0
+        if isinstance(b.scale, torch.Tensor):
+            b_scale_shape = [b.shape[ax] if ax == b.key_axis_c else 1 for ax in range(len(b.shape))]
+            b.scale = torch.reshape(b.scale, b_scale_shape)
 
-    b.dtype = bits2dtype(b.qbits, is_signed=True)
-    b.qinvariant = False
+        if self.attrs['bias_effective_bits'] != q_bits_bias:
+            search_bias_bit_and_quantize(self, *args)
+        else:
+            b.qmin = -2 ** (q_bits_bias - 1)
+            b.qmax = 2 ** (q_bits_bias - 1) - 1
+            b.qbits = q_bits_bias
+            b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
+
+        b.dtype = bits2dtype(b.qbits, is_signed=True)
+        b.qinvariant = False
 
     apply_with_activation_quantize(self, out.qinvariant, *args)
 
 
-def clear_lower_bits_for_bias(self, *args):
+def clear_lower_bits_for_bias(self, *args, grouped=False, dim=-1):
     # AIFF will scale down biases to 16bit and rescale it back to 32bit later due to hardware restricts
     b = self.constants["biases"]
-    bmin = min(b.betensor.min().item(), -1)
-    bmax = max(b.betensor.max().item(), 1)
     lmin, lmax = bits2range(self.attrs['bias_effective_bits'], is_signed=True)
-    lbits = math.ceil(max(math.log2(bmax/lmax), math.log2(bmin/lmin)))
-    if lbits > 0:
+    if not grouped:
+        bmin = min(b.betensor.min().item(), -1)
+        bmax = max(b.betensor.max().item(), 1)
+        lbits = math.ceil(max(math.log2(bmax/lmax), math.log2(bmin/lmin)))
+        if lbits > 0:
+            b.betensor = ((b.betensor.long() >> lbits) << lbits).float()
+    else:
+        bmin = torch.min(b.betensor, dim=dim)[0]
+        bmax = torch.max(b.betensor, dim=dim)[0]
+        lbits = torch.ceil(torch.maximum(torch.log2(bmax / lmax), torch.log2(bmin / lmin))).long().unsqueeze(dim)
         b.betensor = ((b.betensor.long() >> lbits) << lbits).float()
 
 
@@ -271,3 +275,64 @@ def absorb_input_zp_to_bias(self, *args):
     input_zp_mul_weight = input_zp_mul_weight.item() if b.ir_shape == TensorShape([]) else input_zp_mul_weight
     b.betensor += input_zp_mul_weight
     b.betensor = b.betensor.clamp(b.qmin, b.qmax)
+
+
+def absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args):
+    absorb_input_zp_to_bias(self, *args)
+    clear_lower_bits_for_bias(self, *args)
+
+
+def search_bias_bit_and_quantize(self, *args):
+    b = self.constants['biases']
+    q_bits_bias = self.attrs["q_bits_bias"]
+    bias_effective_bits = self.attrs['bias_effective_bits']
+    if bias_effective_bits > q_bits_bias:
+        OPT_WARN((f"layer_id = {self.attrs['layer_id']}, layer_type = {self.type}, layer_name = {self.name}",
+                  f"the bias_effective_bits(={bias_effective_bits}) > bias_bits(={q_bits_bias}), "
+                  f"we clip bias_effective_bits to bias_bits."))
+        bias_effective_bits = q_bits_bias
+        self.attrs['bias_effective_bits'] = bias_effective_bits
+
+    bias_float_data = b.betensor.clone()
+    b.qmin = -2 ** (q_bits_bias - 1)
+    b.qmax = 2 ** (q_bits_bias - 1) - 1
+    b.qbits = q_bits_bias
+    b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
+
+    q_bias_data = b.betensor.clone()
+    clear_lower_bits_for_bias(self)
+    compressed_q_bias_data = b.betensor
+    float_softmax = bias_float_data.clone().softmax(dim=-1)
+    quantize_log_softmax = q_bias_data.log_softmax(dim=-1)
+    compress_log_softmax = compressed_q_bias_data.log_softmax(dim=-1)
+    float_quant_kld = torch.nn.functional.kl_div(quantize_log_softmax, float_softmax, reduction='batchmean')
+    float_compress_kld = torch.nn.functional.kl_div(compress_log_softmax, float_softmax, reduction='batchmean')
+    if (float_quant_kld - float_compress_kld).abs() > 0.05:
+        begin_bits = min(max(bias_effective_bits, 19), q_bits_bias - 1)
+        end_bits = q_bits_bias
+        bits = torch.arange(begin_bits, end_bits, device=b.betensor.device)
+        repeated_bias = torch.tile(bias_float_data, tuple([end_bits - begin_bits] + [1 for _ in range(len(b.shape))]))
+        clamp_min = -2 ** (bits - 1)
+        clamp_max = 2 ** (bits - 1) - 1
+        q_biases = linear_quantize_clip(repeated_bias, b.scale.unsqueeze(0), b.zerop,
+                                        clamp_min.unsqueeze(-1), clamp_max.unsqueeze(-1))
+        b.betensor = q_biases.clone()
+        clear_lower_bits_for_bias(self, grouped=True)
+        compress_biases = b.betensor
+        q_softmax = linear_dequantize(q_biases, b.scale, b.zerop).softmax(dim=-1)
+        cq_log_softmax = linear_dequantize(compress_biases, b.scale, b.zerop).log_softmax(dim=-1)
+        klds = []
+        for i in range(end_bits - begin_bits):
+            kld = torch.nn.functional.kl_div(cq_log_softmax[i], q_softmax[i], reduction='batchmean').abs()
+            klds.append(kld.item())
+
+        searched_bias_bits = klds.index(min(klds)) + begin_bits
+        b.qmin = -2 ** (searched_bias_bits - 1)
+        b.qmax = 2 ** (searched_bias_bits - 1) - 1
+        b.qbits = searched_bias_bits
+        b.betensor = linear_quantize_clip(bias_float_data, b.scale, b.zerop, b.qmin, b.qmax)
+        OPT_DEBUG((f"layer_id = {self.attrs['layer_id']}, layer_type = {self.type}, layer_name = {self.name} "
+                   f"searched bias bits = {searched_bias_bits} for better quantize bias "
+                   f"to reduce the compression bias impact in AIFF"))
+    else:
+        b.betensor = q_bias_data

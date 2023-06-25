@@ -105,7 +105,12 @@ def ScatterND(self, *args):
     qbits = self.outputs[0].qbits
     if self.quantized:
         scale, scale0, scale1 = self.params["scale_value"]
-        inner_min, inner_max = -2 ** 31, 2 ** 31 - 1
+
+        if is_signed(self.outputs[0].dtype):
+            inner_min, inner_max = -2 ** 31, 2**31 - 1
+        else:
+            inner_min, inner_max = 0, 2**32 - 1
+
         if reduce_method == 'MUL':
             shift, _, shift_ = self.params['shift_value']
         else:
@@ -122,12 +127,18 @@ def ScatterND(self, *args):
         self.placeholders.append(ph0)
 
     #  scatternd allow add/mul index duplicate
-    if reduce_method == 'ADD':
+    method = {
+        "ADD": lambda a, b: a + b,
+        "MAX": lambda a, b: torch.max(a, b),
+        "MIN": lambda a, b: torch.min(a, b),
+        'NONE': lambda a, b: b,
+    }
+    if reduce_method in ['ADD', 'MIN', 'MAX', 'NONE']:
         for idx in idxs:
             if idx != ():
                 idx = list(idx) if len(idx.shape) >= 1 else int(idx)
             idxx = list(indices[idx])
-            output[idxx] += updates[idx]
+            output[idxx] = method[reduce_method](output[idxx], updates[idx])
             if self.quantized:
                 output[idxx] = torch.clamp(output[idxx], inner_min, inner_max)
     if reduce_method == 'MUL':
@@ -147,12 +158,6 @@ def ScatterND(self, *args):
                     idx = list(idx) if len(idx.shape) >= 1 else int(idx)
                 idxx = list(indices[idx])
                 output[idxx] = output[idxx] * updates[idx]
-    if reduce_method == 'NONE':
-        for idx in idxs:
-            if idx != ():
-                idx = list(idx) if len(idx.shape) >= 1 else int(idx)
-            idxx = list(indices[idx])
-            output[idxx] = updates[idx]
     if self.quantized:
         if qbits <= 8:
             output = linear_requantize(output, scale, shift, out.zerop, out.qmin, out.qmax)

@@ -72,7 +72,6 @@ def gatherND(self, *args):
     inp_indice = (self.inputs[1].betensor).long()
 
     batch_dims = self.get_param('batch_dims', optional=True, default_value=0)
-    batchnum = inp_betensors.shape[0]
 
     if batch_dims == 0:
         # input data last dim is keeped, if input dim == indice dim, input's shape[-1] as 1
@@ -82,14 +81,21 @@ def gatherND(self, *args):
         newshape = inp_indice.shape[:-1]+inp_betensors.shape[inp_indice.shape[-1]:]
         out = singleGatherNd(inp_betensors, inp_indice)
     else:  # batch dim==1
-        newshape = inp_indice.shape[0:1]+inp_indice[0, ...].shape[:-1] + \
-            inp_betensors[0, ...].shape[inp_indice.shape[-1]:]
+        index_depth = inp_indice.shape[-1]
+        batch_shape = inp_indice.shape[:batch_dims]
+        batchnum = torch.prod(torch.tensor(batch_shape, device=inp_betensors.device))
+        outer_shape = inp_indice.shape[batch_dims:-1]
+        inner_shape = inp_betensors.shape[batch_dims + index_depth:]
+        newshape = batch_shape + outer_shape + inner_shape
         out = torch.zeros(newshape, device=inp_betensors.device)
         if out.ndim == 1:
             out = out.unsqueeze(0)
+        new_indice = inp_indice.reshape((batchnum,)+inp_indice.shape[batch_dims:])
+        new_inp = inp_betensors.reshape((batchnum,)+inp_betensors.shape[batch_dims:])
+        out = out.reshape((batchnum,)+out.shape[batch_dims:])
         for batch in range(batchnum):
-            indice_batch = inp_indice[batch, ...]
-            inp_batch = inp_betensors[batch, ...]
+            indice_batch = new_indice[batch, ...]
+            inp_batch = new_inp[batch, ...]
             if indice_batch.ndim == 1:
                 indice_batch = indice_batch.unsqueeze(0)
             out[batch, ...] = singleGatherNd(inp_batch, indice_batch).reshape(out[batch, ...].shape)

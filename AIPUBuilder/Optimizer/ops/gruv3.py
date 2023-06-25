@@ -4,7 +4,7 @@
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.ops.rnn import *
-from AIPUBuilder.Optimizer.ops.conv import clear_lower_bits_for_bias
+from AIPUBuilder.Optimizer.ops.conv import clear_lower_bits_for_bias, unify_shifts_for_aiff
 from AIPUBuilder.Optimizer.logger import *
 import torch.nn as nn
 
@@ -174,9 +174,7 @@ def gruv3(self, *args):
         wx_ck_q = candidate_kernel[0:input_size, :]
         wh_ck_q = candidate_kernel[input_size:, :]
         if 'scale_value' in self.params:
-            # self.constants["scale"].betensor
             scale = torch.tensor(self.params["scale_value"], device=inp0.betensor.device)
-            # self.constants["shift"].betensor
             shift = torch.tensor(self.params["shift_value"], device=inp0.betensor.device)
         elif "scale" in self.constants:
             requant_scale = self.constants["scale"].betensor
@@ -225,7 +223,6 @@ def gruv3(self, *args):
                     factor = 256.0 if dtype == 'int8' else 65536.0
                     hprev_r = torch.round(torch.div(torch.multiply(r, state), factor))
                     h_by_wc = torch.matmul(hprev_r, wh_ck_q)
-
                 re_scaled_h_by_wc = linear_requantize(h_by_wc, scale[2], shift[2], 0, act_qmin, act_qmax)
                 mat_sum2 = x_by_wc + re_scaled_h_by_wc + torch.unsqueeze(candidate_bias_q, 0)
 
@@ -233,7 +230,6 @@ def gruv3(self, *args):
                 c = lookup_lut_powerof2(rescaled_mat_sum2, ht_table, lut_in_bits, True, lut_out_bits, True)
                 max_pre = qmax
                 c_times_1_minus_u = (max_pre - u) * c
-
                 rescaled_c_times_1_minus_u = linear_requantize(
                     c_times_1_minus_u, scale[4], shift[4], 0, act_qmin, act_qmax)
 
@@ -259,6 +255,46 @@ def gruv3(self, *args):
         return state_batch
 
 
+def adaptation_weights_for_unify_shifts_for_aiff(node, weights_name, multiplicator):
+    t = PyTensor(node.name + '/temp_var')
+    w_ele_t = node.constants[weights_name]
+    w_ele = w_ele_t.betensor
+    mgroup = w_ele.shape[0]
+    w_out_cnum = w_ele.shape[0]
+    w_scale_expand = []
+    w_zerop_expand = []
+    while mgroup >= 1:
+        min_groups = torch.split(w_ele_t.min_key_axis, w_out_cnum // mgroup, dim=0)
+        max_groups = torch.split(w_ele_t.max_key_axis, w_out_cnum // mgroup, dim=0)
+        for i, min_values in enumerate(min_groups):
+            max_values = max_groups[i]
+            min_v = min_values.min().item()
+            max_v = max_values.max().item()
+            t.min = min_v
+            t.max = max_v
+            scale, zerop, w_ele_t.qmin, w_ele_t.qmax, w_ele_t.dtype = get_linear_quant_params_from_tensor(
+                t, QuantMode.to_per_tensor(node.attrs["q_mode_weight"]), node.attrs["q_bits_weight"], is_signed=True)
+            w_scale_expand.extend([scale] * min_values.shape[0])
+            w_zerop_expand.extend([zerop] * min_values.shape[0])
+
+        local_scale = multiplicator / torch.tensor(w_scale_expand, device=w_ele.device)
+        do_scale, do_scale_type, do_shift, do_shift_type = \
+            get_scale_approximation_params(local_scale,
+                                           node.attrs["q_bits_weight"],
+                                           force_shift_positive=node.force_shift_positive)
+        new_scale, new_shift = unify_shifts_for_aiff(do_scale, do_shift)
+        if new_scale.min().item() > 0 or mgroup == 1:
+            break
+        w_scale_expand.clear()
+        w_zerop_expand.clear()
+
+    scale_zp_shape = [w_ele.shape[0]] + [1 for i in range(len(w_ele.shape) - 1)]
+    w_scale_expand = torch.tensor(w_scale_expand, device=w_ele.device).reshape(scale_zp_shape)
+    w_zerop_expand = torch.tensor(w_zerop_expand, device=w_ele.device).reshape(scale_zp_shape)
+    quantized_weight = linear_quantize_clip(w_ele, w_scale_expand, w_zerop_expand, w_ele_t.qmin, w_ele_t.qmax)
+    return quantized_weight, torch.squeeze(w_scale_expand), torch.squeeze(w_zerop_expand)
+
+
 @quant_register(OpType.GRUv3)
 def gruv3_quantize(self, *args):
     q_mode_weight = self.attrs["q_mode_weight"]
@@ -280,57 +316,6 @@ def gruv3_quantize(self, *args):
     activations_list = self.get_param('activations', optional=True, default_value=['SIGMOID', 'TANH'])
     activation_alpha = self.get_param('activation_alpha', optional=True, default_value=[1, 1])
     activation_beta = self.get_param('activation_beta', optional=True, default_value=[0, 0])
-
-    weights = self.constants["weights"]
-    w = weights.betensor.permute(1, 0)
-    b = self.constants["biases"]
-    bias = b.betensor
-    gates_kernel = w[:, :2 * cell_size]
-    candidate_kernel = w[:, 2 * cell_size:]
-
-    gates_bias = bias[: 2 * cell_size]
-    candidate_bias = bias[2 * cell_size: 3 * cell_size]
-
-    quantized_w = []
-    w_scale = []
-    w_zerop = []
-    for idx, weights_name in enumerate(split_weights_name):
-        w_scale_expand = []
-        w_zerop_expand = []
-        w_ele_t = self.constants[weights_name]
-        w_ele_t.qbits = q_bits_weight
-        w_ele_t.qinvariant = False
-        w_ele = self.constants[weights_name].betensor
-        w_ele_t.scale, w_ele_t.zerop, w_ele_t.qmin, w_ele_t.qmax, w_ele_t.dtype = \
-            get_linear_quant_params_from_tensor(w_ele_t, q_mode_weight, w_ele_t.qbits, is_signed=True)
-        if QuantMode.is_per_channel(q_mode_weight):
-            w_scale_expand = list(w_ele_t.scale.cpu().numpy())
-            w_zerop_expand = list(w_ele_t.zerop.cpu().numpy())
-        else:
-            w_scale_expand.extend([w_ele_t.scale] * w_ele.shape[0])
-            w_zerop_expand.extend([w_ele_t.zerop] * w_ele.shape[0])
-        scale_zp_shape = [w_ele.shape[0]] + [1 for i in range(len(w_ele.shape)-1)]
-        w_scale.append(w_ele_t.scale)
-        w_zerop.append(w_ele_t.zerop)
-        w_scale_expand = torch.tensor(w_scale_expand, device=inp.betensor.device)
-        w_zerop_expand = torch.tensor(w_zerop_expand, device=inp.betensor.device)
-        quantized_ele = linear_quantize_clip(w_ele_t.betensor, w_scale_expand.reshape(scale_zp_shape),
-                                             w_zerop_expand.reshape(scale_zp_shape), w_ele_t.qmin, w_ele_t.qmax)
-        quantized_w.append(quantized_ele)
-        self.constants.pop(weights_name)
-    quantized_wx_gk, quantized_wh_gk, quantized_wx_ck, quantized_wh_ck = quantized_w
-    wx_gk_t_scale, wh_gk_t_scale, wx_ck_t_scale, wh_ck_t_scale = w_scale
-
-    # quantized weights
-    gate_kernel_q = torch.cat((quantized_wx_gk, quantized_wh_gk), dim=1)
-    cand_kernel_q = torch.cat((quantized_wx_ck, quantized_wh_ck), dim=1)
-    quantized_weight = torch.cat((gate_kernel_q, cand_kernel_q), dim=0).contiguous()
-    weights.scale = w_scale
-    weights.zerop = w_zerop
-    weights.betensor = quantized_weight
-    weights.qbits = q_bits_weight
-    weights.dtype = bits2dtype(weights.qbits, is_signed=True)
-    weights.qinvariant = False
 
     h_all = self.placeholders[0]
     h_all.scale, h_all.zerop, h_all.qmin, h_all.qmax, h_all.dtype = \
@@ -366,10 +351,66 @@ def gruv3_quantize(self, *args):
     f_in_scale, g_in_scale = activations_in_scale
     f_out_scale, g_out_scale = activations_out_scale
 
+    if self.attrs['unify_shifts_for_aiff'] and QuantMode.is_per_channel(q_mode_weight):
+        # quantize wx_gk_t_scale
+        quantized_wx_gk, wx_gk_t_scale, wx_gk_t_zerop = adaptation_weights_for_unify_shifts_for_aiff(
+            self, 'wx_gk', f_in_scale / inp.scale)
+        quantized_wh_gk, wh_gk_t_scale, wh_gk_t_zerop = adaptation_weights_for_unify_shifts_for_aiff(
+            self, 'wh_gk', inp.scale * wx_gk_t_scale / h_scale)
+        quantized_wx_ck, wx_ck_t_scale, wx_ck_t_zerop = adaptation_weights_for_unify_shifts_for_aiff(
+            self, 'wx_ck', g_in_scale / inp.scale)
+        quantized_wh_ck, wh_ck_t_scale, wh_ck_t_zerop = adaptation_weights_for_unify_shifts_for_aiff(
+            self, 'wh_ck', inp.scale * wx_ck_t_scale / (h_scale * f_out_scale))
+        w_scale_expand = [wx_gk_t_scale, wh_gk_t_scale, wx_ck_t_scale, wh_ck_t_scale]
+        w_zerop_expand = [wx_gk_t_zerop, wh_gk_t_zerop, wx_ck_t_zerop, wh_ck_t_zerop]
+        [self.constants.pop(weights_name) for weights_name in split_weights_name]
+    else:
+        w_scale_expand = []
+        w_zerop_expand = []
+        quantized_w = []
+        for idx, weights_name in enumerate(split_weights_name):
+            w_ele_t = self.constants[weights_name]
+            w_ele = w_ele_t.betensor
+            w_ele_t.scale, w_ele_t.zerop, w_ele_t.qmin, w_ele_t.qmax, w_ele_t.dtype = \
+                get_linear_quant_params_from_tensor(w_ele_t, q_mode_weight, q_bits_weight, is_signed=True)
+            if QuantMode.is_per_channel(q_mode_weight):
+                w_scale_expand.append(w_ele_t.scale)
+                w_zerop_expand.append(w_ele_t.zerop)
+                scale_zp_shape = [w_ele.shape[0]] + [1 for i in range(len(w_ele.shape) - 1)]
+                quantized_weight = linear_quantize_clip(w_ele, w_scale_expand[idx].reshape(scale_zp_shape),
+                                                        w_zerop_expand[idx].reshape(scale_zp_shape), w_ele_t.qmin,
+                                                        w_ele_t.qmax)
+            else:
+                w_scale_expand.append(torch.tensor(w_ele_t.scale, device=w_ele.device))
+                w_zerop_expand.append(torch.tensor(w_ele_t.zerop, device=w_ele.device))
+                quantized_weight = linear_quantize_clip(
+                    w_ele, w_scale_expand[idx], w_zerop_expand[idx], w_ele_t.qmin, w_ele_t.qmax)
+            quantized_w.append(quantized_weight)
+            self.constants.pop(weights_name)
+        wx_gk_t_scale, wh_gk_t_scale, wx_ck_t_scale, wh_ck_t_scale = w_scale_expand
+        wx_gk_t_zerop, wh_gk_t_zerop, wx_ck_t_zerop, wh_ck_t_zerop = w_zerop_expand
+        quantized_wx_gk, quantized_wh_gk, quantized_wx_ck, quantized_wh_ck = quantized_w
+
+    gate_kernel_q = torch.cat((quantized_wx_gk, quantized_wh_gk), dim=1)
+    cand_kernel_q = torch.cat((quantized_wx_ck, quantized_wh_ck), dim=1)
+    quantized_weight = torch.cat((gate_kernel_q, cand_kernel_q), dim=0).contiguous()
+    weights = self.constants["weights"]
+    weights.scale = w_scale_expand
+    weights.zerop = w_zerop_expand
+    weights.betensor = quantized_weight
+    weights.qbits = q_bits_weight
+    weights.dtype = bits2dtype(weights.qbits, is_signed=True)
+    weights.qinvariant = False
+
     # quantized bias
+    b = self.constants["biases"]
+    bias = b.betensor
+    gates_bias = bias[: 2 * cell_size]
+    candidate_bias = bias[2 * cell_size: 3 * cell_size]
     xwg_scale = inp.scale * wx_gk_t_scale
     hwg_scale = h_scale * wh_gk_t_scale
-    gb_scale = torch.min(xwg_scale, hwg_scale) if isinstance(xwg_scale, torch.Tensor) else min(xwg_scale, hwg_scale)
+    # torch.min(xwg_scale, hwg_scale) if isinstance(xwg_scale, torch.Tensor) else min(xwg_scale, hwg_scale)
+    gb_scale = xwg_scale
     zerop = 0
     qmin = -2**(q_bits_bias-1)
     qmax = 2**(q_bits_bias-1) - 1
@@ -388,11 +429,18 @@ def gruv3_quantize(self, *args):
             get_scale_approximation_params(hidden_out_placeholders.scale / (h_scale * wh_ck_t_scale),
                                            q_bits_activation,
                                            force_shift_positive=self.force_shift_positive)
-
-        self.params["hidden_shift_value"] = int(hidden_shift)
-        self.params["hidden_shift_type"] = hidden_shift_type
-        self.params["hidden_scale_value"] = int(hidden_scale)
-        self.params["hidden_scale_type"] = hidden_scale_type
+        if QuantMode.is_per_channel(q_mode_weight):
+            self.constants["hidden_scale"] = PyTensor(
+                self.name + "/hidden_scale", hidden_scale.cpu().numpy().astype(dtype2nptype(hidden_scale_type)))
+            self.constants["hidden_scale"].dtype = hidden_scale_type
+            self.constants["hidden_shift"] = PyTensor(
+                self.name + "/hidden_shift", hidden_shift.cpu().numpy().astype(dtype2nptype(hidden_shift_type)))
+            self.constants["hidden_shift"].dtype = hidden_shift_type
+        else:
+            self.params["hidden_shift_value"] = int(hidden_shift)
+            self.params["hidden_shift_type"] = hidden_shift_type
+            self.params["hidden_scale_value"] = int(hidden_scale)
+            self.params["hidden_scale_type"] = hidden_scale_type
 
         hidden_bias = bias[3 * cell_size:]
         hidden_bias_scale = h_scale * wh_ck_t_scale
@@ -405,8 +453,8 @@ def gruv3_quantize(self, *args):
         quantized_bias = torch.zeros([0], device=inp.betensor.device)
 
     xwc_scale = inp.scale * wx_ck_t_scale
-    cb_scale = torch.min(xwc_scale, hwc_scale) if isinstance(xwc_scale, torch.Tensor) else min(
-        xwc_scale, hwc_scale)  # xwc_scale if xwc_scale <= hwc_scale else hwc_scale
+    # torch.min(xwc_scale, hwc_scale) if isinstance(xwc_scale, torch.Tensor) else min(xwc_scale, hwc_scale)  # xwc_scale if xwc_scale <= hwc_scale else hwc_scale
+    cb_scale = xwc_scale
     candidate_bias_q = linear_quantize_clip(candidate_bias, cb_scale, zerop, qmin, qmax)
     quantized_bias = torch.cat((gates_bias_q, candidate_bias_q, quantized_bias), dim=0)
     b.zerop = 0

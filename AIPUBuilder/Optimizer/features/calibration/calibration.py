@@ -45,14 +45,24 @@ def apply_calibration_strategy(t, strategy, quantize_method):
 
 def apply_global_calibration(g, cdataloader, strategy):
     cstrategy = strategy.lower().strip()
-    if cstrategy != 'none':
+    from AIPUBuilder.Optimizer.config import GlobalCalibrationParamField
+    valid, methods = GlobalCalibrationParamField._parse(cstrategy)
+    if valid:
         OPT_INFO('applying global calibration strategy: ' + str(strategy))
-        if len(re.findall('easy_quant', cstrategy)) > 0:
-            easy_quant_global_calibration(g, cdataloader, cstrategy)
-        elif len(re.findall('adaround', cstrategy)) > 0:
-            adaround_global_calibration(g, cdataloader, cstrategy)
-        elif len(re.findall('svd_quant', cstrategy)) > 0:
-            from AIPUBuilder.Optimizer.experiment.svd_based_calibration import svd_based_quant_global_calibration
-            svd_based_quant_global_calibration(g, cdataloader, cstrategy)
-        else:
-            pass
+        for method in methods:
+            mname = method[0]
+            mparams = method[1]
+            mscopes = method[2]
+            if 'easy_quant' == mname:
+                easy_quant_global_calibration(g, cdataloader, mparams, mscopes)
+            elif 'adaround' == mname:
+                adaround_global_calibration(g, cdataloader, mparams, mscopes)
+            elif 'adaquant_zy' == mname:
+                adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes)
+            elif 'svd_quant' == mname:
+                svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
+            elif 'mvn_correction' == mname:
+                from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
+                mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
+            else:
+                pass

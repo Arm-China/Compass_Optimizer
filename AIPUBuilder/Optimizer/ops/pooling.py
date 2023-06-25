@@ -61,7 +61,7 @@ def pooling(self, *args):
         inp = torch.nn.functional.pad(inp, padding, value=pvalue)
         y = torch.nn.functional.max_pool2d(inp.float(),
                                            kernel_size=kernel_size,
-                                           stride=stride, padding=0,
+                                           stride=stride, padding=0, dilation=dilation,
                                            ceil_mode=ceil_mode)
         out.betensor = nchw2nhwc(y)
     elif pmethod == 'AVG':
@@ -149,89 +149,63 @@ def pooling(self, *args):
 
         self.outputs[0].betensor = nchw2nhwc(y)
 
-    elif pmethod == "L1":
+    elif pmethod in ["L1", "L2"]:
+        p = 1 if pmethod == "L1" else 2
         padding_value = -self.inputs[0].zerop if self.quantized else 0
         zerop = self.inputs[0].zerop if self.quantized else 0
         inp = torch.nn.functional.pad(inp, padding, value=padding_value)
         inp += zerop
-        # Here abs is consistent with OnNX, but Torch doesn't need abs
-        inp = torch.abs(inp)
-        if ceil_mode:
-            batch = inp.shape[0]
-            _, out_h, out_w, channel = self.outputs[0].ir_shape
-            inp_h, inp_w = inp.shape[2], inp.shape[3]
-            last_endY = (out_h - 1) * stride[0] + kernel_size[0]
-            last_endX = (out_w - 1) * stride[1] + kernel_size[1]
-            padding_right = max(0, last_endX - inp_w)
-            padding_bottom = max(0, last_endY - inp_h)
-            padding_diff = (0, padding_right, 0, padding_bottom)
-            inp = torch.nn.functional.pad(inp, padding_diff, value=0)
-        lppool = torch.nn.LPPool2d(
-            norm_type=1, kernel_size=kernel_size, stride=stride, ceil_mode=ceil_mode)
-        l1_output = lppool(inp)
-        if self.quantized:
-            act_qmin, act_qmax = bits2range(32, False)
-            shift = self.params["shift_value"]
-            scale = self.params["scale_value"]
-            l1_output = torch.clamp(l1_output, act_qmin, act_qmax)
-            l1_output = linear_requantize(
-                l1_output, scale, shift, out.zerop, out.qmin, out.qmax)
-        out.betensor = nchw2nhwc(l1_output)
-
-    elif pmethod == "L2":
-        padding_value = -self.inputs[0].zerop if self.quantized else 0
-        zerop = self.inputs[0].zerop if self.quantized else 0
-        inp = torch.nn.functional.pad(inp, padding, value=padding_value)
-        inp += zerop
-        if self.quantized:
-            batch = inp.shape[0]
-            _, out_h, out_w, channel = self.outputs[0].ir_shape
-            inp_h, inp_w = inp.shape[2], inp.shape[3]
-            output = torch.zeros(
-                (batch, channel, out_h, out_w), device=inp.device)
-            power2of_input = inp * inp
-            sqrt_lut = self.constants['sqrt_lut'].betensor
-            shift = self.params["shift_value"]
-            scale = self.params["scale_value"]
-
-            act_qmin, act_qmax = bits2range(32, False)
-            pmin, pmax = dtype2range(Dtype.UINT16)
-            startX = torch.arange(out_w) * stride[1]
-            startY = torch.arange(out_h) * stride[0]
-            endY = startY + kernel_size[0]
-            endX = startX + kernel_size[1]
-            if ceil_mode:
-                padding_right = max(0, endX.max() - inp_w)
-                padding_bottom = max(0, endY.max() - inp_h)
-                padding_diff = (0, padding_right, 0, padding_bottom)
-                power2of_input = torch.nn.functional.pad(
-                    power2of_input, padding_diff, value=0)
-
-            for r_idx in range(out_h):
-                for c_idx in range(out_w):
-                    poolpower2 = power2of_input[:, :, startY[r_idx]:endY[r_idx], startX[c_idx]:endX[c_idx]]
-                    poolsum = torch.sum(poolpower2, dim=[2, 3])  # [1,32]
-                    poolsum = torch.clamp(poolsum, act_qmin, act_qmax)
-                    poolsum = linear_requantize(
-                        poolsum, scale, shift, 0, pmin, pmax).long()
-                    poolsum2 = torch.reshape(poolsum, (-1,))
-                    poolsqrt = lookup_lut_powerof2(poolsum2, sqrt_lut, 16, False, dtype2bits(
-                        self.constants["sqrt_lut"].dtype), is_signed(self.constants["sqrt_lut"].dtype))
-                    poolsqrt = torch.reshape(poolsqrt, poolsum.shape)
-                    output[:, :, r_idx, c_idx] = poolsqrt
-            out.betensor = nchw2nhwc(output)
+        batch = inp.shape[0]
+        _, out_h, out_w, channel = self.outputs[0].ir_shape
+        inp_h, inp_w = inp.shape[2], inp.shape[3]
+        psum_placeholder = torch.zeros((batch, channel), device=inp.device)
+        output = torch.zeros((batch, channel, out_h, out_w), device=inp.device)
+        if pmethod == "L1":
+            # Here abs is consistent with OnNX, but Torch doesn't need abs
+            feature = torch.abs(inp)
         else:
-            lppool = torch.nn.LPPool2d(
-                norm_type=2, kernel_size=kernel_size, stride=stride, ceil_mode=ceil_mode)
-            output = lppool(inp)
-            out.betensor = nchw2nhwc(output)
-            power2_sum = torch.pow(out.betensor, 2)
+            feature = inp * inp
+        startX = torch.arange(out_w) * stride[1]
+        startY = torch.arange(out_h) * stride[0]
+        endY = startY + (kernel_size[0] - 1) * dilation[0] + 1
+        endX = startX + (kernel_size[1] - 1) * dilation[1] + 1
+        if ceil_mode:
+            padding_right = max(0, endX.max() - inp_w)
+            padding_bottom = max(0, endY.max() - inp_h)
+            padding_diff = (0, padding_right, 0, padding_bottom)
+            feature = torch.nn.functional.pad(feature, padding_diff, value=0)
+
+        for r_idx in range(out_h):
+            for c_idx in range(out_w):
+                pool_value = feature[:, :, startY[r_idx]:endY[r_idx]:dilation[0], startX[c_idx]:endX[c_idx]:dilation[1]]
+                poolsum = torch.sum(pool_value, dim=[2, 3])  # [1,32]
+                if self.quantized:
+                    shift = self.params["shift_value"]
+                    scale = self.params["scale_value"]
+                    act_qmin, act_qmax = bits2range(32, False)
+                    poolsum = torch.clamp(poolsum, act_qmin, act_qmax)
+                    if pmethod == "L1":
+                        pool_output = linear_requantize(poolsum, scale, shift, out.zerop, out.qmin, out.qmax)
+                    else:  # L2
+                        pmin, pmax = dtype2range(Dtype.UINT16)
+                        sqrt_lut = self.constants['sqrt_lut'].betensor
+                        poolsum = linear_requantize(poolsum, scale, shift, 0, pmin, pmax).long()
+                        poolsum2 = torch.reshape(poolsum, (-1,))
+                        poolsqrt = lookup_lut_powerof2(poolsum2, sqrt_lut, 16, False, dtype2bits(
+                            self.constants["sqrt_lut"].dtype), is_signed(self.constants["sqrt_lut"].dtype))
+                        pool_output = torch.reshape(poolsqrt, poolsum.shape)
+                else:
+                    psum_placeholder = torch.cat((psum_placeholder, poolsum.reshape(batch, -1)), dim=-1)
+                    pool_output = torch.pow(poolsum, 1/p)
+                output[:, :, r_idx, c_idx] = pool_output
+        out.betensor = nchw2nhwc(output)
+
+        if not self.quantized:
             if len(self.placeholders) < 1:
                 ph0 = PyTensor(self.name + "/power2_outputs",
-                               power2_sum.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                               psum_placeholder.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
                 self.placeholders.append(ph0)
-            self.placeholders[0].betensor = power2_sum
-
+            self.placeholders[0].betensor = psum_placeholder
     else:
         OPT_WARN('Pooling Layer does not support method = %s' % pmethod)
     if int(out.betensor.shape[1]) != int(out.ir_shape[1]) or int(out.betensor.shape[2]) != int(out.ir_shape[2]):

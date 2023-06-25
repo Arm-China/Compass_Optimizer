@@ -9,16 +9,31 @@ import torch
 
 @op_register(OpType.ZeroFraction)
 def zerofraction(self, *args):
+    batch_size_in_IR = self.get_attrs("batch_size_in_IR", optional=True, default_value=1)
     inp_t = self.inputs[0].betensor + self.inputs[0].zerop
-    total_num = inp_t.numel()
-    nonzero_num = torch.count_nonzero(inp_t)
-    zero_num = total_num - nonzero_num
+
+    if batch_size_in_IR == 0:
+        nonzero_num = torch.count_nonzero(inp_t).item()
+        batch_total_num = inp_t.numel()
+        total_zero_num = torch.tensor(batch_total_num - nonzero_num, device=inp_t.device)
+    else:
+        batch = self.inputs[0].betensor.shape[0]
+        batch_total_num = inp_t.numel() // batch
+        total_zero_num = torch.zeros([batch], device=inp_t.device)
+        for b in range(batch):
+            batch_data = inp_t[b]
+            nonzero_num = torch.count_nonzero(batch_data).item()
+            total_zero_num[b] = batch_total_num - nonzero_num
+
     if self.quantized:
         enlarge_scale = self.get_param('output_scale')
-        zero_fraction = (zero_num * enlarge_scale + total_num//2) // total_num
+        zero_fraction = torch.div((total_zero_num * enlarge_scale + batch_total_num//2),
+                                  batch_total_num, rounding_mode='floor').int()
+        zero_fraction -= self.outputs[0].zerop
     else:
-        zero_fraction = zero_num / total_num
-    self.outputs[0].betensor = torch.tensor(zero_fraction - self.outputs[0].zerop)
+        zero_fraction = total_zero_num / batch_total_num
+
+    self.outputs[0].betensor = zero_fraction
     return self.outputs[0].betensor
 
 

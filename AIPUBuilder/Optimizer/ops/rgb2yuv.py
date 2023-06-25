@@ -14,7 +14,8 @@ register_optype('RgbToYuv')
 def rgbToyuv(self, *args):
     inp = self.inputs[0].betensor  # [n,h,w,c]
     out = self.outputs[0]  # assume [n, h*w+h//2*w//2*2], TBD
-    batch, height, width = inp.shape[:3]
+    batch = self.current_batch_size if self.current_batch_size != 0 else inp.shape[0]
+    height, width = inp.shape[1:3]
     conversion = self.get_param('conversion', optional=False, default_value='BT709')
     format_ = self.get_param('format', optional=False, default_value='I420')
     # local_coe = {'BT709': [0, 0, 0, 0, 128, 128, 218, 732, 74, -118, -395, 512, 512, -465, -47],

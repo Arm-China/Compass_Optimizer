@@ -7,8 +7,8 @@ from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.ops.groupnorm import groupnorm_quantize, groupnorm
 import torch
 
-mvn_norm_prefix = ['sqrt_scale', 'sqrt_shift', 'sqrt_zp', 'scale', 'shift']
-other_norm_prefix = ['ngamma_scale', 'ngamma_shift', 'ngamma_zp', 'norm_scale', 'norm_shift']
+mvn_norm_prefix = ['scale', 'shift']
+other_norm_prefix = ['norm_scale', 'norm_shift']
 suffix = ['_value', '_type']
 
 
@@ -22,7 +22,13 @@ def update_name(node, source_list, dst_list):
 
 @quant_register(OpType.MVN)
 def mvn_quantize(self, *args):
+    gflag = False
+    if 'group' not in self.params:
+        gflag = True
+        self.params['group'] = 1
     groupnorm_quantize(self, *args)
+    if gflag:
+        self.params.pop('group')
     # update ngamma_scale to sqrt_scale for new IR
     update_name(self, other_norm_prefix, mvn_norm_prefix)
 

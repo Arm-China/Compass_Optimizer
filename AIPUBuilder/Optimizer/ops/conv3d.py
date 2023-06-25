@@ -70,5 +70,4 @@ def conv3d(self, *args):
 @quant_register(OpType.Convolution3D)
 def conv3d_quantize(self, *args):
     linear_op_quantize(self, *args)
-    absorb_input_zp_to_bias(self, *args)
-    clear_lower_bits_for_bias(self, *args)
+    absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args)

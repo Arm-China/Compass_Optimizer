@@ -18,13 +18,13 @@ def conv_transpose3d_quantize(self, *args):
         w.min_key_axis = w.min_key_axis.repeat(group)
         w.max_key_axis = w.max_key_axis.repeat(group)
     linear_op_quantize(self, *args)
-    absorb_input_zp_to_bias(self, *args)
-    w.betensor = w.betensor[:self.outputs[0].shape[-1]//group]
+    absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args)
+
+    w.betensor = w.betensor[:self.outputs[0].ir_shape[-1]//group]
     ls = w.scale
-    w.scale = ls[:self.outputs[0].shape[-1]//group] if isinstance(ls, torch.Tensor) else ls
+    w.scale = ls[:self.outputs[0].ir_shape[-1]//group] if isinstance(ls, torch.Tensor) else ls
     lz = w.zerop
-    w.zerop = lz[:self.outputs[0].shape[-1]//group] if isinstance(lz, torch.Tensor) else lz
-    clear_lower_bits_for_bias(self, *args)
+    w.zerop = lz[:self.outputs[0].ir_shape[-1]//group] if isinstance(lz, torch.Tensor) else lz
 
 
 @op_register(OpType.ConvTranspose3D)

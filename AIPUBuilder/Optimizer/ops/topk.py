@@ -131,7 +131,7 @@ def topk_quantize(self, *args):
     # out.qbits, out.dtype = range2dtype(out.extrema_min, out.extrema_max)#max(16, q_bits_activation)
     # out.dtype = bits2dtype(out.qbits, is_signed=False)
     axis = self.get_param('axis')
-    index_max = inp.shape[axis]
+    index_max = inp.ir_shape[axis]
     if index_max < 256:  # assure at least 16bit indice
         index_max = 256
     out.qbits, out.dtype = range2dtype(0, index_max, force_int=self.force_dtype_int)

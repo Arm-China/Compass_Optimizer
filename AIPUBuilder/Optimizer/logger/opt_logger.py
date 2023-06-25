@@ -91,35 +91,44 @@ if hasattr(AIPUBuilder, '__release__') and AIPUBuilder.__dict__.get('__release__
 else:
     bt_depth = -3
 
-    def get_cur_info():
-        """Return the frame object for the caller's stack frame."""
-        f = None
-        try:
-            raise Exception
-        except:
-            f = sys.exc_info()[2].tb_frame.f_back
-        return (f.f_code.co_name, f.f_lineno)
+    # def get_cur_info():
+    #     """Return the frame object for the caller's stack frame."""
+    #     f = None
+    #     try:
+    #         raise Exception
+    #     except:
+    #         f = sys.exc_info()[2].tb_frame.f_back
+    #     return (f.f_code.co_name, f.f_lineno)
 
     def get_line_number():
         try:
             raise Exception
         except:
-            fs = traceback.extract_stack()[bt_depth]
-            return fs.lineno
+            try:
+                fs = traceback.extract_stack()[bt_depth]
+                return fs.lineno
+            except:
+                return ''
 
     def get_function_name():
         try:
             raise Exception
         except:
-            fs = traceback.extract_stack()[bt_depth]
-            return fs.name
+            try:
+                fs = traceback.extract_stack()[bt_depth]
+                return fs.name
+            except:
+                return ''
 
     def get_file_name():
         try:
             raise Exception
         except:
-            fs = traceback.extract_stack()[bt_depth]
-            return fs.filename.split('/')[-1]
+            try:
+                fs = traceback.extract_stack()[bt_depth]
+                return fs.filename.split('/')[-1]
+            except:
+                return ''
 
     # def get_time():
     #     """Return the asctime."""

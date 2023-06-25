@@ -130,7 +130,6 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
             soft_nms_sigma = -0.5 / self.get_param('soft_nms_sigma')
             ious = inter / union
             score_cand = score_cand * torch.exp(soft_nms_sigma * ious * ious)
-
     boxNum_perclass = keep_idx
     if self.quantized:
         box_scale = self.params['scale_value']
@@ -176,7 +175,7 @@ def single_nms(self, box, score, max_nms_box_num):
     device = x0[0].device
     while order.size()[0] > 0:
         i = order[0]
-        if score[i] <= score_threshold:
+        if score[i].float() <= score_threshold:
             break
         boxNum_perclass_single += 1
 

@@ -32,9 +32,10 @@ class SSDPostProcess(object):
         'image_height': 320,
         'image_width': 320,
         'iou_threshold': 0.6,
-        # 'method': 'GAUSSIAN',
+        'method': 'GAUSSIAN',
+        'max_output_size': 100,
         # if method == GAUSSIAN, then optimizer nms needs the parameter of score_threshold
-        # 'score_threshold': 0.0,
+        'score_threshold': 0.0,
     }
 
     def __init__(self, decodebox_params=None, nms_params=None):
@@ -61,8 +62,9 @@ class SSDPostProcess(object):
             'image_height': self.get_params(nms_params, 'image_height', SSDPostProcess.nms_default_params),
             'image_width': self.get_params(nms_params, 'image_width', SSDPostProcess.nms_default_params),
             'iou_threshold': self.get_params(nms_params, 'iou_threshold', SSDPostProcess.nms_default_params),
-            # 'method': self.get_params(nms_params, 'method', SSDPostProcess.nms_default_params),
-            # 'score_threshold': self.get_params(nms_params, 'score_threshold', SSDPostProcess.nms_default_params),
+            'method': self.get_params(nms_params, 'method', SSDPostProcess.nms_default_params),
+            'max_output_size': self.get_params(nms_params, 'max_output_size', SSDPostProcess.nms_default_params),
+            'score_threshold': self.get_params(nms_params, 'score_threshold', SSDPostProcess.nms_default_params),
         }
         self.aipu_decodebox = None
         self.aipu_nms = None

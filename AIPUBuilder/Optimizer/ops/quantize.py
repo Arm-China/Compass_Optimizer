@@ -12,7 +12,13 @@ register_optype('Quantize')
 def quantize_quant(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
-    # unquantifiable op will not call quantize function
+    out.scale = inp.scale
+    out.zerop = inp.zerop
+    out.qbits = inp.qbits
+    out.dtype = inp.dtype
+    out.qinvariant = inp.qinvariant
+    out.qmin = inp.qmin
+    out.qmax = inp.qmax
 
 
 @op_register(OpType.Quantize)

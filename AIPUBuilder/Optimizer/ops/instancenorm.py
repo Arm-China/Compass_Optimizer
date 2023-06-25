@@ -10,7 +10,21 @@ import torch
 
 @quant_register(OpType.InstanceNorm)
 def instancenorm_quantize(self, *args):
+    aflag = False
+    if 'axis' not in self.params:
+        aflag = True
+        input_dim = len(self.inputs[0].ir_shape)
+        axis_param = [axis for axis in range(1, input_dim - 1)]
+        self.params['axis'] = axis_param
+    gflag = False
+    if 'group' not in self.params:
+        gflag = True
+        self.params['group'] = 1
     groupnorm_quantize(self, *args)
+    if aflag:
+        self.params.pop('axis')
+    if gflag:
+        self.params.pop('group')
 
 
 @op_register(OpType.InstanceNorm)

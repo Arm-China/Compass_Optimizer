@@ -23,7 +23,7 @@ class FlattenCosDistanceMetric(OptBaseMetric):
             if len(o_p.shape):
                 b = o_p.shape[0]
                 x = o_p.reshape(b, -1).float()
-                y = o_t[0].reshape(b, -1).float()
+                y = o_t.reshape(b, -1).float()
                 sim = numpy.mean(self.cos(x, y).cpu().flatten().numpy())
             else:  # if output is a scalar
                 x = o_p

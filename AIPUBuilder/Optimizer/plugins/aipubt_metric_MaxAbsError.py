@@ -19,7 +19,7 @@ class MaxAbsErrorMetric(OptBaseMetric):
         sim_per_output = []
         for o_p, o_t in zip(pred, target):
             x = o_p.float().reshape(-1)
-            y = o_t[0].float().reshape(-1)
+            y = o_t.float().reshape(-1)
             sim_per_output.append(torch.max(torch.abs(x - y)).cpu().numpy())
         self.errors.append(sim_per_output)
 

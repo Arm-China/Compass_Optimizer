@@ -12,8 +12,7 @@ import torch
 @quant_register(OpType.BatchNorm)
 def batch_norm_quantize(self, *args):
     linear_op_quantize(self, *args)
-    absorb_input_zp_to_bias(self, *args)
-    clear_lower_bits_for_bias(self, *args)
+    absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args)
 
 #Cf = If * Wf + Bf
 # (Cq + Zc)/Sc = ((Iq + Zq) / Si) * ((Wq + Zw)/Sw) + (Bq + Zb)/Sb

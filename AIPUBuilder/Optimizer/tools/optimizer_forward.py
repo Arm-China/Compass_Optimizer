@@ -64,20 +64,20 @@ class OptForward(object):
         output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in qgraph.output_tensors]
         return input_tensors, output_tensors
 
-    def _float_forward(self, data):
+    def _float_forward(self, data, keep_tensors=False):
         input_data = self.check_input_data(data)
         if input_data:
-            output = self.optimizer.g.forward(input_data)
+            output = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
             output_data = [o.betensor.cpu().numpy() for o in output]
         else:
             output_data = None
 
         return output_data
 
-    def _quantized_forward(self, data, transfer_to_float):
+    def _quantized_forward(self, data, transfer_to_float, keep_tensors=False):
         input_data = self.check_input_data(data)
         if input_data:
-            out = self.optimizer.g.qforward(input_data)
+            out = self.optimizer.g.qforward(input_data, keep_tensors=keep_tensors)
             if transfer_to_float:
                 output_data = [linear_dequantize(o.betensor, o.scale, o.zerop).cpu().numpy() for o in out]
             else:
@@ -87,14 +87,14 @@ class OptForward(object):
 
         return output_data
 
-    def forward(self, data, transfer_to_float=True):
+    def forward(self, data, transfer_to_float=True, keep_tensors=False):
         if self.forward_type == 'float':
-            out = self._float_forward(data)
+            out = self._float_forward(data, keep_tensors=keep_tensors)
         else:
-            out = self._quantized_forward(data, transfer_to_float=transfer_to_float)
+            out = self._quantized_forward(data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
         return out
 
-    def forward_with_quantized_data(self, quantized_data, transfer_to_float=True, batch_size=1):
+    def forward_with_quantized_data(self, quantized_data, transfer_to_float=True, batch_size=1, keep_tensors=False):
         '''default this function is used in quantized graph forward'''
 
         if self.optimizer.g.quantgraph is None:
@@ -107,5 +107,5 @@ class OptForward(object):
         for data, inp_t in zip(input_data, input_tensors):
             d = (data.astype('int64') + inp_t.zerop) / inp_t.scale
             dequantized_data.append(d)
-        out = self._quantized_forward(dequantized_data, transfer_to_float=transfer_to_float)
+        out = self._quantized_forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
         return out

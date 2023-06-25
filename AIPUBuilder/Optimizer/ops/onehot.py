@@ -34,12 +34,17 @@ def onehot(self, *args):
     classes_number = int(self.params['depth'])
 
     trans_inp = torch.transpose(inp.unsqueeze(axis), axis, -1)
-    legal_data_flag = (trans_inp >= 0) * (trans_inp < classes_number)
-    trans_inp = trans_inp*legal_data_flag
+    invalid_mask = torch.bitwise_or(trans_inp < 0, trans_inp >= classes_number)
+    trans_inp[invalid_mask] = 0
+    # legal_data_flag = (trans_inp >= 0) * (trans_inp < classes_number)
+    # trans_inp = trans_inp*legal_data_flag
     trans_y = torch.nn.functional.one_hot(trans_inp, classes_number)
-    trans_y[..., 0] = trans_y[..., 0]*legal_data_flag
+    trans_y[invalid_mask, :] = 0
+    # trans_y[..., 0] = trans_y[..., 0]*legal_data_flag
     y = torch.transpose(trans_y.squeeze(-2), new_axis, -1)
     out.betensor = y*(on_value-off_value) + off_value
+    if self.quantized:
+        out.betensor = torch.clamp(out.betensor, out.qmin, out.qmax).int()
     return out.betensor
 
 
@@ -47,34 +52,33 @@ def onehot(self, *args):
 def onehot_quantize(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
+    q_mode_activation = self.attrs["q_mode_activation"]
     off_value_ = self.params['values'][0]
     on_value_ = self.params['values'][1]
-    quan_off_value, quan_on_value = self.params['values'][0], self.params['values'][1]
-    # torch.max(abs(torch.Tensor([quan_on_value, quan_off_value])))
-    on_off_max = max(abs(quan_on_value), abs(quan_off_value))
-    obits = self.attrs['q_bits_activation']
-
-    if self.params['values'][0] < 0 or self.force_dtype_int:
-        osigned = True
-        o_min = -(2**(obits-1))
-        o_max = (2**(obits-1)-1)
-        out_scale = (2**(obits-1)-1) / on_off_max
-        quan_on_value = max(min(int(round(on_value_ * out_scale)), o_max), o_min)
-        quan_off_value = max(min(int(round(off_value_ * out_scale)), o_max), o_min)
+    min_value = min(off_value_, on_value_)
+    max_value = max(off_value_, on_value_)
+    obits, out_signed = range2bits(min_value, max_value)
+    if inp.qinvariant:
+        if (type(off_value_) == int and type(on_value_) == int) \
+                or ((off_value_ - int(off_value_) < OPT_EPSILON) and (on_value_ - int(on_value_) < OPT_EPSILON)):
+            out.qinvariant = True
+            out.scale = 1
+            out.zerop = 0
+            out.qbits = max(obits, 8)
+            out.dtype = bits2dtype(out.qbits, is_signed=out_signed)
+            out.qmin, out.qmax = dtype2range(out.dtype)
+        else:
+            out.min = min_value
+            out.max = max_value
+            out.qbits = self.attrs['q_bits_activation']
+            out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
+                out, q_mode_activation, out.qbits, is_signed=out_signed)
+            out.qinvariant = False
+            quan_on_value = linear_requantize(on_value_, out.scale, 0, out.zerop, out.qmin, out.qmax).int().item()
+            quan_off_value = linear_requantize(off_value_, out.scale, 0, out.zerop, out.qmin, out.qmax).int().item()
+            self.params['values'] = [quan_off_value, quan_on_value]
     else:
-        osigned = False
-        o_min = 0
-        o_max = (2**(obits)-1)
-        out_scale = (2**(obits)-1) / on_off_max
-        quan_on_value = max(min(int(round(on_value_ * out_scale)), o_max), o_min)
-        quan_off_value = max(min(int(round(off_value_ * out_scale)), o_max), o_min)
-
-    # self.params['on_value']=quan_on_value
-    # self.params['off_value']=quan_off_value
-    self.params['values'] = [quan_off_value, quan_on_value]
-    self.params['depth'] = int(self.params['depth'])
-    out.scale = out_scale
-    out.zerop = 0
-    out.qbits = obits
-    out.dtype = bits2dtype(obits, is_signed=osigned, use_float=False)
-    out.qinvariant = inp.qinvariant
+        OPT_FATAL(
+            'currently only support input qinvariant is True. but currently input qinvariant is False.layer_id=%s, layer_name=%s' % (
+                self.attrs['layer_id'], self.name),
+            workflow_name='forward', op_name=str(self.type))

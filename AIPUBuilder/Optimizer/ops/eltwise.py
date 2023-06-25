@@ -210,8 +210,8 @@ def eltwise(self, *args):
     inp0 = self.inputs[0]
     inp1 = self.inputs[1]
     out = self.outputs[0]
-    x0 = inp0.betensor.float()
-    x1 = inp1.betensor.float()
+    x0 = inp0.betensor.to(torch.int64) if self.quantized else inp0.betensor.float()
+    x1 = inp1.betensor.to(torch.int64) if self.quantized else inp1.betensor.float()
     x_scale = 1.0
     x_zerop = 0
     if len(self.placeholders) < 1:
@@ -233,36 +233,9 @@ def eltwise(self, *args):
     x1shape = list(x1.shape)
     x0dims = len(x0shape)
     x1dims = len(x1shape)
-    # broadcasting
-    if x0dims > x1dims and x1dims > 0:
-        x1shape_ext = []
-        dx_pre = -1
-        for d in x1shape:
-            dx = x0shape[dx_pre+1:].index(d) + dx_pre+1
-            x1shape_ext.extend([1]*(dx-dx_pre))
-            x1shape_ext[dx] = d
-            dx_pre = dx
-        x1shape_ext.extend([1]*(x0dims-len(x1shape_ext)))
-        x1shape = x1shape_ext
-    elif x1dims > x0dims and x0dims > 0:
-        x0shape_ext = []
-        dx_pre = -1
-        for d in x0shape:
-            dx = x1shape[dx_pre+1:].index(d) + dx_pre+1
-            x0shape_ext.extend([1]*(dx-dx_pre))
-            x0shape_ext[dx] = d
-            dx_pre = dx
-        x0shape_ext.extend([1]*(x1dims-len(x0shape_ext)))
-        x0shape = x0shape_ext
-    else:
-        pass
-    if len(x1shape) > x1dims:
-        OPT_DEBUG(
-            f'the second input broadcasting from {list(x1.shape)} to {x1shape} in node: {self.name}', log_once=True)
-    if len(x0shape) > x0dims:
-        OPT_DEBUG(
-            f'the first input broadcasting from {list(x0.shape)} to {x0shape} in node: {self.name}', log_once=True)
-    x = op(x0.reshape(x0shape), x1.reshape(x1shape))
+    # broadcasting, shape align
+    x0, x1 = broadcasting_transform(x0, x1)
+    x = op(x0, x1)
 
     requant_scale = 1
     requant_shift = 0

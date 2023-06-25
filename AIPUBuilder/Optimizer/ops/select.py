@@ -19,7 +19,7 @@ def select_forward(self, *args):
     if self.quantized:
         scale1, scale2 = self.params["scale_value"]
         shift1, shift2 = self.params["shift_value"]
-        condition += inp0.zerop
+        condition = condition.int() + inp0.zerop
         x1 = linear_requantize(x1 + inp1.zerop, scale1, shift1, out.zerop, out.qmin, out.qmax)
         x2 = linear_requantize(x2 + inp2.zerop, scale2, shift2, out.zerop, out.qmin, out.qmax)
     dim_num = max(max(x1.dim(), x2.dim()), condition.dim())

@@ -118,14 +118,20 @@ class PyTensor:
             self.dtype = torch_type2dtype(self.betensor.dtype) if dtype is None else dtype
         if opt_use_cuda():
             self.betensor = self.betensor.cuda()
+        self.ir_shape = TensorShape(self.betensor.shape)
 
     def clone(self, name=None):
         import copy
+        import torch
         if name is None:
             name = self.name + '_clone'
         t = self.__class__(name, self.betensor)
         for k in _tensor_default_property.keys():
-            t.__setattr__(k, copy.deepcopy(self.__getattribute__(k)))
+            v = self.__getattribute__(k)
+            if isinstance(v, torch.Tensor):
+                t.__setattr__(k, v.clone().detach())
+            else:
+                t.__setattr__(k, copy.deepcopy(v))
         return t
 
     def statistic(self,

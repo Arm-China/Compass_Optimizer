@@ -2,25 +2,38 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from AIPUBuilder.Optimizer.framework import *
+from queue import Queue
 
 
 def get_ancestors(node):
+    q = Queue(maxsize=0)
+    # total parent path node
     ancestors = []
     visited = {}
 
     def traverse_parents(node):
+        count_root = 0
+        count_constant = 0
         if node:
-            if len(node.parents) < 1:
-                ancestors.append(node)
-            else:
-                for nparent in node.parents:
-                    traverse_parents(nparent)
-            if node.name not in visited:
-                node.forward()  # get node's outputs by the way
-                visited[node.name] = True
-        return
-    traverse_parents(node)
-    return ancestors
+            q.put(node)
+            ancestors.append(node)
+            visited[node.name] = True
+
+            while(q.qsize()):
+                current_node = q.get()
+                # get count_root and count_constant by the way
+                if len(current_node.parents) < 1:
+                    count_root += 1
+                if current_node.type == OpType.Constant:
+                    count_constant += 1
+                for nparent in current_node.parents:
+                    if nparent.name not in visited:
+                        visited[nparent.name] = True
+                        q.put(nparent)
+                        ancestors.insert(0, nparent)
+        return count_root, count_constant
+    count_root, count_constant = traverse_parents(node)
+    return ancestors, count_root, count_constant
 
 
 def criteria(n):
@@ -33,12 +46,10 @@ def criteria(n):
                     break
             if pow_parent:
                 break
-        pow_nods = get_ancestors(pow_parent)
-        count_constant = 0
-        for itm in pow_nods:
-            if itm.type == OpType.Constant:
-                count_constant += 1
-        if count_constant > 0 and count_constant == len(pow_nods):
+        pow_nods, count_root, count_constant = get_ancestors(pow_parent)
+        if count_root > 0 and count_root == count_constant:
+            for node in pow_nods:
+                node.forward()
             unq = n.inputs[1].betensor.unique()
             if unq.numel() == 1:
                 return True

@@ -211,7 +211,7 @@ def lstm(self, *args):
             for ts in range(time_step):
                 in_ts = torch.reshape(input_seq[b, ts, :], (-1, input_size)).float()
                 x_by_wx = torch.matmul(in_ts, wx_q)
-                h_by_wh = torch.matmul(h_prev, wh_q)
+                h_by_wh = torch.matmul(h_prev.to(wh_q.dtype), wh_q)
                 if dtype == 'int8':
                     re_scaled_h_by_wh = linear_requantize(h_by_wh, scale_[0], shift_[0], 0, act_qmin, act_qmax)
                     mat_sum = x_by_wx + re_scaled_h_by_wh + bias
@@ -268,7 +268,7 @@ def lstm(self, *args):
 
                 re_scaled_c_tmp = linear_requantize(c_tmp, scale_[3], shift_[3]-diff_shift, 0, qmin+1, qmax)
                 ctmp_lut_out = lookup_lut_powerof2(re_scaled_c_tmp, h_table, lut_in_bits, True, lut_out_bits, True)
-                h_prev = torch.multiply(o, ctmp_lut_out)
+                h_prev = torch.multiply(o, ctmp_lut_out).float()
                 h_prev = linear_requantize(h_prev, scale_[4], shift_[4], 0, qmin+1, qmax)
                 c_prev = linear_requantize(c_tmp, scale_[5 + 2 * ts + 1], shift_[5 + 2 * ts + 1]-diff_shift,
                                            c_zerop[2 * ts + 1], qmin+1, qmax)

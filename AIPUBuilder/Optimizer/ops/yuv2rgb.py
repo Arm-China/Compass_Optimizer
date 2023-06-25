@@ -14,7 +14,7 @@ register_optype('YuvToRgb')
 def yuvTorgb(self, *args):
     inp = self.inputs[0].betensor  # assume [n, h*w+h//2*w//2*2], TBD
     out = self.outputs[0]  # [n,h,w,c]
-    batch = self.current_batch_size
+    batch = self.current_batch_size if self.current_batch_size != 0 else inp.shape[0]
     height = self.outputs[0].ir_shape[1]
     width = self.outputs[0].ir_shape[2]
     conversion = self.get_param('conversion', optional=True, default_value='BT709')

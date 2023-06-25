@@ -258,6 +258,8 @@ def get_info_from_graph(graph, batch_dim=0):
         batch_size = None
         batch_size_list = []
         for inp_t in g.input_tensors:
+            if len(inp_t.ir_shape) == 0:  # scalar input shape
+                continue
             if len(inp_t.ir_shape) in [3, 4, 5]:
                 batch_size = inp_t.ir_shape[batch_dim]
                 break

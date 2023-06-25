@@ -387,7 +387,9 @@ def generate_lut_with_placeholders(node, activation_idx, activation, q_mode_acti
     out_scale = ph_out.scale
 
     if with_clamp:
-        length = ph_in.betensor.numel()
+        length = 1
+        for s in ph_in.ir_shape:
+            length *= s
         lut_in = torch.linspace(ph_in.min, ph_in.max, steps=length)
         lut_out = g_rnn_activation_func[activation][1](lut_in)
         ph_out.min = lut_out.min().item()

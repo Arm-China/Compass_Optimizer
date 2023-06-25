@@ -10,6 +10,7 @@ from AIPUBuilder.Optimizer.plugins.aipubt_op_ssd_postprocess import SSDPostProce
 from collections import defaultdict
 import numpy as np
 import os
+import json
 
 
 @register_plugin(PluginType.Metric, '1.0')
@@ -22,24 +23,34 @@ class MobileDetSSDmAPMetric(mAPMetric):
 
     iou_thresh = 0.5
 
-    def __init__(self, anchor_path=None, model_name=None):
+    def __init__(self, anchor_path=None, decodebox_json_path=None, nms_json_path=None, class_num=90, model_name=None):
         super().__init__()
+        self.class_num = int(class_num)
+        self.db_params = {}
+        self.nms_params = {}
+
         self.coco_80_label_map = self.get_label_map()
 
         if anchor_path is not None:
             if not os.path.exists(anchor_path):
                 OPT_ERROR(f"please check the anchor_path={anchor_path} which is not existed")
             anchor = np.load(anchor_path)
-            self.db_params = {'anchor': anchor}
-        # self.postprocess = SSDPostProcess(decodebox_params=db_params)
+            self.db_params.update({'anchor': anchor})
+        if decodebox_json_path is not None:
+            with open(decodebox_json_path, encoding="utf-8") as f:
+                db_dict = json.load(f)
+                self.db_params.update(db_dict)
+        if nms_json_path is not None:
+            with open(nms_json_path, encoding="utf-8") as f:
+                nms_dict = json.load(f)
+                self.nms_params.update(nms_dict)
         self.model_name = model_name
 
     def __call__(self, backbone_pred, target):
         assert len(backbone_pred) == 2, OPT_FATAL('please check the outputs number(should be 2)')
 
-        out_db, out_nms = SSDPostProcess(decodebox_params=self.db_params)(
+        out_db, out_nms = SSDPostProcess(decodebox_params=self.db_params, nms_params=self.nms_params)(
             input_tensors=[backbone_pred[1], backbone_pred[0]])
-
         pred = out_db + out_nms
         batch = pred[2].shape[0]
 
@@ -77,7 +88,8 @@ class MobileDetSSDmAPMetric(mAPMetric):
                                    for box_idx in range(box_num_cur_class)])
 
                 all_box_idx = all_box_idx + box_num_cur_class
-            label_id_list = [self.coco_80_label_map[ll+1] - 1 for ll in label_id_list]
+            label_id_list = [self.coco_80_label_map[ll] for ll in label_id_list]
+
             predict.update({'label_index': label_id_list})
             predict.update({'bbox': boxes_list})
             predict.update({'confidence': score_list})
@@ -89,17 +101,24 @@ class MobileDetSSDmAPMetric(mAPMetric):
         super().reset()
 
     def compute(self):
-        self.eval_mAP(self.predicts, self.targets, 80, 0)
+        self.eval_mAP(self.predicts, self.targets, self.class_num, 0)
         return self.mAP
 
     def report(self):
         return "SSDVOC mAP accuracy is %f" % (self.compute())
 
     def get_label_map(self):
-        origin_coco_labels = list(range(91))
+        origin_coco_labels = list(range(90))
         coco_80_missing_labels = [12, 26, 29, 30, 45, 66, 68, 69, 71, 83]
-        coco_80_label_map = {}
-        for l in origin_coco_labels:
-            l_offset = np.sum(l > np.array(coco_80_missing_labels, np.int64))
-            coco_80_label_map.update({l: l - l_offset})
-        return coco_80_label_map
+        coco_label_map = {}
+
+        if self.class_num == 80:
+            for l in origin_coco_labels:
+                l_offset = np.sum(l > np.array(coco_80_missing_labels, np.int64))
+                coco_label_map.update({l: l - l_offset})
+        elif self.class_num == 90:
+            coco_label_map = dict(zip(origin_coco_labels, origin_coco_labels))
+        else:
+            coco_label_map = None
+            OPT_FATAL("currently MobileDetSSDmAPMetric don't support %d(class_num) label." % (self.class_num))
+        return coco_label_map

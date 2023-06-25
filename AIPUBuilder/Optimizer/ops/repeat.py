@@ -24,9 +24,9 @@ def repeat(self, *args):
     axis = self.get_param("axis", optional=True, default_value=None)
     inp_betensors = self.inputs[0].betensor
 
-    if inp_betensors.ndim > 4:
-        OPT_FATAL("repeats dim must be less than 4")
-    if axis == None:
+    # if inp_betensors.ndim > 4:
+    #     OPT_FATAL("repeats dim must be less than 4")
+    if axis is None:
         inp_repeats = self.inputs[1].betensor.flatten().long()
         inp_betensors = self.inputs[0].betensor.flatten()
         axis = 0
@@ -35,9 +35,9 @@ def repeat(self, *args):
     # inp_repeats = torch.squeeze(inp_repeats)  # remove size 1's dim
     # out_shape = torch.squeeze(self.outputs[0].betensor).shape #remove size 1's dim
     out_shape = self.outputs[0].ir_shape
-    if ((inp_betensors.shape[axis]) != len(inp_repeats)):
+    if (inp_betensors.shape[axis]) != len(inp_repeats):
         OPT_FATAL("repeats must have the same size as input along axis ")
-    if (torch.sum(inp_repeats) > out_shape[axis]):
+    if torch.sum(inp_repeats) > out_shape[axis]:
         OPT_FATAL("repeats number are greater than output size ")
     out = torch.repeat_interleave(inp_betensors, inp_repeats, axis)
     # clone_out = torch.zeros(out_shape,device=self.inputs[0].betensor.device)
@@ -46,7 +46,7 @@ def repeat(self, *args):
     pad_params = []
     for p in range(out.ndim):
         pad_params.append(0)
-        pad_params.append(out_shape[out.ndim-1-p]-out.shape[out.ndim-1-p])
+        pad_params.append(out_shape[out.ndim - 1 - p] - out.shape[out.ndim - 1 - p])
     self.outputs[0].betensor = torch.nn.functional.pad(out, tuple(pad_params), "constant", 0)
 
     return self.outputs[0].betensor

@@ -18,6 +18,7 @@ class PyGraph:
         self.nodes = []
         self.input_tensors = ()
         self.output_tensors = ()
+        self.ref_count_tensors = {}
 
     def clone(self):
         import copy
@@ -222,6 +223,16 @@ class PyGraph:
         self.net_ = net
         return self.net_
 
+    def reset_edge_tensors_ref_count(self):
+        ref_count_tensors = {}
+        for n in self.nodes:
+            for it in n.inputs:
+                if it.name not in ref_count_tensors.keys():
+                    ref_count_tensors[it.name] = [1, it]
+                else:
+                    ref_count_tensors[it.name][0] += 1
+        self.ref_count_tensors = ref_count_tensors
+
     def add_node(self, node):
         if node not in self.nodes:
             self.nodes.append(node)
@@ -272,11 +283,15 @@ class PyGraph:
             for i, t in enumerate(new.outputs):
                 old.outputs = old.outputs + (t.clone(),)
 
-    def forward(self, feed_data, disable_pbar=True):
-        return self.forward_to(None, feed_data, disable_pbar)
+    def forward(self, feed_data, disable_pbar=True, keep_tensors=False):
+        return self.forward_to(None, feed_data, disable_pbar, keep_tensors)
 
-    def forward_to(self, dest_node, feed_data, disable_pbar=True):
+    def forward_to(self, dest_node, feed_data, disable_pbar=True, keep_tensors=False):
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor
+        if keep_tensors:
+            self.ref_count_tensors = {}
+        else:
+            self.reset_edge_tensors_ref_count()
         data = feed_data
         if len(self.input_tensors) == 1 and not isinstance(feed_data, list):
             data = [feed_data, ]
@@ -302,9 +317,28 @@ class PyGraph:
             for out in dest_node.outputs:
                 ret.append(out)
 
+        if keep_tensors:
+            self.ref_count_tensors = {}
+        else:
+            tz = PyTensor('null').betensor
+            for n in self.nodes:
+                for pld in n.placeholders:
+                    del pld.betensor
+                    pld.betensor = tz
+                for t in n.outputs:
+                    if t not in self.output_tensors:
+                        del t.betensor
+                        t.betensor = tz
+            self.reset_edge_tensors_ref_count()
+
         return ret
 
-    def forward_from_src_to_dst(self, src_node, dst_node, disable_pbar=True):
+    def forward_from_src_to_dst(self, src_node, dst_node, disable_pbar=True, keep_tensors=False):
+        from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor
+        if keep_tensors:
+            self.ref_count_tensors = {}
+        else:
+            self.reset_edge_tensors_ref_count()
         num = len(self.nodes)
         start = 0
         for n in self.nodes:
@@ -328,6 +362,19 @@ class PyGraph:
                     break
                 pbar.update(1)
             pbar.refresh()
+        if keep_tensors:
+            self.ref_count_tensors = {}
+        else:
+            tz = PyTensor('null').betensor
+            for n in self.nodes:
+                for pld in n.placeholders:
+                    del pld.betensor
+                    pld.betensor = tz
+                for t in n.outputs:
+                    if t not in self.output_tensors and t not in dst_node.outputs:
+                        del t.betensor
+                        t.betensor = tz
+            self.reset_edge_tensors_ref_count()
 
     def to_torch_module(self):
         torch_module = GraphModule(self.input_tensors, self.output_tensors)

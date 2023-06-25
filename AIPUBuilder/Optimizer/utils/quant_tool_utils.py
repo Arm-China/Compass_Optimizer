@@ -212,12 +212,14 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
 
 
 def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max):
-    x_t = x if isinstance(x, torch.Tensor) else torch.tensor(x)
+    x_t = construct_torch_tensor(x)
+    clamp_min_t = construct_torch_tensor(clamp_min, x_t.device)
+    clamp_max_t = construct_torch_tensor(clamp_max, x_t.device)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(scale * x_t.float() - zero_point), clamp_min, clamp_max).float()
+    y = torch.clamp(torch.round(scale * x_t.float() - zero_point), clamp_min_t, clamp_max_t).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))
-    if (xmin <= clamp_min) and (xmax >= clamp_max):
+    if xmin <= clamp_min_t.min().item() and xmax >= clamp_max_t.max().item():
         return y.to(x_type)
     else:
         return y
@@ -282,3 +284,26 @@ def linear_requantize_floor(x, multiplier, shift_bits, zero_point, clamp_min, cl
         return y.to(x_type)
     else:
         return y
+
+
+def whether_align_to_out_scale(n):
+    types_will_align_to_out_scale = (OpType.Convolution, OpType.ConvTranspose, OpType.Convolution3D, OpType.ConvTranspose3D,
+                                     OpType.DepthwiseConv, OpType.FullyConnected,
+                                     OpType.RNN, OpType.BasicLSTM, OpType.GRUv1, OpType.GRUv3,
+                                     OpType.BatchNorm,  OpType.LayerNorm, OpType.InstanceNorm, OpType.GroupNorm,
+                                     OpType.MatMul, OpType.Eltwise, OpType.Concat,
+                                     OpType.Input, OpType.Constant)
+    if n.type in types_will_align_to_out_scale:
+        return True
+    else:
+        # automatical optype judge logical for supporting more optypes
+        inp_scales = [0.5, 2.0, 10.0]
+        scale_changed = []
+        for iscale in inp_scales:
+            qn = n.clone(n.name+"_clone_")
+            if len(qn.inputs) > 0:
+                qn.inputs[0].scale = iscale
+            qn.quantize()
+            if len(qn.outputs) > 0 and qn.outputs[0].scale != iscale:
+                scale_changed.append(True)
+        return len(scale_changed) > 1

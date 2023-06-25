@@ -22,7 +22,7 @@ def isqrt_forward(x):
     rsqnorm_shift = torch.where(rsqnorm_bits > rsqnorm_limit_bits, rsqnorm_bits -
                                 rsqnorm_limit_bits, torch.zeros_like(rsqnorm_bits, device=rsqnorm_bits.device).int())
     rsqnorm = torch.clamp(rsqnorm >> rsqnorm_shift, 0, 2**rsqnorm_limit_bits-1)
-    return rsqnorm, rsqnorm_shift - (overflow_bits // 2)
+    return rsqnorm, rsqnorm_shift - torch.div(overflow_bits, 2, rounding_mode='trunc')
 
 
 @quant_register(OpType.Normalization)
@@ -87,17 +87,18 @@ def lp_normalization_forward(self, *args):
 
             rsqnorm, rsqnorm_shift = isqrt_forward(psum)
             x = torch.clamp((x * do_scale), act_qmin, act_qmax)
-            x = torch.clamp(x >> pre_shift, q16_min, q16_max)
+            x = torch.clamp(x.long() >> pre_shift, q16_min, q16_max).to(x.dtype)
             x = torch.clamp((x * rsqnorm), act_qmin, act_qmax)
             out.betensor = linear_requantize(x, 1, do_shift + 31 - pre_shift -
                                              rsqnorm_shift, out.zerop, out.qmin, out.qmax)
         elif 1 == p:
             repeat_size = [x.shape[ax] if ax in axis else 1 for ax in range(psum.dim())]
             psum = psum.repeat(repeat_size)
+            zeros_tensor = torch.zeros_like(x, device=psum.device)
             if do_shift < 0:
                 psum = psum >> (0-do_shift)
                 do_shift = 0
-            x = torch.where(psum != 0, torch.trunc(x * do_scale / psum).long(), x.long())
+            x = torch.where(psum != 0, torch.trunc(x * do_scale / psum).long(), zeros_tensor.long())
             out.betensor = linear_requantize(x, 1, do_shift, out.zerop, out.qmin, out.qmax)
 
     else:

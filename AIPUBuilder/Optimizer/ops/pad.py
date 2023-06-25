@@ -60,6 +60,8 @@ def pad_forward(self, *args):
     outt = self.outputs[0]
     pad_mode = self.get_param('mode').lower()
     pad_value = 0 if pad_mode != 'constant' else self.get_param('constant_value')
+    pad_value = torch.clamp(torch.tensor(pad_value), torch.finfo(
+        torch.float32).min, torch.finfo(torch.float32).max).item()
     paddings = self.get_param('pads')
 
     def list_unpack(l):

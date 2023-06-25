@@ -7,24 +7,22 @@ import torch
 import sys
 
 
-def adaround_global_calibration(g, cdataloader, mparams, mscopes):
+def adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes):
     vec = mparams
     batches = int(vec[0] if len(vec) > 0 else 1)
     epochs = int(vec[1] if len(vec) > 1 else 1)
     batch_size = int(vec[2] if len(vec) > 2 else 1)
-    lrate = float(vec[3] if len(vec) > 3 else 0.001)
-    reg_param = float(vec[4] if len(vec) > 4 else 0.01)
-    beta_start = float(vec[5] if len(vec) > 5 else 20)
-    beta_end = float(vec[6] if len(vec) > 6 else 2)
-    warm_start = float(vec[7] if len(vec) > 7 else 0.2)
-
-    msg = (f"adaround with batches={batches}, epochs={epochs}, batch_size={batch_size}, lr={lrate}, "
-           f"reg_param={reg_param}, beta_start={beta_start}, beta_end={beta_end}, warm_start={warm_start}")
+    lr_w = float(vec[3] if len(vec) > 5 else 0.00001)
+    lr_b = float(vec[4] if len(vec) > 6 else 0.001)
+    lr_qpw = float(vec[5] if len(vec) > 4 else 0.001)
+    lr_qpa = float(vec[6] if len(vec) > 3 else 0.1)
+    msg = (f"adaquant_zy with batches={batches}, epochs={epochs}, batch_size={batch_size}, "
+           f"lr_weight={lr_w}, lr_bias={lr_b}, lr_qp_wht={lr_qpw}, lr_qp_act={lr_qpa}")
     OPT_INFO(msg)
-    _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, beta_start, beta_end, warm_start, mscopes)
+    _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw, lr_qpa, mscopes)
 
 
-def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, beta_start, beta_end, warm_start, mscopes):
+def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw, lr_qpa, mscopes):
     def is_in_scopes(layer_n):
         if len(mscopes) < 1:
             return True
@@ -32,72 +30,133 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
             return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
 
     class QNodeModule (torch.nn.Module):
-        def __init__(self, n, qn):
+        def __init__(self, n, qn, lr_w, lr_b, lr_qpw, lr_qpa, only_optim_inp):
             super().__init__()
+            dev = n.outputs[0].betensor.device
             self.n = n.clone(n.name + "_clone_")
-            self.gamma, self.zeta = -0.1, 1.1
-            # init alpha
-            wf = n.constants['weights'].betensor
-            wscale = qn.constants['weights'].scale
-            wzerop = qn.constants['weights'].zerop
-            wqmin = qn.constants['weights'].qmin
-            wqmax = qn.constants['weights'].qmax
-            if isinstance(wscale, torch.Tensor):
-                # expand scale/zerop shape to match weights
-                max_cnt = 0
-                mshape = None
-                for d in range(wf.dim()):
-                    if wf.shape[d] == wscale.numel():
-                        sz_shape = [1] * wf.dim()
-                        sz_shape[d] = -1
-                        wq = linear_quantize_clip(wf, wscale.reshape(sz_shape), wzerop.reshape(sz_shape), wqmin, wqmax)
-                        cnt = wq.numel() - (wq - qn.constants['weights'].betensor).count_nonzero()
-                        if cnt >= max_cnt:
-                            max_cnt = cnt
-                            mshape = sz_shape
-                wscale = wscale.reshape(mshape)
-                wzerop = wzerop.reshape(mshape)
-            wqf = wf * wscale
-            rest = wqf - wqf.floor()
-            alpha0 = - torch.log((self.zeta - self.gamma) / (rest - self.gamma) - 1.)
-            self.alpha = torch.nn.Parameter(alpha0, requires_grad=True)
-            self.wscale = wscale
-            self.wzerop = wzerop
-            self.wqmin = wqmin
-            self.wqmax = wqmax
+
+            def parameterize(t, optim_d, optim_s):
+                it = PyTensor('tmp')
+                s = 1.0
+                z = 0
+                if isinstance(t.scale, torch.Tensor):
+                    kshape = [t.shape[ax] if ax == t.key_axis_c else 1 for ax in range(len(t.shape))]
+                    s = t.scale.float().clone().detach().reshape(kshape)
+                else:
+                    s = torch.tensor(t.scale, dtype=torch.float, device=dev)
+                if isinstance(t.zerop, torch.Tensor):
+                    kshape = [t.shape[ax] if ax == t.key_axis_c else 1 for ax in range(len(t.shape))]
+                    z = t.zerop.float().clone().detach().reshape(kshape)
+                else:
+                    z = torch.tensor(t.zerop, dtype=torch.float, device=dev)
+                it.scale = torch.nn.Parameter(s, requires_grad=True) if optim_s else s
+                it.zerop = z
+                it.qmin = t.qmin
+                it.qmax = t.qmax
+                if optim_d:
+                    it.betensor = torch.nn.Parameter(torch.zeros_like(
+                        t.betensor, dtype=torch.float), requires_grad=True)
+                return it
+
+            self.inputs = []
+            for t in qn.inputs:
+                self.inputs.append(parameterize(t, optim_d=False, optim_s=True))
+            self.constants = {}
+            for key, t in qn.constants.items():
+                if key in n.constants:
+                    self.constants[key] = parameterize(t, optim_d=True, optim_s=True)
+
+            self.optim_qpw = None
+            self.optim_w = None
+            if ('weights' in self.constants) and not only_optim_inp:
+                self.optim_w = torch.optim.Adam([self.constants['weights'].betensor], lr=lr_w)
+                self.optim_qpw = torch.optim.Adam([self.constants['weights'].scale], lr=lr_qpw)
+            self.optim_b = None
+            if ('biases' in self.constants) and not only_optim_inp:
+                self.optim_b = torch.optim.Adam([self.constants['biases'].betensor], lr=lr_b)
+            self.optim_qpa = None
+            if len(self.inputs) > 0:
+                self.optim_qpa = torch.optim.Adam([it.scale for it in self.inputs], lr=lr_qpa)
 
         def forward(self, x):
-            rest = self.calc_h_alpha()
+            bak_constants = {}
+            for k, v in self.constants.items():
+                bak_constants[k] = self.n.constants[k].betensor
+                self.n.constants[k].betensor
             # quantize then dequantize weights
-            wqf = torch.floor(self.n.constants['weights'].betensor * self.wscale) + rest
-            wf = linear_dequantize(torch.clamp(wqf - self.wzerop, self.wqmin, self.wqmax), self.wscale, self.wzerop)
-            orginal_wf = self.n.constants['weights'].betensor
-            self.n.constants['weights'].betensor = wf
+            if 'weights' in self.n.constants and self.optim_w:
+                # linear_quantize_clip will break the backward (round cause 0 grad)
+                self.n.constants['weights'].betensor = self.get_optimized_weights()
+            if 'biases' in self.n.constants and self.optim_b:
+                self.n.constants['biases'].betensor = self.get_optimized_biases()
+            # quantize then dequantize input
             for i, t in enumerate(self.n.inputs):
-                t.betensor = x[i]
+                ip = self.inputs[i]
+                xi = linear_quantize_clip(x[i], ip.scale, ip.zerop, ip.qmin, ip.qmax)
+                t.betensor = linear_dequantize(xi, ip.scale, ip.zerop)
+
             out = self.n.forward()
-            self.n.constants['weights'].betensor = orginal_wf
+
+            for k, _ in self.constants.items():
+                self.n.constants[k].betensor = bak_constants[k]
             return out
 
+        def zero_grad(self):
+            if self.optim_w:
+                self.optim_w.zero_grad()
+            if self.optim_b:
+                self.optim_b.zero_grad()
+            if self.optim_qpw:
+                self.optim_qpw.zero_grad()
+            if self.optim_qpa:
+                self.optim_qpa.zero_grad()
+
+        def step(self):
+            if self.optim_w:
+                self.optim_w.step()
+            if self.optim_b:
+                self.optim_b.step()
+            if self.optim_qpw:
+                self.optim_qpw.step()
+            if self.optim_qpa:
+                self.optim_qpa.step()
+
         def get_optimized_weights(self):
-            return torch.clamp(torch.floor(self.n.constants['weights'].betensor * self.wscale) + (self.alpha >= 0).float() - self.wzerop, self.wqmin, self.wqmax)
+            wf = self.n.constants['weights'].betensor
+            wp = self.constants['weights']
+            wqf = linear_quantize_clip(wf, wp.scale, wp.zerop, wp.qmin, wp.qmax) + wp.betensor
+            wf = linear_dequantize(wqf, wp.scale, wp.zerop)
+            return wf
 
-        def calc_h_alpha(self):
-            return torch.clamp(torch.sigmoid(self.alpha) * (self.zeta - self.gamma) + self.gamma, 0., 1.)
+        def get_optimized_biases(self):
+            bf = self.n.constants['biases'].betensor
+            bp = self.constants['biases']
+            bs = self.inputs[0].scale
+            if 'weights' in self.n.constants:
+                bs = self.inputs[0].scale * self.constants['weights'].scale
+            if isinstance(bs, torch.Tensor):
+                bs = torch.squeeze(bs)
+            bqf = linear_quantize_clip(bf, bs, 0, bp.qmin, bp.qmax) + bp.betensor
+            bf = linear_dequantize(bqf, bs, 0)
+            return bf
 
-        def reconstruction_loss(self, gt, pt):
-            return (pt - gt).abs().pow(2.0).sum(-1).mean()  # NHWC
-
-        def regularization_term(self, reg_param, beta_start, beta_end, warm_start, num_iter, cur_iter):
-            warm_start_end_iter = warm_start * num_iter
-            if cur_iter < warm_start_end_iter:
-                return 0.
+        def get_optimized_weights_range(self):
+            wp = self.constants['weights']
+            fmin = linear_dequantize(wp.qmin, wp.scale, wp.zerop).flatten()
+            fmax = linear_dequantize(wp.qmax, wp.scale, wp.zerop).flatten()
+            if fmin.numel() > 1:
+                return fmin, fmax
             else:
-                import math
-                h_alpha = self.calc_h_alpha()
-                iter_ratio = (cur_iter - warm_start_end_iter) * 1.0 / (num_iter - warm_start_end_iter)
-                beta = beta_end + 0.5 * (beta_start - beta_end) * (1 + math.cos(iter_ratio * math.pi))
-                return (1.0 - (2 * h_alpha - 1).abs().pow(beta)).sum() * reg_param
+                return fmin.item(), fmax.item()
+
+        def get_optimized_inp_range(self, i):
+            ip = self.inputs[i]
+            fmin = linear_dequantize(ip.qmin, ip.scale, ip.zerop).flatten()
+            fmax = linear_dequantize(ip.qmax, ip.scale, ip.zerop).flatten()
+            if fmin.numel() > 1:
+                return fmin, fmax
+            else:
+                return fmin.item(), fmax.item()
     # prevent deleting intermediate tensors
     g.ref_count_tensors = {}
 
@@ -153,14 +212,12 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
     for it in qg.input_tensors:
         it.betensor = cached_float_tensors[it.name].to(it.betensor.device)
     cached_float_tensors = {}
-    cached_quant_tensors = {}
-    with tqdm(total=iterations*epochs*len(g.nodes), desc='adaround', file=sys.stdout, leave=True) as pbar:
+    with tqdm(total=iterations*epochs*len(g.nodes), desc='adaquant_zy', file=sys.stdout, leave=True) as pbar:
         for k, n in enumerate(g.nodes):
             qn = qg.nodes[k]
             # move inputs to device
             for it in n.inputs:
                 cached_float_tensors[it.name] = cached_float_tensors[it.name].to(it.betensor.device)
-                cached_quant_tensors[it.name] = cached_quant_tensors[it.name].to(it.betensor.device)
             # forward featuremaps on float graph
             for it in n.inputs:
                 it.betensor = cached_float_tensors[it.name]
@@ -172,20 +229,23 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                     # no batch dim
                     abnormal_tensors[ot.name] = True
                     OPT_WARN(f"{n.name} type={n.type} layer_id={n.attrs['layer_id']} batch dim is abnormal: expect batch_dim=0 and batches={sample_num}, but got shape={ot.betensor.shape}."
-                             f"you may try to set batches == batch_size or batches=batch_size=1", log_once=True)
+                             f"you may try to set batch_size = calibration_batch_size x batches or batch_size=calibration_batch_size=batches=1", log_once=True)
                 if ot.name not in cached_float_tensors.keys():
                     cached_float_tensors[ot.name] = ot.betensor
             # apply adaround on current layer
             unquantifiable = n.get_param('unquantifiable', optional=True, default_value=False)
-            if 'weights' in n.constants and not unquantifiable and n.type not in [OpType.GRUv3, OpType.GRUv1] and is_in_scopes(n):
-                qmodule = QNodeModule(n, qn)
-                optim = torch.optim.Adam([qmodule.alpha], lr=lrate)
+            if n.type != OpType.Input and not unquantifiable and is_in_scopes(n):
+                only_optim_inp = True
+                if 'weights' in n.constants and n.type not in [OpType.GRUv3, OpType.GRUv1]:
+                    only_optim_inp = False
+                qmodule = QNodeModule(n, qn, lr_w, lr_b, lr_qpw, lr_qpa, only_optim_inp)
                 cur_iter = 0
+                scheduler_qpa = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    qmodule.optim_qpa, epochs*iterations) if qmodule.optim_qpa else None
                 for _ in range(epochs):
                     cur_rand_indices = torch.randperm(sample_num)
                     cur_batch_idx = 0
                     for i in range(iterations):
-                        optim.zero_grad()
                         cur_float_inp = []
                         cur_float_out = []
                         indices = cur_rand_indices[i*batch_size: (i+1)*batch_size]
@@ -197,15 +257,9 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                             t = cached_float_tensors[ot.name] if ot.name in abnormal_tensors.keys(
                             ) else cached_float_tensors[ot.name][indices]
                             cur_float_out.append(t)
-                        cur_qmodule_inp = []
-                        for it in qn.inputs:
-                            t = cached_quant_tensors[it.name] if it.name in abnormal_tensors.keys(
-                            ) else cached_quant_tensors[it.name][indices]
-                            t = linear_dequantize(t, it.scale, it.zerop)
-                            cur_qmodule_inp.append(t)
                         qmodule.n.current_batch_idx = cur_batch_idx
                         qmodule.n.current_batch_size = batch_size
-                        qmodule.forward(cur_qmodule_inp)
+                        qmodule.forward(cur_float_inp)
 
                         def get_act_func_ret(n, idx, x):
                             for chl in n.children:
@@ -231,33 +285,41 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                             gt = cur_float_out[0]
                         else:
                             gt = torch.cat([t.flatten() for t in cur_float_out])
-                        recon_loss = qmodule.reconstruction_loss(gt, pt)
-                        round_loss = qmodule.regularization_term(
-                            reg_param, beta_start, beta_end, warm_start, iterations*epochs, cur_iter)
-                        total_loss = recon_loss + round_loss
-                        total_loss.backward()
-                        optim.step()
+                        loss = torch.nn.functional.mse_loss(pt.double(), gt.double())
+                        qmodule.zero_grad()
+                        try:
+                            loss.backward()
+                        except:
+                            OPT_DEBUG("Adaquant optimization of layer_id=%s, %s, %s\n does not support backward." % (
+                                str(n.attrs['layer_id']), str(n.type), n.name))
+                        qmodule.step()
                         if 0 == cur_iter % 100:
-                            OPT_DEBUG("Adaround optimization of layer_id=%s, %s, %s\n iterations=%d, loss=%.5f, recon_loss=%.5f, round_loss=%.5f" % (
-                                str(n.attrs['layer_id']), str(n.type), n.name, cur_iter, float(total_loss), float(recon_loss), float(round_loss)))
+                            OPT_DEBUG("Adaquant optimization of layer_id=%s, %s, %s\n iterations=%d, loss=%.5f " % (
+                                str(n.attrs['layer_id']), str(n.type), n.name, cur_iter, float(loss)))
                         cur_iter += 1
                         cur_batch_idx += 1
                         pbar.update(1)
-                qnw = qn.constants['weights']
-                qnw.betensor = qmodule.get_optimized_weights()
-                # record adaround weights to source node
-                n.attrs['adaround_weights'] = {qn.attrs['q_bits_weight']: linear_dequantize(qnw.betensor, qmodule.wscale, qmodule.wzerop)}
+                        if scheduler_qpa:
+                            scheduler_qpa.step()
+                            # print(qmodule.optim_qpa.param_groups[0]["lr"])
+                for ii, ti in enumerate(n.inputs):
+                    ti.min, ti.max = qmodule.get_optimized_inp_range(ii)
+                if not only_optim_inp:
+                    tw = n.constants['weights']
+                    wmin, wmax = qmodule.get_optimized_weights_range()
+                    if isinstance(wmin, torch.Tensor):
+                        tw.min_key_axis, tw.max_key_axis = wmin, wmax
+                    else:
+                        tw.min, tw.max = wmin, wmax
+                    # record adaround weights to source node
+                    n.attrs['adaquant_weights'] = {
+                        qn.attrs['q_bits_weight']: qmodule.get_optimized_weights().clone().detach()}
+                    if 'biases' in n.constants:
+                        n.attrs['adaquant_biases'] = {
+                            qn.attrs['q_bits_bias']: qmodule.get_optimized_biases().clone().detach()}
             else:
                 pbar.update(iterations*epochs)
-            # forward featuremaps on quant graph
-            for it in qn.inputs:
-                it.betensor = cached_quant_tensors[it.name]
-            qn.current_batch_size = sample_num
-            qn.current_batch_idx = 0
-            qn.forward()
-            for ot in qn.outputs:
-                if ot.name not in cached_quant_tensors.keys():
-                    cached_quant_tensors[ot.name] = ot.betensor
+
             # reduce tensor's reference count
             for it in n.inputs:
                 ref_count_float_tensors[it.name] -= 1
@@ -270,20 +332,13 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                 if rkey in cached_float_tensors.keys():
                     rval = cached_float_tensors.pop(rkey)
                     del rval
-                if rkey in cached_quant_tensors.keys():
-                    rval = cached_quant_tensors.pop(rkey)
-                    del rval
             # move tensors back to cpu
             for t in n.inputs:
                 if t.name in cached_float_tensors.keys():
                     cached_float_tensors[t.name] = cached_float_tensors[t.name].cpu()
-                if t.name in cached_quant_tensors.keys():
-                    cached_quant_tensors[t.name] = cached_quant_tensors[t.name].cpu()
             for t in n.outputs:
                 if t.name in cached_float_tensors.keys():
                     cached_float_tensors[t.name] = cached_float_tensors[t.name].cpu()
-                if t.name in cached_quant_tensors.keys():
-                    cached_quant_tensors[t.name] = cached_quant_tensors[t.name].cpu()
 
             def reset_layer_tensors(n):
                 for t in n.inputs:
@@ -308,4 +363,3 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                         ss = list(t.shape)
                     t.betensor = torch.zeros(ss, device=t.betensor.device)
             reset_layer_tensors(n)
-            reset_layer_tensors(qn)

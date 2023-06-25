@@ -10,28 +10,6 @@ def opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt):
     import networkx
 
     def is_desired_layer(node):
-        def whether_align_to_out_scale(n):
-            types_will_align_to_out_scale = (OpType.Convolution, OpType.ConvTranspose, OpType.Convolution3D, OpType.ConvTranspose3D,
-                                             OpType.DepthwiseConv, OpType.FullyConnected,
-                                             OpType.RNN, OpType.BasicLSTM, OpType.GRUv1, OpType.GRUv3,
-                                             OpType.BatchNorm,  OpType.LayerNorm, OpType.InstanceNorm, OpType.GroupNorm,
-                                             OpType.MatMul, OpType.Eltwise, OpType.Concat,
-                                             OpType.Input, OpType.Constant)
-            if n.type in types_will_align_to_out_scale:
-                return True
-            else:
-                # automatical optype judge logical for supporting more optypes
-                inp_scales = [0.5, 2.0, 10.0]
-                scale_changed = []
-                for iscale in inp_scales:
-                    qn = n.clone(n.name+"_clone_")
-                    if len(qn.inputs) > 0:
-                        qn.inputs[0].scale = iscale
-                    qn.quantize()
-                    if len(qn.outputs) > 0 and qn.outputs[0].scale != iscale:
-                        scale_changed.append(True)
-                return len(scale_changed) > 1
-
         n_unquantifiable = node.get_param('unquantifiable', optional=True, default_value=False)
         if node.type == OpType.Quantize:
             return (not node.outputs[0].qinvariant) and ('quantize_scale' in node.params) and n_unquantifiable
@@ -61,6 +39,11 @@ def opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt):
         n_unquantifiable = n.get_param('unquantifiable', optional=True, default_value=False)
         if n.type in optype_cfg_dt.keys() and len(n.parents) > 1 and not n_unquantifiable:
             if 'need_align_scales' in n.attrs and not n.attrs['need_align_scales']:
+                continue
+            inp_dtypes = []
+            for inp in n.inputs:
+                inp_dtypes.append(inp.dtype)
+            if len(set(inp_dtypes)) > 1:
                 continue
             cut_off = optype_cfg_dt[n.type][0]
             if cut_off < 1:

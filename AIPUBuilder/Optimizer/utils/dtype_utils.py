@@ -10,11 +10,11 @@ OPT_INT_MIN = -2 ** 31
 OPT_INT_MAX = 2 ** 31 - 1
 
 
-def construct_betensor(var):
+def construct_torch_tensor(var, device=None):
     if isinstance(var, torch.Tensor):
-        return var
+        return var.to(device=device)
     else:
-        return torch.tensor(var)
+        return torch.tensor(var, device=device)
 
 
 def nhwc2nchw(x):
@@ -249,11 +249,56 @@ def dtype2bytes(dt):
     return dt_dict[dt]
 
 
+def dtype2tftype(dtype):
+    import tensorflow.compat.v1 as tf
+    tf_dict = {Dtype.BOOL: tf.bool,
+               Dtype.FP16: tf.float16,
+               Dtype.BFP16: tf.bfloat16,
+               Dtype.FP32: tf.float32,
+               Dtype.FP64: tf.float64,
+               Dtype.INT16: tf.int16,
+               Dtype.INT32: tf.int32,
+               Dtype.INT64: tf.int64,
+               Dtype.INT8: tf.int8,
+               Dtype.UINT16: tf.uint16,
+               Dtype.UINT32: tf.uint32,
+               Dtype.UINT64: tf.uint64,
+               Dtype.UINT8: tf.uint8,
+               Dtype.ALIGNED_INT4: tf.int8,
+               Dtype.ALIGNED_UINT4: tf.uint8,
+               Dtype.ALIGNED_INT12: tf.int16,
+               Dtype.ALIGNED_UINT12: tf.uint16,
+               }
+    return tf_dict[dtype]
+
+
+def tftype2dtype(dtype):
+    import tensorflow.compat.v1 as tf
+    tf_dict = {tf.bool: Dtype.BOOL,
+               tf.float16: Dtype.FP16,
+               tf.bfloat16: Dtype.BFP16,
+               tf.float32: Dtype.FP32,
+               tf.float64: Dtype.FP64,
+               tf.int16: Dtype.INT16,
+               tf.int32: Dtype.INT32,
+               tf.int64: Dtype.INT64,
+               tf.int8: Dtype.INT8,
+               tf.uint16: Dtype.UINT16,
+               tf.uint32: Dtype.UINT32,
+               tf.uint64: Dtype.UINT64,
+               tf.uint8: Dtype.UINT8,
+               tf.int8: Dtype.ALIGNED_INT4,
+               tf.uint8: Dtype.ALIGNED_UINT4,
+               tf.int16: Dtype.ALIGNED_INT12,
+               tf.uint16: Dtype.ALIGNED_UINT12,
+               }
+    return tf_dict[dtype]
+
+
 def dtype2nptype(dtype):
     import numpy as np
     np_dict = {Dtype.BOOL: np.bool8,
                Dtype.FP16: np.float16,
-               Dtype.BFP16: np.float32,
                Dtype.FP32: np.float32,
                Dtype.FP64: np.float64,
                Dtype.INT16: np.int16,
@@ -269,6 +314,9 @@ def dtype2nptype(dtype):
                Dtype.ALIGNED_INT12: np.int16,
                Dtype.ALIGNED_UINT12: np.uint16,
                }
+    if Dtype.BFP16 == dtype:
+        from bfloat16 import bfloat16 as np_bf16_dtype
+        return np_bf16_dtype
     return np_dict[dtype]
 
 
@@ -403,7 +451,6 @@ def dtype2torch_type(tp):
     th_dict = {
         Dtype.BFP16:        torch.bfloat16,
         Dtype.FP16:         torch.float16,
-        Dtype.BFP16:        torch.bfloat16,
         Dtype.FP32:         torch.float32,
         Dtype.FP64:         torch.float64,
         Dtype.INT8:         torch.int8,

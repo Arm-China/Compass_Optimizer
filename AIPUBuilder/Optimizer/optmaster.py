@@ -215,7 +215,8 @@ class OptMaster(object):
             init_attrs('force_dtype_int', self.hparams.force_dtype_int)
             init_attrs('force_shift_positive', self.hparams.force_shift_positive)
             # init_attrs('force_dtype_int', False)
-            init_attrs('bias_effective_bits', self.hparams.bias_effective_bits)
+            init_attrs('bias_effective_bits', self.hparams.bias_bits if self.hparams.bias_effective_bits == ''
+                       else self.hparams.bias_effective_bits)
             init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff)
             init_attrs('trigger_float_op', self.hparams.trigger_float_op)
             if node.type == OpType.Concat:
@@ -260,7 +261,8 @@ class OptMaster(object):
             start = int(scopes_str_list[k])
             end = int(scopes_str_list[k+1])
             self.fake_quant_scopes.append((start, end))
-        scopes_op_list = [x.lower() for x in re.split(r',|\s+', argv.fake_quant_operators_for_debug) if x]
+        scopes_op_list = [x.lower().strip() for x in re.split(
+            r',|\s+', argv.fake_quant_operators_for_debug) if x.lower().strip()]
         for node in self.g.nodes:
             if str(node.type)[7:].lower() in scopes_op_list:
                 start = int(node.attrs['layer_id'])
@@ -452,8 +454,7 @@ class OptMaster(object):
                         if current_batch_idx * dataloader.batch_size > len(dataloader.dataset):
                             self.g.current_batch_size = len(dataloader.dataset) - \
                                 (current_batch_idx-1) * dataloader.batch_size
-                        self.g.forward(inp)
-                        self.g.statistic(self.hparams)
+                        self.g.statistic(inp, self.hparams)
 
                     pbar.refresh()
             else:  # use all zeros data for statistic
@@ -466,8 +467,7 @@ class OptMaster(object):
                     inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
                 self.g.current_batch_size = self.batch_size_in_IR
                 self.g.current_batch_idx = 0
-                self.g.forward(inputs, disable_pbar=False)
-                self.g.statistic(self.hparams)
+                self.g.statistic(inputs, self.hparams)
 
         for n in self.g.nodes:
             if n.attrs['q_strategy_weight'].lower().strip() == 'in_ir':
@@ -815,7 +815,7 @@ class OptMaster(object):
                     bsize = len(self.dataloader4debug.dataset) - i * self.dataloader4debug.batch_size
                     self.g.current_batch_size = bsize
                     self.g.quantgraph.current_batch_size = bsize
-                check_nodes_similarity(self.g, self.g.quantgraph, inp)
+                check_nodes_similarity(self.g, self.g.quantgraph, inp, keep_tensors=self.hparams.dump)
             show_similarity(self.g.quantgraph)
 
             calculate_op_running_time(self.g, self.g.quantgraph)
@@ -823,6 +823,9 @@ class OptMaster(object):
             # dump tensor
             if self.hparams.dump:
                 self.dump()
+
+            if opt_use_cuda():
+                torch.cuda.empty_cache()
 
     @opt_workflow_register
     def float_metric(self, graph, dataloader, fmetrics):
@@ -875,8 +878,13 @@ class OptMaster(object):
             OPT_ERROR(f"please check the graph, which is None.")
             return None
         for node in graph.nodes:
-            if node.get_param('quantized', optional=True, default_value=True):
-                node.quantized = True
+            dtypes = [t.dtype for t in (list(node.outputs) + list(node.constants.values()))]
+            node.quantized = True
+            for dt in dtypes:
+                if is_float(dt):
+                    node.quantized = False
+                    break
+            if node.quantized:
                 self._deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
         return graph
 
@@ -924,6 +932,9 @@ class OptMaster(object):
             convert_resize_to_convolution(self.g)
             for n in self.g.nodes:
                 n.attrs['unify_shifts_mode'] = self.hparams.compat_quantized_model_unify_shifts_mode
+                if 'conv_from_resize_opt' not in n.attrs:
+                    n.attrs['trigger_float_op'] = 'float16_preferred' if self.hparams.trigger_float_op.lower(
+                    ) == 'disable' else self.hparams.trigger_float_op.lower()
                 if self.hparams.compat_quantized_model_int8_to_uint8:
                     n.attrs["int8_to_uint8"] = True
                 if n.type == OpType.Constant:
@@ -937,15 +948,10 @@ class OptMaster(object):
                 if n.type == OpType.BasicLSTM:
                     n.attrs['weight_dim'] = 1
                     n.attrs['set_default_placeholder_info'] = True
+                    # n.attrs['start_basic_lstm_id'] = 64
+                    # n.attrs['start_basic_lstm_id'] = 32
                 if n.type == OpType.Cast:
-                    if self.hparams.compat_quantized_model_eliminate_cast:
-                        n.attrs["eliminate_cast"] = True
-                    inp_scale = PyTensor('inp_scale', n.inputs[0].scale).betensor
-                    inp_zerop = PyTensor('inp_zerop', n.inputs[0].zerop).betensor
-                    out_scale = PyTensor('out_scale', n.outputs[0].scale).betensor
-                    out_zerop = PyTensor('out_zerop', n.outputs[0].zerop).betensor
-                    if not((inp_scale - out_scale).abs().sum().item() <= OPT_EPSILON) and not ((inp_zerop - out_zerop).abs().sum().item() <= OPT_EPSILON):
-                        n.params['only_for_quantized'] = True
+                    n.attrs["eliminate_cast"] = self.hparams.compat_quantized_model_eliminate_cast
 
             cg = convert_opt_graph_to_aipu_graph(self.g)
             qtlib_quantize_transform(cg, run_mode=self.hparams.compat_quantized_model_strategy)

@@ -44,8 +44,8 @@ def apply_box_deltas_q(self, boxes, deltas, boxes_dtype=None, deltas_dtype=None)
     deltas_qbits = dtype2bits(deltas_dtype)
     scales = self.params["box_scale_value"]
     shifts = self.params["box_shift_value"]
-    ycenter = (boxes[..., 0] + boxes[..., 2]).int() // 2
-    xcenter = (boxes[..., 1] + boxes[..., 3]).int() // 2
+    ycenter = torch.div((boxes[..., 0] + boxes[..., 2]), 2, rounding_mode='floor')
+    xcenter = torch.div((boxes[..., 1] + boxes[..., 3]), 2, rounding_mode='floor')
     h = (boxes[..., 2] - boxes[..., 0]).int()
     w = (boxes[..., 3] - boxes[..., 1]).int()
 
@@ -62,13 +62,12 @@ def apply_box_deltas_q(self, boxes, deltas, boxes_dtype=None, deltas_dtype=None)
     sat_bits = self.get_param('delta_shift')
     round_shift_y = 1 << (shift_ty_out-sat_bits-1)
     round_shift_x = 1 << (shift_tx_out-sat_bits-1)
-    clip_min, clip_max = bits2range(boxes_qbits, True)
+    clip_min, clip_max = bits2range(boxes_qbits+deltas_qbits, True)
 
     h_scale = (h * scale_ty_out) >> sat_bits
     w_scale = (w * scale_tx_out) >> sat_bits
     ycenter_q = torch.clip(((dy * h_scale+round_shift_y) >> (shift_ty_out-sat_bits)) + ycenter, clip_min, clip_max)
     xcenter_q = torch.clip(((dx * w_scale+round_shift_x) >> (shift_tx_out-sat_bits)) + xcenter, clip_min, clip_max)
-
     th_lut = self.constants['th_lut'].betensor.int()
     tw_lut = self.constants['tw_lut'].betensor.int()
     lut_in_bits = deltas_qbits
@@ -197,11 +196,12 @@ def multibox_transform_loc(self, *args):
             outp[b, :valid_num, 1] = valid_score[b][:valid_num]
             outp[b, :valid_num, 2:6] = out_coords
 
-    if self.quantized:
-        score_scale = self.params['score_scale_value']
-        score_shift = self.params['score_shift_value']
-        outp[b, :valid_num, 1] = (outp[b, :valid_num, 1].int() + self.inputs[0].zerop) * score_scale >> score_shift
-        outp[b, :valid_num, 1] = torch.clamp(outp[b, :valid_num, 1], self.outputs[0].qmin, self.outputs[0].qmax)
+        if self.quantized:
+            score_scale = int(self.params['score_scale_value'])
+            score_shift = int(self.params['score_shift_value'])
+            outp[b, :valid_num, 1] = (outp[b, :valid_num, 1].int() +
+                                      self.inputs[0].zerop).long() * score_scale >> score_shift
+            outp[b, :valid_num, 1] = torch.clamp(outp[b, :valid_num, 1], self.outputs[0].qmin, self.outputs[0].qmax)
 
     self.outputs[0].betensor = outp
     self.outputs[1].betensor = valid_batch
@@ -239,9 +239,10 @@ def calculate_box_quantization(self, rois, delta, STD_DIV):
     # we hope scale_thtw_out is at least 10
     max_delta_th = torch.tensor(3276.0).log().item()*STD_DIV[2]
     max_delta_tw = torch.tensor(3276.0).log().item()*STD_DIV[3]
-    if ((delta_qmax + batch_inp_deltas_zp) > batch_inp_deltas_scales*max_delta_th) \
-            or ((delta_qmax + batch_inp_deltas_zp) > batch_inp_deltas_scales*max_delta_tw):
-        batch_inp_deltas_scales = delta_qmax/max(max_delta_th, max_delta_tw)
+    delta_qmax_add_zp = delta_qmax + batch_inp_deltas_zp
+    if (delta_qmax_add_zp > batch_inp_deltas_scales*max_delta_th) \
+            or (delta_qmax_add_zp > batch_inp_deltas_scales*max_delta_tw):
+        batch_inp_deltas_scales = delta_qmax_add_zp/max(max_delta_th, max_delta_tw)
 
     th_tensor = PyTensor(self.name + '/th_tensor')
     tw_tensor = PyTensor(self.name + '/tw_tensor')
@@ -251,8 +252,8 @@ def calculate_box_quantization(self, rois, delta, STD_DIV):
         th_tensor.max = self.params['max_exp_thtw']
         tw_tensor.max = self.params['max_exp_thtw']
     else:
-        th_tensor.max = torch.tensor(delta_qmax/batch_inp_deltas_scales/STD_DIV[2]).exp()
-        tw_tensor.max = torch.tensor(delta_qmax/batch_inp_deltas_scales/STD_DIV[3]).exp()
+        th_tensor.max = torch.tensor(delta_qmax_add_zp/batch_inp_deltas_scales/STD_DIV[2]).exp()
+        tw_tensor.max = torch.tensor(delta_qmax_add_zp/batch_inp_deltas_scales/STD_DIV[3]).exp()
     th_tensor.scale, th_tensor.zerop, th_tensor.qmin, th_tensor.qmax, th_tensor.dtype = \
         get_linear_quant_params_from_tensor(th_tensor, QuantMode.to_symmetric(q_mode_activation), 16, True)
     tw_tensor.scale, tw_tensor.zerop, tw_tensor.qmin, tw_tensor.qmax, tw_tensor.dtype = \

@@ -436,8 +436,8 @@ def generateproposals_quantize(self, *args):
         self.constants[name].dtype = Dtype.INT32
         self.constants[name].ir_dtype = Dtype.INT32
 
-    feature_height = inp1.betensor.shape[1]
-    feature_width = inp1.betensor.shape[2]
+    feature_height = inp1.ir_shape[1]
+    feature_width = inp1.ir_shape[2]
     image_height = self.get_param('image_height')
     image_width = self.get_param('image_width')
     self.params["anchor_scale"] = int(stat_coords_scale)

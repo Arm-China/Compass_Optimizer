@@ -50,7 +50,10 @@ def graph_inference(graph, g_forward, dataloader, metrics, with_float=False, max
                 if with_float:
                     prediction.append(t.betensor)
                 else:
-                    dtb = linear_dequantize(t.betensor, t.scale, t.zerop)
+                    if t.debug_flag:
+                        dtb = t.betensor
+                    else:
+                        dtb = linear_dequantize(t.betensor, t.scale, t.zerop)
                     prediction.append(dtb)
             for metric in metrics:
                 metric(prediction, target)
@@ -74,24 +77,25 @@ class QuantizeGraph(PyGraph):
 
     def feed_inputs_data(self, inputs_data):
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import opt_use_cuda
+        from AIPUBuilder.Optimizer.framework import PyTensor
         feed_data = inputs_data
         if opt_use_cuda():
             if isinstance(feed_data, dict):
-                feed_data = {key: feed_data[key].cuda() for key in feed_data}
+                feed_data = {key: PyTensor('tmp', feed_data[key]).betensor.cuda() for key in feed_data}
             elif isinstance(feed_data, (list, tuple)):
-                feed_data = [ii.cuda() for ii in feed_data]
+                feed_data = [PyTensor('tmp', ii).betensor.cuda() for ii in feed_data]
             else:
-                feed_data = feed_data.cuda()
+                feed_data = PyTensor('tmp', feed_data).betensor.cuda()
         data = feed_data
         if len(self.input_tensors) == 1 and not isinstance(feed_data, list):
             data = [feed_data, ]
         for inp, d in zip(self.input_tensors, data):
-            inp.betensor = d
+            inp.betensor = PyTensor('tmp', d).betensor
             inp.betensor = inp.betensor.float()
 
-    def statistic(self, config):
+    def statistic(self, inputs, config):
         import sys
-        from AIPUBuilder.Optimizer.framework.pycore.pytensor import TensorShape
+        from AIPUBuilder.Optimizer.framework.pycore.pytensor import TensorShape, PyTensor
         from AIPUBuilder.Optimizer.utils import QuantMode
         from AIPUBuilder.Optimizer.config import CalibrationStrategyField, TrimInfinityField
         from AIPUBuilder.Optimizer.logger import tqdm, OPT_DEBUG
@@ -141,8 +145,12 @@ class QuantizeGraph(PyGraph):
                     pbar.update(1)
                 pbar.refresh()
         self.constants_statisticed = True
-
+        self.reset_edge_tensors_ref_count()
+        tz = PyTensor('null').betensor
+        self.feed_inputs_data(inputs)
         for n in self.nodes:
+            n.forward()
+
             running_statistic_momentum = n.attrs["running_statistic_momentum"]
             histc_bins = n.attrs["histc_bins"]
             statistic_std_mean = True
@@ -165,6 +173,14 @@ class QuantizeGraph(PyGraph):
                                 histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
                                 trim_infinity=trim_inf[n],
                                 reset=not self.current_batch_idx)
+            for pld in n.placeholders:
+                del pld.betensor
+                pld.betensor = tz
+        for n in self.nodes:
+            for t in n.outputs:
+                del t.betensor
+                t.betensor = tz
+        self.reset_edge_tensors_ref_count()
 
     def save_statistic_info(self, statistic_info_fname):
         import pickle
@@ -295,30 +311,15 @@ class QuantizeGraph(PyGraph):
         return True
 
     def set_tensor_quantization_attrs(self):
-        for n in self.nodes:
-            qn = n.clone(n.name+"_clone_")
-            qn.quantize()
-            for i, t in enumerate(n.outputs):
-                tc = qn.outputs[i]
-                t.scale = tc.scale
-                t.zerop = tc.zerop
-                t.qbits = tc.qbits
-                t.dtype = tc.dtype
-                t.qmin = tc.qmin
-                t.qmax = tc.qmax
-                t.qinvariant = tc.qinvariant
-            for i, t in enumerate(n.placeholders):
-                tc = qn.placeholders[i]
-                t.scale = tc.scale
-                t.zerop = tc.zerop
-                t.qbits = tc.qbits
-                t.dtype = tc.dtype
-                t.qmin = tc.qmin
-                t.qmax = tc.qmax
-                t.qinvariant = tc.qinvariant
-            for k, t in n.constants.items():
-                if k in qn.constants.keys():
-                    tc = qn.constants[k]
+        import sys
+        from AIPUBuilder.Optimizer.logger import tqdm
+        with tqdm(total=len(self.nodes), desc='update_tensor_quantization_attrs', file=sys.stdout, leave=False) as pbar:
+            for n in self.nodes:
+                qn = n.clone(n.name+"_clone_")
+                qn.params['unquantifiable'] = False
+                qn.quantize()
+                for i, t in enumerate(n.outputs):
+                    tc = qn.outputs[i]
                     t.scale = tc.scale
                     t.zerop = tc.zerop
                     t.qbits = tc.qbits
@@ -326,6 +327,27 @@ class QuantizeGraph(PyGraph):
                     t.qmin = tc.qmin
                     t.qmax = tc.qmax
                     t.qinvariant = tc.qinvariant
+                for i, t in enumerate(n.placeholders):
+                    tc = qn.placeholders[i]
+                    t.scale = tc.scale
+                    t.zerop = tc.zerop
+                    t.qbits = tc.qbits
+                    t.dtype = tc.dtype
+                    t.qmin = tc.qmin
+                    t.qmax = tc.qmax
+                    t.qinvariant = tc.qinvariant
+                for k, t in n.constants.items():
+                    if k in qn.constants.keys():
+                        tc = qn.constants[k]
+                        t.scale = tc.scale
+                        t.zerop = tc.zerop
+                        t.qbits = tc.qbits
+                        t.dtype = tc.dtype
+                        t.qmin = tc.qmin
+                        t.qmax = tc.qmax
+                        t.qinvariant = tc.qinvariant
+                pbar.update(1)
+            pbar.refresh()
 
     def clear_tensor_quantization_attrs(self):
         from AIPUBuilder.Optimizer.utils.dtype_utils import torch_type2dtype
@@ -369,8 +391,8 @@ class QuantizeGraph(PyGraph):
                 pbar.update(1)
             pbar.refresh()
 
-    def qforward(self, feed_data, disable_pbar=True):
-        return self.quantgraph.forward(feed_data, disable_pbar)
+    def qforward(self, feed_data, disable_pbar=True, keep_tensors=False):
+        return self.quantgraph.forward(feed_data, disable_pbar, keep_tensors)
 
     def graph_param_show(self, *args):
         from AIPUBuilder.Optimizer.logger import OPT_DEBUG

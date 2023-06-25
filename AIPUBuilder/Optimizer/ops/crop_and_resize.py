@@ -106,9 +106,10 @@ def quant_crop_and_resize(fm, boxes, box_indices, method, crop_size, qextrapolat
         if box_idx < 0 or box_idx >= batch:
             OPT_ERROR(f"Error: batch_index {box_idx} out of range [0, {batch}).")
 
-        qheight_scale = ((((y2 - y1) * (fm_height - 1) * 256) // (crop_height - 1))
-                         >> 8).int() if crop_height > 1 else 0
-        qwidth_scale = ((((x2 - x1) * (fm_width - 1) * 256) // (crop_width - 1)) >> 8).int() if crop_width > 1 else 0
+        qheight_scale = torch.div((y2 - y1) * (fm_height - 1) * 256,  crop_height - 1,
+                                  rounding_mode='trunc').int() >> 8 if crop_height > 1 else 0
+        qwidth_scale = torch.div((x2 - x1) * (fm_width - 1) * 256, crop_width - 1,
+                                 rounding_mode='trunc').int() >> 8 if crop_width > 1 else 0
         # qheight_scale = (((y2 - y1) * 256) // (crop_height - 1)) >> 8 if crop_height > 1 else 0
         # qwidth_scale = (((x2 - x1) * 256) // (crop_width - 1)) >> 8 if crop_width > 1 else 0
 
@@ -127,10 +128,10 @@ def quant_crop_and_resize(fm, boxes, box_indices, method, crop_size, qextrapolat
             if method == 'bilinear':
                 top_y_index = (in_y * index_scale >> index_shift).long()
                 bottom_y_index = top_y_index + 1  # ((in_y * index_scale + 2 ** index_shift) >> index_shift).long()
-                y_lerp = in_y - top_y_index * 2 ** index_shift // index_scale
+                y_lerp = in_y - torch.div(top_y_index * 2 ** index_shift, index_scale, rounding_mode='trunc')
             else:  # method == 'nearest':
                 # in_y = ((in_y + 2 ** (qvalue-1)) >> qvalue).long().item()
-                in_y = ((in_y * index_scale + 2 ** (index_shift - 1)) >> index_shift).long().item()
+                in_y = ((in_y * index_scale + 2 ** (index_shift - 1)).long() >> index_shift).item()
 
             for x in range(crop_width):
                 in_x = x1 * (fm_width - 1) + x * qwidth_scale
@@ -144,7 +145,7 @@ def quant_crop_and_resize(fm, boxes, box_indices, method, crop_size, qextrapolat
                 if method == 'bilinear':
                     left_x_index = (in_x * index_scale >> index_shift).long()
                     right_x_index = left_x_index + 1  # ((in_x * index_scale + 2 ** index_shift) >> index_shift).long()
-                    x_lerp = in_x - left_x_index * 2 ** index_shift // index_scale
+                    x_lerp = in_x - torch.div(left_x_index * 2 ** index_shift, index_scale, rounding_mode='trunc')
 
                     top_y_index = torch.clamp(top_y_index, torch.tensor(0, device=dev),
                                               torch.tensor(fm_height - 1, device=dev))
@@ -162,12 +163,12 @@ def quant_crop_and_resize(fm, boxes, box_indices, method, crop_size, qextrapolat
                     bottom_left = fm[box_idx, bottom_y_index, left_x_index, :]
                     bottom_right = fm[box_idx, bottom_y_index, right_x_index, :]
 
-                    top = top_left + (((top_right - top_left) * x_lerp * index_scale) >> index_shift)
-                    bottom = bottom_left + (((bottom_right - bottom_left) * x_lerp * index_scale) >> index_shift)
-                    out[b, y, x, :] = (top + (((bottom - top) * y_lerp * index_scale) >> index_shift))
+                    top = top_left + (((top_right - top_left) * x_lerp * index_scale).long() >> index_shift)
+                    bottom = bottom_left + (((bottom_right - bottom_left) * x_lerp * index_scale).long() >> index_shift)
+                    out[b, y, x, :] = (top + (((bottom - top) * y_lerp * index_scale).long() >> index_shift))
                 else:  # method == 'nearest':
                     # in_x = ((in_x + 2 ** (qvalue - 1)) >> qvalue).long().item()
-                    in_x = ((in_x * index_scale + 2 ** (index_shift - 1)) >> index_shift).long().item()
+                    in_x = ((in_x * index_scale + 2 ** (index_shift - 1)).long() >> index_shift).item()
                     out[b, y, x, :] = fm[box_idx, in_y, in_x, :]
     return out
 

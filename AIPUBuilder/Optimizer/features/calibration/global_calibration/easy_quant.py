@@ -6,25 +6,29 @@ import torch
 import sys
 
 
-def easy_quant_global_calibration(g, cdataloader, cstrategy):
-    from AIPUBuilder.Optimizer.config import GlobalCalibrationParamField
-    valid, vec = GlobalCalibrationParamField._parse(cstrategy)
-    if valid:
-        batches = int(vec[0] if len(vec) > 0 else 1)
-        epochs = int(vec[1] if len(vec) > 1 else 1)
-        alpha = float(vec[2] if len(vec) > 2 else 0.5)
-        beta = float(vec[3] if len(vec) > 3 else 2.0)
-        nsteps = int(vec[4] if len(vec) > 4 else 10)
-        ngroups = int(vec[5] if len(vec) > 5 else 4)
-        msg = (f"easy_quant with batches={batches}, epochs={epochs}, alpha={alpha}, "
-               f"beta={beta}, nsteps={nsteps}, ngroups={ngroups}")
-        OPT_INFO(msg)
-        _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups)
+def easy_quant_global_calibration(g, cdataloader, mparams, mscopes):
+    vec = mparams
+    batches = int(vec[0] if len(vec) > 0 else 1)
+    epochs = int(vec[1] if len(vec) > 1 else 1)
+    alpha = float(vec[2] if len(vec) > 2 else 0.5)
+    beta = float(vec[3] if len(vec) > 3 else 2.0)
+    nsteps = int(vec[4] if len(vec) > 4 else 10)
+    ngroups = int(vec[5] if len(vec) > 5 else 4)
+    msg = (f"easy_quant with batches={batches}, epochs={epochs}, alpha={alpha}, "
+           f"beta={beta}, nsteps={nsteps}, ngroups={ngroups}")
+    OPT_INFO(msg)
+    _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups, mscopes)
 
 
-def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups):
+def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups, mscopes):
     import copy
     from AIPUBuilder.Optimizer.logger import tqdm
+
+    def is_in_scopes(layer_n):
+        if len(mscopes) < 1:
+            return True
+        else:
+            return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
 
     def scale2minmax(scale, is_signed, qrange):
         frange = qrange / scale
@@ -32,7 +36,8 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups):
             return -1 * frange / 2,  frange / 2
         else:
             return 0, frange
-
+    # prevent deleting intermediate tensors
+    g.ref_count_tensors = {}
     vdataloader = copy.deepcopy(cdataloader)
     with tqdm(total=batches*epochs*len(g.nodes)*2, desc='easy_quant', file=sys.stdout, leave=True) as pbar:
         for i, sample in enumerate(vdataloader):
@@ -66,7 +71,7 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups):
                     initial_similarity = layer_similarity(n, qn)
                     q_mode_weight = n.attrs["q_mode_weight"]
                     q_mode_activation = n.attrs["q_mode_activation"]
-                    if 'weights' in n.constants and not unquantifiable:
+                    if 'weights' in n.constants and not unquantifiable and is_in_scopes(n):
                         w = n.constants["weights"]
                         if not w.qinvariant:
                             dn_m = None
@@ -147,7 +152,7 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups):
                     inp_scales = []
                     for idx, inp in enumerate(n.inputs):
                         inp_scales.append((inp.scale, inp.zerop, inp.min, inp.max))
-                        if not inp.qinvariant and not unquantifiable:
+                        if not inp.qinvariant and not unquantifiable and is_in_scopes(n):
                             qrange = 2 ** inp.qbits - 1
                             if not QuantMode.is_full_range(q_mode_activation):
                                 qrange -= 1

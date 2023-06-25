@@ -212,6 +212,8 @@ class BilinearResizeSubgraph(OptSubgraph):
 
         base_name = resize_node.name
 
+        conv_attrs = resize_attrs
+        conv_attrs['conv_from_resize_opt'] = True
         if (ResH >= H) or (ResW >= W):
             K = i_scale + 1
             stride_x = K - 1
@@ -222,7 +224,7 @@ class BilinearResizeSubgraph(OptSubgraph):
                                               {"mode": 'REFLECT',
                                                "pads": [[0, 0], [0, 1], [0, 1], [0, 0]],
                                                "constant_value": 0.000000},
-                                              resize_attrs)
+                                              conv_attrs)
             lid = self._update_layer_id(mirror_pad.attrs, layer_id, lid)
             conv = self.add_to_subgraph(f"{base_name}_conv", OpType.Convolution,
                                         [mirror_pad.outputs[0]],
@@ -233,7 +235,7 @@ class BilinearResizeSubgraph(OptSubgraph):
                                          "pad_bottom": 0, "pad_left": 0, "pad_right": 0, "pad_top": 0,
                                          "stride_x": stride_x, "stride_y": stride_y,
                                          "with_activation": 'NONE'},
-                                        resize_attrs)
+                                        conv_attrs)
         else:
             K = i_scale
             stride_x = K

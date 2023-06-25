@@ -6,6 +6,7 @@ from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 from AIPUBuilder.Optimizer.utils.string_utils import *
 from AIPUBuilder.Optimizer.utils.math_utils import *
 from AIPUBuilder.Optimizer.framework import *
+from AIPUBuilder.Optimizer.ops.cast import forward_with_clip
 
 import torch.nn as nn
 
@@ -86,7 +87,7 @@ def cumulate(self, *args):
             for s in range(step):
                 data_step = input_transpose[:, s]
                 tmp_data = tmp_data * data_step
-                tmp_data, data_left_shift = convert_less_mbit(tmp_data, threshold_min, threshold_max)
+                tmp_data, data_left_shift = convert_less_mbit(tmp_data.long(), threshold_min, threshold_max)
                 left_shifts += data_left_shift
                 outp[:, s] = linear_requantize(tmp_data, scale[s], (shift[s]-left_shifts),
                                                self.outputs[0].zerop, self.outputs[0].qmin, self.outputs[0].qmax)
@@ -102,6 +103,8 @@ def cumulate(self, *args):
         outp = torch.flip(outp, dims=[1])
     outp = torch.reshape(outp, pre_in_shape).permute(post_transpose_dim)
 
+    if not self.quantized:
+        outp = forward_with_clip(outp, self.outputs[0].dtype, 'TRUNCATION')
     self.outputs[0].betensor = outp
     return outp
 

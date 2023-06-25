@@ -17,7 +17,7 @@ def softmax_quantize(self, *args):
     dev = inp.betensor.device
     # so we allow to accumulate less than 2**12 items with a 32bit accumulator
     axis = self.get_param('axis')
-    shape_value_in_axis = inp.betensor.shape[axis]
+    shape_value_in_axis = inp.ir_shape[axis]
     ibits = torch.ceil(torch.log2(torch.tensor(shape_value_in_axis))).long()
     scaling_bits = self.attrs['scaling_bits']
     mbits = max(8, 32-ibits) if scaling_bits[0] < 1 else scaling_bits[0]

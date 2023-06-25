@@ -51,6 +51,24 @@ def none_activation(self, *args):
     return out.betensor
 
 
+def unknown_activation(self, *args):
+    '''this function mainly supports quant forward, which has activation method=unknown op.'''
+    inp = self.inputs[0]
+    out = self.outputs[0]
+    if self.quantized:
+        x = inp.betensor
+        x = x - inp.qmin
+        lut = self.constants["lut"].betensor
+        x = torch.reshape(x, (-1,))
+        y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
+            self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
+        out.betensor = torch.reshape(y, inp.betensor.shape)
+    else:
+        OPT_WARN(f"Activation op method=UNKNOWN donot support float forward, and the output.tensor will directly use input.tensor")
+        out.betensor = inp.betensor
+    return out.betensor
+
+
 #                     lower_case_method_name        output_type_is_signed         forward_func     quantize_func
 g_activation_method_supported = {'sigmoid':         (False,                       sigmoid,         sigmoid_quantize),
                                  'tanh':            (True,                        tanh,            tanh_quantize),
@@ -74,6 +92,7 @@ g_activation_method_supported = {'sigmoid':         (False,                     
                                  'gelu':            (True,                        gelu,            gelu_quantize),
                                  'swish':           (True,                        swish,           swish_quantize),
                                  'none':            (True,                        none_activation, none_quantize),
+                                 'unknown':         (True,                        unknown_activation, none_quantize),
                                  }
 with_activation_supported = ['none', 'clip', 'relu', 'relu6', 'leakyrelu', 'prelu']
 with_activation_allow_merge_out_zerop_to_bias = ('none', 'clip', 'relu', 'relu6',)

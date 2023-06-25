@@ -156,7 +156,7 @@ class NaiveAutoSearchMixedPrecision(object):
                 for n in self.g.nodes:
                     if int(n.attrs['layer_id']) >= fid:
                         n.params['unquantifiable'] = True
-                        n.attrs['trigger_float_op'] = 'float32'
+                        n.attrs['trigger_float_op'] = 'float32_preferred'
                     else:
                         n.params['unquantifiable'] = False
                 # dummy_op_list = self.g.insert_dummy_node_ahead(OpType.DeQuantize, condition_func=lambda node, parent_node, edge_tensor: (not parent_node.get_param(

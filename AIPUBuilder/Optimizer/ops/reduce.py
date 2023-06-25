@@ -162,7 +162,7 @@ def reduce(self, *args):
             max_bits = torch.ceil(torch.log2(sum_output_max)).item()
             shift_diff = 0
             if max_bits > 16:
-                shift_diff = max_bits - 16
+                shift_diff = int(max_bits - 16)
             outp = outp >> shift_diff
             outp = torch.clamp(outp, pmin, pmax)
             outp = linear_requantize(
@@ -189,11 +189,11 @@ def reduce(self, *args):
             # currently use uint32 to storage sum_output
             sum_output = torch.clamp(sum_output, act_min, act_max)
             sum_output_max = sum_output.max().float()
-            max_bits = torch.ceil(torch.log2(sum_output_max)).item()
+            max_bits = torch.ceil(torch.log2(sum_output_max)).int().item()
             shift_diff = 0
             if max_bits > 16:
                 shift_diff = max_bits - 16
-            sum_output = sum_output >> shift_diff
+            sum_output = sum_output.long() >> shift_diff
             sum_output = torch.clamp(sum_output, pmin, pmax)
             sum_output = linear_requantize(
                 sum_output, scale, shift-shift_diff, 0, pmin, pmax)
@@ -215,6 +215,15 @@ def reduce(self, *args):
     return outp
 
 
+def getOutputSigned(inp_signed, method):
+    if method in ['ANY', 'ALL', 'VARIANCE', 'UNBIASED_VARIANCE', 'L1', 'L2']:
+        return False
+    elif method in ['MIN', 'MAX', 'SUM', 'PROD', 'MEAN']:
+        return inp_signed
+    else:
+        return True
+
+
 @quant_register(OpType.Reduce)
 def reduce_quantize(self, *args):
     inp = self.inputs[0]
@@ -227,24 +236,25 @@ def reduce_quantize(self, *args):
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Currently not support per-channel quantization of activations")
     method = self.get_param('method').upper()
+    out_signed = getOutputSigned(is_signed(inp.dtype), method) or self.force_dtype_int
     if method in ['ANY', 'ALL']:
         out.scale = 1
         out.zerop = 0
         out.qbits = 8
-        out.dtype = Dtype.INT8 if self.force_dtype_int else Dtype.UINT8
+        out.dtype = bits2dtype(out.qbits, out_signed)
         out.qinvariant = True
     elif method in ['MIN', 'MAX']:
-        out.dtype = inp.dtype
         out.scale = inp.scale
         out.zerop = inp.zerop
         out.qbits = inp.qbits
+        out.dtype = bits2dtype(out.qbits, out_signed)
         out.qinvariant = inp.qinvariant
     else:
         if inp.qinvariant:
             out.scale = 1
             out.zerop = 0
             out.qbits, out.dtype = range2dtype(
-                out.extrema_min, out.extrema_max, force_int=self.force_dtype_int)
+                out.extrema_min, out.extrema_max, force_int=out_signed)
             out.qinvariant = True
             out.qmin, out.qmax = dtype2range(out.dtype)
             do_scale, do_shift = 1, 0
@@ -252,7 +262,6 @@ def reduce_quantize(self, *args):
         else:
             # SUM, PROD operation need to quantize
             if method in ['SUM', 'PROD']:
-                out_signed = is_signed(inp.dtype)
                 out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                     out, q_mode_activation, q_bits_activation, is_signed=out_signed)
                 out.qbits = q_bits_activation
@@ -302,12 +311,11 @@ def reduce_quantize(self, *args):
                 out = self.outputs[0]
                 out.qinvariant = False
                 out.qbits = q_bits_activation
-                out_signed = False or self.force_dtype_int
                 out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                     out, q_mode_activation, out.qbits, out_signed)
                 num = 1
                 for t in axis:
-                    num *= inp.betensor.shape[t]
+                    num *= inp.ir_shape[t]
                 if method == "UNBIASED_VARIANCE":
                     num = num - 1
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(out.scale / (inp.scale * inp.scale) / num,
@@ -315,7 +323,6 @@ def reduce_quantize(self, *args):
                                                                                                   shift_bits_ceil=63,
                                                                                                   force_shift_positive=self.force_shift_positive)
             elif method == "L1":
-                out_signed = False or self.force_dtype_int
                 out.qbits = q_bits_activation
                 out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                     out, q_mode_activation, q_bits_activation, is_signed=out_signed)
@@ -333,7 +340,7 @@ def reduce_quantize(self, *args):
 
                 out.qbits = q_bits_activation
                 out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-                    out, q_mode_activation, q_bits_activation, is_signed=False or self.force_dtype_int)
+                    out, q_mode_activation, q_bits_activation, is_signed=out_signed)
                 out.qinvariant = False
 
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
@@ -352,12 +359,15 @@ def reduce_quantize(self, *args):
                     self.name+"/sqrt_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
 
             else:  # method mean
-                inshape = inp.betensor.numel()
-                outshape = out.betensor.numel()
+                inshape = 1
+                for s in inp.ir_shape:
+                    inshape *= s
+                outshape = 1
+                for s in out.ir_shape:
+                    outshape *= s
                 div_dim = inshape / outshape
                 local_scale = 1 / div_dim
 
-                out_signed = is_signed(inp.dtype)
                 out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                     out, q_mode_activation, q_bits_activation, is_signed=out_signed)
                 out.qbits = q_bits_activation

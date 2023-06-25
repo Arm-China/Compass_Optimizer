@@ -69,12 +69,11 @@ def moments_forward(self, *args):
     axis = self.get_param('axis')
     keep_dim = self.get_param('keepdims', optional=True, default_value=True)
     if self.quantized:
-        input_scale = self.get_param('input_scale_value')
+        input_scale = int(self.get_param('input_scale_value'))
         input_shift = self.get_param('input_shift_value')
-        do_scale = self.get_param('var_scale_value')
+        do_scale = int(self.get_param('var_scale_value'))
         do_shift = self.get_param('var_shift_value')
-        qmin, qmax = dtype2range(inp.dtype)
-        input_tensor = linear_requantize(inp.betensor, input_scale, input_shift, 0, qmin, qmax)
+        input_tensor = inp.betensor.int() * input_scale >> input_shift
         t_mean = torch.mean(input_tensor.double(), dim=axis, keepdim=True).round().long()
         t_var = torch.mean((input_tensor.double() - t_mean) ** 2, dim=axis, keepdim=True).long()
         if not keep_dim:
@@ -86,8 +85,18 @@ def moments_forward(self, *args):
                     new_shape.append(input_tensor.shape[ax])
             t_mean = torch.reshape(t_mean, new_shape)
             t_var = torch.reshape(t_var, new_shape)
-        out0.betensor = t_mean
-        out1.betensor = linear_requantize(t_var, do_scale, do_shift, out1.zerop, out1.qmin, out1.qmax)
+        out0.betensor = t_mean.int()
+        if dtype2bits(inp.dtype) > 8:
+            act_qmin, act_qmax = bits2range(32, False)
+            var_h = t_var >> 16
+            var_l = t_var - (var_h << 16)
+            var_h = var_h * do_scale
+            var_l = var_l * do_scale
+            var_h = linear_requantize(var_h, 1, do_shift - 16, 0, act_qmin, act_qmax)
+            var_l = linear_requantize(var_l, 1, do_shift, 0, act_qmin, act_qmax)
+            out1.betensor = linear_requantize(var_h + var_l, 1, 0, out1.zerop, out1.qmin, out1.qmax).int()
+        else:
+            out1.betensor = linear_requantize(t_var, do_scale, do_shift, out1.zerop, out1.qmin, out1.qmax).int()
     else:
         t_std, t_mean = torch.std_mean(inp.betensor, dim=axis, keepdim=keep_dim, unbiased=False)
         out0.betensor = t_mean

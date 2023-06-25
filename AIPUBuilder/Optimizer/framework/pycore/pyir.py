@@ -156,10 +156,8 @@ def convert_aipu_graph_to_opt_graph(cg):
             pv.dtype = dt_dict[str(v._dtype().name)]
             pv.ir_dtype = pv.dtype
             pv.ir_shape = tuple(v.shape)
-            pv.scale = v.quantization.scales
-            pv.zerop = v.quantization.offsets
-            pv.scale = torch.tensor(pv.scale, device=pv.betensor.device) if len(pv.scale) > 1 else pv.scale
-            pv.zerop = torch.tensor(pv.zerop, device=pv.betensor.device) if len(pv.zerop) > 1 else pv.zerop
+            pv.scale = torch.tensor(v.quantization.scales, device=pv.betensor.device)
+            pv.zerop = torch.tensor(v.quantization.offsets, device=pv.betensor.device)
             pn.constants[k] = pv
         g.nodes.append(pn)
         pn.graph = g
@@ -171,8 +169,8 @@ def convert_aipu_graph_to_opt_graph(cg):
             pv.dtype = dt_dict[str(v._dtype().name)]
             pv.ir_dtype = pv.dtype
             pv.ir_shape = tuple(v.shape)
-            pv.scale = float(v.quantization.scale)
-            pv.zerop = int(v.quantization.offset)
+            pv.scale = torch.tensor(v.quantization.scales, device=pv.betensor.device)
+            pv.zerop = torch.tensor(v.quantization.offsets, device=pv.betensor.device)
             if 'range' in v._attrs:
                 # layer_top_range
                 layer_top_range.append(v._attrs['range'])
@@ -232,6 +230,7 @@ def convert_opt_graph_to_aipu_graph(g):
         elif isinstance(data, np.ndarray):
             ret_data = [data.tolist()] if data.ndim == 0 else data.tolist()
         elif isinstance(data, torch.Tensor):
+            data = data.flatten()
             ret_data = [data.tolist()] if data.dim() == 0 else data.tolist()
         else:
             ret_data = data
@@ -300,7 +299,7 @@ def parse_graph_from_ir(ir_txt, ir_bin):
     from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
     from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
     from AIPUBuilder.Optimizer.framework.pycore.pytype import register_optype, OpType
-    from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN
+    from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN, OPT_DEBUG
     from AIPUBuilder.Optimizer.utils.dtype_utils import str2dtype, dtype2nptype
     import re
     import numpy as np
@@ -452,9 +451,11 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                             main_key = k[0:-len(f"_{mini_key}")]
                             if main_key in n.constants.keys():
                                 n.constants[main_key].__setattr__(opt_mini_keys[mini_key], n.constants[k].betensor)
-                                need_pop_key.append(k)
                             else:
-                                OPT_WARN(f"{main_key} has scale/zp, but this node has not the corresponding {main_key} data.")
+                                n.params[k] = t.betensor.cpu().numpy().flatten().tolist()
+                                OPT_DEBUG(f"{main_key} has scale/zp, but this node={n.type} has not the corresponding {main_key} data,"
+                                          f" and will change the constant data to parameter data.")
+                            need_pop_key.append(k)
                 for pop_key in need_pop_key:
                     n.constants.pop(pop_key)
             OPT_INFO('Successfully parsed IR with python API.')

@@ -114,7 +114,11 @@ def gather(self, *args):
         out = torch.index_select(inp0_betensors[i], axis - 1, inp_indice)
         padding[-1] = indice_len - valid_num
         out = torch.nn.functional.pad(out, padding, value=padding_value)
-        temp_out[i] = out.reshape(temp_out[i].shape)
+        # out shape maybe not match temp_out shape due to some inddex including max index range
+        # so only fill actual data to temp_out
+        tmp = temp_out[i].flatten()
+        tmp[:out.flatten().shape[0]] = out.flatten()
+        temp_out[i] = tmp.reshape(temp_out[i].shape)
     self.outputs[0].betensor = temp_out.reshape(self.outputs[0].ir_shape)
     # if out.shape[axis-1] < self.outputs[0].shape[original_axis]:
     #     pad_len = self.outputs[0].shape[original_axis] - out.shape[axis]

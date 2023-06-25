@@ -662,55 +662,50 @@ class GlobalCalibrationParamField(BaseField):
     # global calibration method like 'easy_quant', 'ada_round', ... , default is None, means no global calibration.
     @staticmethod
     def _parse(gc):
-        # '^\s*((none)|(((easy_quant)|(grid_search))(\s*\[(\s*(\-|\+)?\d+((\.\d+)|\.)?\s*,)+\s*(\-|\+)?\d+((\.\d+)|\.)?\s*\])))\s*$'
-        m = re.match(
-            r'^\s*((none)|(easy_quant)|(svd_quant)|(adaround)|(((easy_quant)|(svd_quant)|(adaround))(\s*\[(\s*(\-|\+)?\d+((\.\d+)|\.)?\s*,)+\s*(\-|\+)?\d+((\.\d+)|\.)?\s*\])))\s*$', gc.lower())
-        flag = False
-        vec = []
-        if m:
-            flag = True
-            param_list = re.findall('[0-9]+\.?[0-9]*\s*', gc.lower())
-            vec = [float(param) for param in param_list]
-            return flag, vec
+        rfloat = r'\s*(\-|\+)?\d+((\.\d+)|\.)?\s*'
+        roptype = r'\s*[a-zA-Z_0-9]+\s*'
+        rparams = r'\s*\[{}(,{})*\]\s*'.format(rfloat, rfloat)
+        roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
+        rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
+        rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
+        rmethod = r'\s*((svd_quant)|(easy_quant)|(mvn_correction)|(adaround)|(adaquant_zy))\s*'
+        rmethod_param = r'{}{}'.format(rmethod, rparams)
+        rmethod_param_optypes = r'{}{}{}'.format(rmethod, rparams, roptypes)
+        rmethod_param_layers = r'{}{}{}'.format(rmethod, rparams, rlayers)
+        one_method = r'\s*(({})|({})|({})|({}))\s*'.format(rmethod, rmethod_param,
+                                                           rmethod_param_optypes, rmethod_param_layers)
+        multi_methods = r'^{}(&{})*$'.format(one_method, one_method)
+        gcstr = str(gc).lower().strip()
+        if 'none' == gcstr:
+            return (True, [])
+        elif re.match(multi_methods, gcstr):
+            valid_methods = []
+            for mstr in [x.lower().strip() for x in re.split(r'&', gcstr) if x.lower().strip()]:
+                name = mstr + ' '
+                name_idx = name.find('[')
+                name = name[:name_idx].strip()
+                vec = []
+                oplist = []
+                if name_idx > 0:
+                    param_end = mstr.find(']')
+                    param_list = re.split(r',|\[|\]|\(|\)|\s+', mstr[len(name):param_end])
+                    vec = [float(param) for param in param_list if param.lower().strip()]
+                    ol_str = mstr[param_end+1:]
+                    if re.match(rmethod_param_optypes, mstr):
+                        oplist = [o.lower().strip() for o in re.split(
+                            r',|\[|\]|\(|\)|\s+', ol_str) if o.lower().strip()]
+                    elif re.match(rmethod_param_layers, mstr):
+                        idx_list = re.split(r',|\[|\]|\(|\)|\s+', ol_str)
+                        layer_ranges = [int(idx) for idx in idx_list if idx.lower().strip()]
+                        for k in range(0, len(layer_ranges), 2):
+                            for l in range(layer_ranges[k], layer_ranges[k+1]):
+                                oplist.append(l)
+                    else:
+                        pass
+                valid_methods.append((name, vec, set(oplist)))
+            return (True, valid_methods)
         else:
-            m = re.match(
-                r'^\s*((none)|(svd_quant)|(((svd_quant))(\s*\[\(((\s*(\-|\+)?\d+((\.\d+)|\.)?\s*,))+\s*(\-|\+)?\d+((\.\d+)|\.)?\s*\)\,)))|\s*(\w)\s*$', gc.lower())
-            flag = False
-            vec = []
-            if m:
-                # opt cfg just like this global_calibration=svd_quant[(0.48, 1.92, 50,0.086),(mul),(eltwise,DepthwiseConv),(activation,shape)]
-                #
-                flag = True
-                param_list = re.findall('[0-9]+\.?[0-9]*\s*', gc.lower())
-                vec = [float(param) for param in param_list[0:4]]
-                scopes_op_list = re.findall('\[+\(+|[0-9]+\.?[0-9]*\s*|\)+\]+', gc.lower())[6:]
-                oplist = [[] for i in range(3)]
-                oplist_ind = 0
-                if len(scopes_op_list) == 0:
-                    cal_min_max_op = "".join(re.findall('[/(a-z,/)]+', gc.lower()))
-                    hh = cal_min_max_op.split('(,,,),')[1]
-                    op_list = [x.lower() for x in re.split(r',|\s+', hh) if x]
-                    for i in range(len(op_list)):
-                        if '(' in op_list[i] and ')' in op_list[i]:
-                            oplist[oplist_ind].append(op_list[i].strip('()'))
-                            oplist_ind = oplist_ind + 1
-                        elif '(' in op_list[i]:
-                            oplist[oplist_ind].append(op_list[i].lstrip('('))
-                        elif ')' in op_list[i]:
-                            oplist[oplist_ind].append(op_list[i].rstrip(')'))
-                            oplist_ind = oplist_ind + 1
-                        else:
-                            oplist[oplist_ind].append(op_list[i])
-                # op range optimzer
-                else:
-                    # opt cfg just like this global_calibration=svd_quant[[(0.38, 1.89, 60,0.06106)],[()],[(67,79),(81,120)],[(1,66)]]
-                    for i in range(len(scopes_op_list)):
-                        if ')]' in scopes_op_list[i]:
-                            # oplist[oplist_ind].append(re.findall(r'\d+',scopes_op_list[i]))
-                            oplist_ind = oplist_ind + 1
-                        elif '[(' not in scopes_op_list[i]:  # optimize start node
-                            oplist[oplist_ind].append(re.findall(r'\d+', scopes_op_list[i])[0])
-                return flag, vec, oplist
+            return (False, [])
 
     @staticmethod
     def default():
@@ -719,9 +714,31 @@ class GlobalCalibrationParamField(BaseField):
     @staticmethod
     def message():
         return "Global calibration (scale/zero_point/rounding optimization) method, now supports: 'none', \
-            'easy_quant'(https://arxiv.org/pdf/2006.16669.pdf), 'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups]', \
-            'svd_quant'(arm china), 'svd_quant[[(alpha, beta, nsteps, thresh)],[(op_x_name)],[(op_y_name)],[(op_z_name)]] or svd_quant[[(alpha, beta, nsteps, thresh)],[(op_range0)],[(op_range1)],[(op_range2)]]' , \
-            'adaround'(https://arxiv.org/pdf/2004.10568.pdf), 'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start]'. Where 'batches' means how many (calibartion) data batches will be used, 'epochs' means the maximum epochs if not convergence, 'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha','beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods, 'none' means do nothing, default to 'none'. "
+            'easy_quant' (refer to https://arxiv.org/pdf/2006.16669.pdf), \
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups]', \
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][operator_type1, operator_type2, ...]', \
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][(layer_i, layer_j), (layer_k, layer_l), ...]', \
+            'adaround' (refer to https://arxiv.org/pdf/2004.10568.pdf), \
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start]', \
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][operator_type1, operator_type2, ...]', \
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][(layer_i, layer_j), (layer_k, layer_l), ...]', \
+            'adaquant_zy' (refer to https://arxiv.org/pdf/2006.10518.pdf) \
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation]' \
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][operator_type1, operator_type2, ...]' \
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][(layer_i, layer_j), (layer_k, layer_l), ...]' \
+            'mvn_correction' (arm china),\
+            'mvn_correction[mode, alpha]' ,\
+            'mvn_correction[mode, alpha][operator_type1, operator_type2, ...]' ,\
+            'mvn_correction[mode, alpha][(layer_i, layer_j), (layer_k, layer_l), ...]' ,\
+            'svd_quant' (arm china), \
+            'svd_quant[mode, alpha, beta, nsteps, thresh][operator_type1, operator_type2, ...]', \
+            'svd_quant[mode, alpha, beta, nsteps, thresh][(layer_i, layer_j), (layer_k, layer_l), ...]'. \
+            Where 'operator_type1' and 'operator_type2' are valid operator type names that specify the operators which will be applied, \
+            'layer_i', 'layer_j', 'layer_k' and ''layer_l' stand for layer_id in input IR and '(layer_i, layer_j), (layer_k, layer_l)' specify the layers which will be applied,  \
+            'batches' means how many (calibartion) data batches will be used, 'epochs' means the maximum epochs if not convergence, \
+            'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha','beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods, \
+            'none' means do nothing, default to 'none'. \
+            You can also apply multiple methods sequentially with `&`, e.g. `adaround[10, 3, 32] & easy_quant`. "
 
     @staticmethod
     def check(gc):
@@ -949,21 +966,23 @@ class BiasEffectiveBitsField(BaseField):
 
     @staticmethod
     def default():
-        return '31'
+        return ''
 
     @staticmethod
     def check(bb):
         _bbits = BiasEffectiveBitsField._bias_bits()
-        return True if not (isinstance(bb, int) and bb in _bbits) else False
+        return True if not (bb == '' or (isinstance(bb, int) and bb in _bbits)) else False
 
     @staticmethod
     def error(bb):
         _bbits = BiasEffectiveBitsField._bias_bits()
-        return f"Required the integer 'and' field and must be in {_bbits}, now is {type(bb)} type, {bb}, default value=31."
+        return (f"The 'bias_effective_bits' field must be in {_bbits} or equal to '', "
+                f"now is {type(bb)} type, {bb}, default value=''.")
 
     @staticmethod
     def message():
-        return f"The effective high bits for bias data which realy taking part in computation (lower bits will be set to 0), due to hardware restriction. "
+        return (f"The effective high bits for bias data which realy taking part "
+                f"in computation (lower bits will be set to 0), due to hardware restriction. ")
 
 
 @field_register('unify_shifts_for_aiff', 'default')
@@ -1268,7 +1287,7 @@ class UnifyScales4MultiInputsOP(BaseField):
             return {}
         else:
             r = {}
-            s = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|\s+', str(sqs).lower().strip()) if x]
+            s = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|\s+', str(sqs).lower().strip()) if x.lower().strip()]
             for i in range(0, len(s), 4):
                 op_name = s[i]
                 depth = int(s[i+1])
@@ -1689,7 +1708,7 @@ class TrimInfinityField(BaseField):
     def parse(ti):
         conf = str(ti).lower().strip()
         if len(conf) > 0 and (not TrimInfinityField.check(conf)):
-            y = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|:|\s+', conf) if x]
+            y = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|:|\s+', conf) if x.lower().strip()]
             if conf[0] == '(':
                 return 1, ((float(y[0]), float(y[1])), y[-1])
             elif conf[0] == '[':
@@ -1837,7 +1856,7 @@ class CompatQuantizedModelFeild(BaseField):
 @field_register('compat_quantized_model_strategy', 'hidden')
 class CompatQuantizedModelStrategyFeild(BaseField):
     _strategies = ['8bSymWeightUnchange', '8bAsymWeightTo16bSymWeight']
-    _extra_strategies = ['sym', 'asym']
+    _extra_strategies = ['sym', 'asym', 'fasymp']
     _all_strategies = _strategies + _extra_strategies
     _strategies_lower = [_s.lower() for _s in _all_strategies]
 

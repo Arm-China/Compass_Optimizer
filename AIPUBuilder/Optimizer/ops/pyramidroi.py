@@ -169,9 +169,9 @@ def PyramidROIAlign(self, *args):
 
                     xy_q = y_lerp_q[idxh, :]*x_lerp_q[idxw, :] >> qvalue
                     fourpoint_sum = (top_left+bottom_right-top_right-bottom_left)*xy_q
-                    top = (top_left << qvalue) + ((top_right-top_left) * x_lerp_q[idxw, :])
+                    top = (top_left.long() << qvalue) + ((top_right-top_left) * x_lerp_q[idxw, :])
                     bottom = (bottom_left - top_left) * y_lerp_q[idxh, :]
-                    data_q = (fourpoint_sum+top+bottom) >> qvalue
+                    data_q = (fourpoint_sum+top+bottom).long() >> qvalue
 
                     resize_feature[boxidx, idxh, idxw, :] = data_q
     else:

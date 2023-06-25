@@ -26,6 +26,10 @@ def crop(self, *args):
     for c_id, c in enumerate(crops):
         idx = c[0]
         per_axis = []
+        if c[0] < 0:
+            c[0] += x.shape[c_id]
+        if c[1] < 0:
+            c[1] += x.shape[c_id]
         if c[1] > x.shape[c_id] or c[0] > x.shape[c_id]-1:
             OPT_ERROR('layer_id=%s,Crop Op %d-dimension index is illegal, crop index is %s, and input shape is %s, Please Check!' %
                       (str(self.attrs['layer_id']), c_id, str(crops), str(x.shape)))

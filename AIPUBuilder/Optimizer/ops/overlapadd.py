@@ -12,7 +12,7 @@ from AIPUBuilder.Optimizer.logger import OPT_ERROR
 def overlapadd(self, *args):
     inp = self.inputs[0].betensor
     if self.quantized:
-        inp += self.inputs[0].zerop
+        inp += torch.tensor(self.inputs[0].zerop, device=inp.device).int()
     if len(inp.shape) < 2:
         OPT_ERROR("input tensor must be at least rank 2")
     frame_step = self.get_param('frame_step') if 'frame_step' in self.params else 1

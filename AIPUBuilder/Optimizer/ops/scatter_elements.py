@@ -122,7 +122,7 @@ def ScatterElements(self, *args):
     updates = self.inputs[2].betensor  # .reshape(list(self.inputs[2].ir_shape))  # update
     out = self.outputs[0]
     reduce_method = self.get_param('reduction', optional=False, default_value='NONE').upper()  # NONE/ADD/MUL
-    if reduce_method not in ['NONE', 'ADD', 'MUL']:
+    if reduce_method not in ['NONE', 'ADD', 'MUL', 'MIN', 'MAX']:
         OPT_ERROR('Scatter_Elements dont support method:%s' % reduce_method)
 
     axis = self.get_param('axis', optional=False, default_value=0)  # [-s, s-1]
@@ -144,8 +144,12 @@ def ScatterElements(self, *args):
         if reduce_method == 'MUL':
             shift, shift0, shift1 = self.params['shift_value']
 
-        inner_min = -2 ** (self.inputs[0].qbits + self.inputs[2].qbits-1)
-        inner_max = 2 ** (self.inputs[0].qbits + self.inputs[2].qbits-1) - 1
+        if is_signed(self.outputs[0].dtype):
+            inner_min = -2 ** (self.inputs[0].qbits + self.inputs[2].qbits-1)
+            inner_max = 2 ** (self.inputs[0].qbits + self.inputs[2].qbits-1) - 1
+        else:
+            inner_min = 0
+            inner_max = 2 ** (self.inputs[0].qbits + self.inputs[2].qbits) - 1
 
         if reduce_method == 'ADD':
             data = linear_requantize(data + self.inputs[0].zerop, scale0, 0, 0, inner_min, inner_max)
@@ -163,6 +167,11 @@ def ScatterElements(self, *args):
             updates = linear_requantize(updates + self.inputs[2].zerop, scale1, 0, 0, inner_min, inner_max)
             output = data.clone().scatter_(axis, indices, updates)
 
+        elif reduce_method in ['MIN', 'MAX']:
+            data = linear_requantize(data + self.inputs[0].zerop, scale0, 0, 0, inner_min, inner_max)
+            updates = linear_requantize(updates + self.inputs[2].zerop, scale1, 0, 0, inner_min, inner_max)
+            output = data.clone().scatter_reduce(axis, indices, updates, reduce='a'+reduce_method.lower(), include_self=True)
+
         output = linear_requantize(output, scale, shift, out.zerop, out.qmin, out.qmax)
 
     else:
@@ -170,8 +179,10 @@ def ScatterElements(self, *args):
             output = data.clone().scatter_(axis, indices, updates, reduce='add')
         elif reduce_method == 'MUL':
             output = data.clone().scatter_(axis, indices, updates, reduce='multiply')
-        else:
+        elif reduce_method == 'NONE':
             output = data.clone().scatter_(axis, indices, updates)  # NONE dont need param 'reduce'
+        elif reduce_method in ['MIN', 'MAX']:
+            output = data.clone().scatter_reduce(axis, indices, updates, reduce='a'+reduce_method.lower(), include_self=True)
 
     out.betensor = output
     return out.betensor

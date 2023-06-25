@@ -88,5 +88,26 @@ def lookup_lut_powerof2(inputs, lut, lut_in_bits, in_is_signed, lut_out_bits, ou
     inter_value = (lut_long[lut_index+1] - lut_long[lut_index]) * interp_index
     inter_value = inter_value >> ibits
     out = lut_long[lut_index] + inter_value
-    out = torch.clamp(out, out_qmin, out_qmax).float()
+    out = torch.clamp(out, out_qmin, out_qmax).long()
     return out
+
+
+def broadcasting_transform(x0, x1):
+    from AIPUBuilder.Optimizer.logger import OPT_WARN
+    # align axis
+    x0_shape, x1_shape = x0.shape, x1.shape
+    max_len = max(len(x0_shape), len(x1_shape))
+    tile_a, tile_b = [1 for c in range(max_len)], [1 for c in range(max_len)]
+    x0, x1 = x0.tile(tile_a), x1.tile(tile_b)
+
+    # check broadcast params
+    for i in range(max_len):
+        local_axis = max_len - i - 1
+        if (x0.shape[local_axis] == 1 and x1.shape[local_axis] % x0.shape[local_axis] == 0):
+            tile_a[local_axis] = x1.shape[local_axis]
+        elif (x1.shape[local_axis] == 1 and x0.shape[i] % x1.shape[local_axis] == 0):
+            tile_b[local_axis] = x0.shape[local_axis]
+        elif x1.shape[local_axis] % x0.shape[local_axis] != 0 or x0.shape[local_axis] % x1.shape[local_axis] != 0:
+            OPT_WARN('tensors are non-broadcastable')
+    x0, x1 = x0.tile(tile_a), x1.tile(tile_b)
+    return x0, x1

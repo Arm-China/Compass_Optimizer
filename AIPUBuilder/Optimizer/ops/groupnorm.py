@@ -4,9 +4,9 @@
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 
-from AIPUBuilder.Optimizer.ops.conv import linear_op_quantize
+from AIPUBuilder.Optimizer.ops.conv import linear_op_quantize, clear_lower_bits_for_bias
 import torch
-
+import math
 register_optype('GroupNorm')
 
 
@@ -21,69 +21,77 @@ def groupnorm_quantize(self, *args):
     q_bits_activation = self.attrs["q_bits_activation"]
 
     inp = self.inputs[0]
-    ngamma = self.placeholders[0]
-    normalized = self.placeholders[1]
-    ngamma.qbits = q_bits_activation
-    ngamma.scale, ngamma.zerop, ngamma.qmin, ngamma.qmax, ngamma.dtype = get_linear_quant_params_from_tensor(
-        ngamma, q_mode_activation, ngamma.qbits, is_signed=False)
-    ngamma.qinvariant = False
+
+    # normalized = self.placeholders[0]
+    normalized = PyTensor(self.name+"/normalized")
     normalized.qbits = q_bits_activation
+    # get need norm length N
+    axis = self.get_param('axis')
+    dim_num = len(inp.ir_shape)
+    is_groupnorm = True if self.type == OpType.GroupNorm else False
+    # groupnorm axis is channel axis
+    group = 1
+    if is_groupnorm:
+        group = self.get_param('group')
+        axis = list(range(1, dim_num))  # axis=[H, W, C//G], 0-dim is batch
+    scope_norm = [inp.ir_shape[axis[ax]] for ax in range(len(axis))]
+    # scope_norm = [inp.ir_shape[ax] if ax in axis else 1 for ax in range(dim_num)]
+
+    N = math.prod(scope_norm)//group
+    sqrt_n = math.sqrt(N)
+    normalized.min = -sqrt_n
+    normalized.max = sqrt_n
     normalized.scale, normalized.zerop, normalized.qmin, normalized.qmax, normalized.dtype = get_linear_quant_params_from_tensor(
         normalized, q_mode_activation, normalized.qbits, is_signed=True)
     normalized.qinvariant = False
 
-    ngamma_multiplier_bits = max(16, q_bits_activation)
-    ngamma_do_scale, ngamma_do_scale_type, ngamma_do_shift, ngamma_do_shift_type = \
-        get_scale_approximation_params(inp.scale * ngamma.scale,
-                                       mult_bits=ngamma_multiplier_bits,
-                                       force_shift_positive=self.force_shift_positive)
-    self.params['ngamma_scale_value'] = int(ngamma_do_scale)
-    self.params['ngamma_scale_type'] = ngamma_do_scale_type
-    self.params['ngamma_shift_value'] = int(ngamma_do_shift)
-    self.params['ngamma_shift_type'] = ngamma_do_shift_type
-    self.params['ngamma_zp_value'] = int(ngamma.zerop)
-    self.params['ngamma_zp_type'] = bits2dtype(q_bits_activation, is_signed=False)
-    norm_do_scale, norm_do_scale_type, norm_do_shift, norm_do_shift_type = \
-        get_scale_approximation_params(normalized.scale / (inp.scale * ngamma.scale),
-                                       mult_bits=q_bits_activation,
-                                       force_shift_positive=self.force_shift_positive)
-    self.params['norm_scale_value'] = int(norm_do_scale)
-    self.params['norm_scale_type'] = norm_do_scale_type
-    self.params['norm_shift_value'] = int(norm_do_shift)
-    self.params['norm_shift_type'] = norm_do_shift_type
+    if q_bits_activation <= 8:
+        ceil_exp = math.ceil(math.log2(N))
+        complement = 6
+
+        var_shift = (30+ceil_exp-31-(complement >> 1))
+        var_shift = var_shift + ((var_shift & 1) == 1)
+        self.params['var_shift_value'] = var_shift
+        self.params['var_shift_type'] = bits2dtype(8, is_signed=False)
+        self.params['norm_scale_value'] = 1  # not used with 8bit quant
+        self.params['norm_scale_type'] = bits2dtype(8, is_signed=False)
+        self.params['norm_shift_value'] = int(var_shift >> 1)
+        self.params['norm_shift_type'] = bits2dtype(8, is_signed=False)
+    else:
+        norm_do_scale, norm_do_scale_type, norm_do_shift, norm_do_shift_type = \
+            get_scale_approximation_params(normalized.scale / 127,
+                                           mult_bits=q_bits_activation,
+                                           force_shift_positive=self.force_shift_positive)
+        self.params['var_shift_value'] = 0   # not used with 16bit quant
+        self.params['var_shift_type'] = bits2dtype(8, is_signed=False)
+        self.params['norm_scale_value'] = int(norm_do_scale)
+        self.params['norm_scale_type'] = norm_do_scale_type
+        self.params['norm_shift_value'] = int(norm_do_shift)
+        self.params['norm_shift_type'] = norm_do_shift_type
 
     w_scale = 1.0
-    # if 'weights' in self.constants :
-    #     w = self.constants['weights']
-    #     w.scale, w.zerop, w.qmin, w.qmax = get_linear_quant_params_from_tensor(w, q_mode_weight, q_bits_weight, is_signed=True)
-    #     w.betensor = linear_quantize_clip(w.betensor, w.scale, w.zerop, w.qmin, w.qmax)
-    #     w.qbits = q_bits_weight
-    #     w.dtype = bits2dtype(w.qbits, is_signed=True)
-    #     w_scale = w.scale
-    # if 'biases' in self.constants :
-    #     b = self.constants["biases"]
-    #     b.scale = normalized.scale * w_scale
-    #     b.zerop = 0
-    #     b.qmin = -2**(q_bits_bias-1)
-    #     b.qmax = 2**(q_bits_bias-1) - 1
-    #     b.qbits = q_bits_bias
-    #     b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
-    #     b.dtype = bits2dtype(b.qbits, is_signed=True)
     if 'weights' in self.constants:
         old = self.replace_input_temporarily(0, normalized)
         uflag = self.attrs['unify_shifts_for_aiff']
+        if 'group' in self.params:
+            group_bak = self.get_param('group')
+            self.params['group'] = 1
         if self.type != OpType.GroupNorm:
             self.attrs['unify_shifts_for_aiff'] = False
         linear_op_quantize(self, *args)
+        # groupnorm: lib would call BN, so need to compress bias
+        # instancenorm/layernorm: if use AIFF, compress bias, if use TPC, not compress bias
+        clear_lower_bits_for_bias(self, *args)
         self.attrs['unify_shifts_for_aiff'] = uflag
         self.replace_input_temporarily(0, old)
+        if 'group' in self.params:
+            self.params['group'] = group_bak
     else:
         out = self.outputs[0]
         out.qbits = q_bits_activation
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
             out, q_mode_activation, out.qbits, is_signed=True)
         out.qinvariant = False
-
         do_scale, do_scale_type, do_shift, do_shift_type = \
             get_scale_approximation_params(out.scale / (normalized.scale * w_scale),
                                            mult_bits=q_bits_activation,
@@ -92,6 +100,16 @@ def groupnorm_quantize(self, *args):
         self.params['scale_type'] = do_scale_type
         self.params['shift_value'] = int(do_shift)
         self.params['shift_type'] = do_shift_type
+    if self.type == OpType.MVN:
+        do_scale = self.params['scale_value']
+        do_shift = self.params['shift_value']
+        norm_do_scale = self.params['norm_scale_value']
+        do_scale, do_scale_type, do_shift, do_shift_type = \
+            get_scale_approximation_params(norm_do_scale*do_scale*(0.5**do_shift),
+                                           mult_bits=q_bits_activation,
+                                           force_shift_positive=self.force_shift_positive)
+        self.params['norm_scale_value'] = do_scale
+        self.params['norm_shift_value'] = do_shift + self.params['norm_shift_value']
 
     self.constants["lut"] = PyTensor(
         self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
@@ -129,45 +147,52 @@ def groupnorm(self, *args):
     ngamma_chunks = []
     for t in in_chunks:
         if self.quantized:
-            t_mean = torch.mean(t.double(), dim=axis, keepdim=True).round().long()
-            t_var = torch.mean((t.double() - t_mean)**2, dim=axis, keepdim=True).long()
-
-            # ng = isqrt(var) = isqrt(mean((inp - m)*(inp - m)))
-            # (ng + z1)/s1 = isqrt(mean((inp - m)*(inp - m)/s0/s0))
-            # (ng + z1)/s1 = isqrt(mean((inp - m)*(inp - m))) * s0
-            # (ng + z1)/s1 = isqrt(var) * s0
-            # (ng + z1) = isqrt(var) * (s0 * s1)
-            ngamma_do_scale = self.params['ngamma_scale_value']
-            ngamma_do_shift = self.params['ngamma_shift_value']
-            ngamma_qmin, ngamma_qmax = bits2range(out.qbits, is_signed=False)
-            # t_ngamma = (torch.pow(t_var, -0.5) * (2**31)).round()
-            t_ngamma = calculate_inverse_sqrt(t_var)
-            t_ngamma = t_ngamma >> 16
-            t_ngamma = linear_requantize(t_ngamma, ngamma_do_scale, ngamma_do_shift + 15, 0, ngamma_qmin, ngamma_qmax)
-            mean_chunks.append(t_mean)
-            ngamma_chunks.append(t_ngamma)
+            q_bits_activation = inp.qbits
+            if q_bits_activation <= 8:
+                qmin, qmax = bits2range(inp.qbits, is_signed=is_signed(inp.dtype))
+                var_shift = self.get_param('var_shift_value')
+                t_mean = torch.mean(t.double(), dim=axis, keepdim=True).round().long()
+                t_mean = torch.clip(t_mean, qmin, qmax)
+                t_var = torch.sum((t.double() - t_mean)**2, dim=axis, keepdim=True).long() >> var_shift
+                t_ngamma = calculate_inverse_sqrt(t_var)
+                t_ngamma = (t_ngamma+32768) >> 16
+                mean_chunks.append(t_mean)
+                ngamma_chunks.append(t_ngamma)
+            else:
+                t_mean = torch.mean(t.double(), dim=axis, keepdim=True).round().long()
+                t_var = torch.mean((t.double() - t_mean)**2, dim=axis, keepdim=True).long()
+                ngamma_qmin, ngamma_qmax = bits2range(16, is_signed=False)
+                t_ngamma = calculate_inverse_sqrt(t_var)
+                t_ngamma = (t_ngamma+32768) >> 16
+                t_ngamma = linear_requantize(
+                    t_ngamma, self.params['norm_scale_value'], self.params['norm_shift_value'], 0, ngamma_qmin, ngamma_qmax)
+                mean_chunks.append(t_mean)
+                ngamma_chunks.append(t_ngamma)
         else:
             t_mean = torch.mean(t.float(), dim=axis, keepdim=True)
             t_var = torch.mean((t.float() - t_mean)**2, dim=axis, keepdim=True)
-            # if t.shape[axis] == 1, t_std is nan using torch.std_mean
-            #t_std, t_mean = torch.std_mean(t, dim=axis, keepdim=True)
             t_std = torch.pow(t_var + eps, 0.5)
             if torch.count_nonzero(t_std) != t_std.numel():
                 OPT_WARN('type=%s, input std contain zero value, please check the axis or set epsilon nonzero value' % (str(self.type)))
             t_ngamma = 1.0 / (t_std)
             mean_chunks.append(t_mean)
             ngamma_chunks.append(t_ngamma)
-    mean = torch.cat(mean_chunks, dim=channel_axis)
-    ngamma = torch.cat(ngamma_chunks, dim=channel_axis)
+        mean = torch.cat(mean_chunks, dim=channel_axis)
+        ngamma = torch.cat(ngamma_chunks, dim=channel_axis)
     if is_groupnorm and mean.shape[channel_axis] != inp_betensor.shape[channel_axis]:
         mean = torch.repeat_interleave(mean, inp_betensor.shape[channel_axis]//group, dim=channel_axis)
         ngamma = torch.repeat_interleave(ngamma, inp_betensor.shape[channel_axis]//group, dim=channel_axis)
-    normalized = (inp_betensor - mean) * ngamma
     if self.quantized:
-        qmin, qmax = bits2range(out.qbits, is_signed=True)
-        normalized = linear_requantize(normalized,
-                                       self.params['norm_scale_value'], self.params['norm_shift_value'], 0,
-                                       qmin, qmax)
+        qmin, qmax = bits2range(out.qbits, is_signed=is_signed(out.dtype))
+        normalized = (inp_betensor - mean) * ngamma
+        shift = 8
+        multiplier = 1
+        if q_bits_activation <= 8:
+            shift = shift+self.params['norm_shift_value']
+            multiplier = self.params['norm_scale_value']
+        normalized = linear_requantize(normalized, multiplier, shift, 0, qmin, qmax)
+    else:
+        normalized = (inp_betensor - mean) * ngamma
     out.betensor = normalized
     gamma = 1.0
     if 'weights' in self.constants:
@@ -200,13 +225,10 @@ def groupnorm(self, *args):
         out.betensor = linear_requantize(out.betensor,
                                          do_scale, do_shift, o_zp,
                                          out.qmin, out.qmax)
-    if not self.quantized:
-        if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/ngamma", ngamma.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name+"/normalized", normalized.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            self.placeholders.append(ph0)
-            self.placeholders.append(ph1)
-        self.placeholders[0].betensor = ngamma
-        self.placeholders[1].betensor = normalized
+    # if not self.quantized:
+    #     if len(self.placeholders) < 1:
+    #         plh = PyTensor(self.name+"/normalized", normalized.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+    #         self.placeholders.append(plh)
+    #     self.placeholders[0].betensor = normalized
 
     return out.betensor
