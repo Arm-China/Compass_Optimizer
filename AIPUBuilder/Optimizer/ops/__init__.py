@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 import torch.nn.functional as F
@@ -172,3 +172,4 @@ from . import collapse_repeated
 from . import sufficientStatistics
 from . import heatmapMaxkeypoint
 from . import rms_norm
+from . import div_mod

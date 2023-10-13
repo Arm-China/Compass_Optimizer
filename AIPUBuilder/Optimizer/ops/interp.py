@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 
@@ -30,12 +30,12 @@ def _scaler(i, ratio, mode, input_size, out_size):
     if mode == 'half_pixel':
         return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else (i + 0.5) * (input_size / out_size) - 0.5
     elif mode == 'align_corners':
-        return i * (input_size - 1) / (out_size - 1)
+        return i * 0. if out_size == 1 else (i * (input_size - 1) / (out_size - 1))
     elif mode == 'pytorch_half_pixel':
         if out_size > 1:
             return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else (i + 0.5) * (input_size / out_size) - 0.5
         else:
-            return 0
+            return i * 0.
     elif mode == 'tf_half_pixel_for_nn':
         return (i + 0.5) * (1. / ratio) if ratio is not None else (i + 0.5) * (input_size / out_size)
     else:  # asymmetric

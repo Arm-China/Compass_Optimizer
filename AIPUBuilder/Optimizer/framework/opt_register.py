@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 
 from enum import Enum, unique
@@ -124,30 +124,34 @@ def op_register(optypes, version=1., *args):
 
     def dec(func):
         def mfun(self, *args):
-            if self.get_param('unquantifiable', optional=True, default_value=False):
-                self.quantized = False
-            if len(args) > 0:
-                # back=[inp.betensor for inp in self.inputs]
-                assert(len(args) == len(self.inputs))
-                for inp, t in zip(self.inputs, args):
-                    inp.betensor = t
-            # set readonly keys
-            # self.readonly_keys_set()
-            # self.disable_keys_set()
-            if 'calculate_running_time' not in self.attrs or not self.attrs['calculate_running_time']:
-                ret = func(self)
-            else:
-                start_t = time.time()
-                ret = func(self)
-                self.attrs['cost_time'] = time.time() - start_t
+            try:
+                if self.get_param('unquantifiable', optional=True, default_value=False):
+                    self.quantized = False
+                if len(args) > 0:
+                    # back=[inp.betensor for inp in self.inputs]
+                    assert(len(args) == len(self.inputs))
+                    for inp, t in zip(self.inputs, args):
+                        inp.betensor = t
+                # set readonly keys
+                # self.readonly_keys_set()
+                # self.disable_keys_set()
+                if 'calculate_running_time' not in self.attrs or not self.attrs['calculate_running_time']:
+                    ret = func(self)
+                else:
+                    start_t = time.time()
+                    ret = func(self)
+                    self.attrs['cost_time'] = time.time() - start_t
 
-            # free readonly keys
-            # self.disable_keys_free()
-            # self.readonly_keys_free()
-            if ret is None:
-                ret = [t.betensor for t in self.outputs]
-            if not isinstance(ret, torch.Tensor) and len(ret) == 1:
-                return ret[0]
+                # free readonly keys
+                # self.disable_keys_free()
+                # self.readonly_keys_free()
+                if ret is None:
+                    ret = [t.betensor for t in self.outputs]
+                if not isinstance(ret, torch.Tensor) and len(ret) == 1:
+                    return ret[0]
+            except Exception as e:
+                OPT_ERROR(f"{self}")
+                raise e
             return ret
         is_plugin = is_plugin_op(get_file_name())
         _register(optypes, version, mfun, ALL_OPT_OP_DICT, OP_DICT, is_plugin, 'forward register')
@@ -156,21 +160,26 @@ def op_register(optypes, version=1., *args):
 
 
 def quant_register(optypes, version=1.0, *args):
+    from AIPUBuilder.Optimizer.logger import OPT_ERROR
     global QUANT_OP_DICT
     if not isinstance(optypes, (tuple, list)):
         optypes = [optypes]
 
     def dec(func):
         def mfunc(self, *args, **kwargs):
-            unquantifiable = self.get_param('unquantifiable', optional=True, default_value=False)
-            if self.quantized or unquantifiable:
-                return
-            # set readonly keys
-            # self.readonly_keys_set()
-            ret = func(self, *args, **kwargs)
-            # free readonly keys
-            # self.readonly_keys_free()
-            self.quantized = True
+            try:
+                unquantifiable = self.get_param('unquantifiable', optional=True, default_value=False)
+                if self.quantized or unquantifiable:
+                    return
+                # set readonly keys
+                # self.readonly_keys_set()
+                ret = func(self, *args, **kwargs)
+                # free readonly keys
+                # self.readonly_keys_free()
+                self.quantized = True
+            except Exception as e:
+                OPT_ERROR(f"{self}")
+                raise e
             return ret
         is_plugin = is_plugin_op(get_file_name())
         _register(optypes, version, mfunc, ALL_OPT_QUANT_OP_DICT, QUANT_OP_DICT, is_plugin, 'quantize register')

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import os
 import re
@@ -698,7 +698,7 @@ class GlobalCalibrationParamField(BaseField):
                         idx_list = re.split(r',|\[|\]|\(|\)|\s+', ol_str)
                         layer_ranges = [int(idx) for idx in idx_list if idx.lower().strip()]
                         for k in range(0, len(layer_ranges), 2):
-                            for l in range(layer_ranges[k], layer_ranges[k+1]):
+                            for l in range(layer_ranges[k], layer_ranges[k+1]+1):
                                 oplist.append(l)
                     else:
                         pass
@@ -727,16 +727,16 @@ class GlobalCalibrationParamField(BaseField):
             'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][operator_type1, operator_type2, ...]' \
             'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][(layer_i, layer_j), (layer_k, layer_l), ...]' \
             'mvn_correction' (arm china),\
-            'mvn_correction[mode, alpha]' ,\
-            'mvn_correction[mode, alpha][operator_type1, operator_type2, ...]' ,\
-            'mvn_correction[mode, alpha][(layer_i, layer_j), (layer_k, layer_l), ...]' ,\
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits]' ,\
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][operator_type1, operator_type2, ...]' ,\
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][(layer_i, layer_j), (layer_k, layer_l), ...]' ,\
             'svd_quant' (arm china), \
             'svd_quant[mode, alpha, beta, nsteps, thresh][operator_type1, operator_type2, ...]', \
             'svd_quant[mode, alpha, beta, nsteps, thresh][(layer_i, layer_j), (layer_k, layer_l), ...]'. \
             Where 'operator_type1' and 'operator_type2' are valid operator type names that specify the operators which will be applied, \
             'layer_i', 'layer_j', 'layer_k' and ''layer_l' stand for layer_id in input IR and '(layer_i, layer_j), (layer_k, layer_l)' specify the layers which will be applied,  \
             'batches' means how many (calibartion) data batches will be used, 'epochs' means the maximum epochs if not convergence, \
-            'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha','beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods, \
+            'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha', 'beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods, \
             'none' means do nothing, default to 'none'. \
             You can also apply multiple methods sequentially with `&`, e.g. `adaround[10, 3, 32] & easy_quant`. "
 
@@ -1024,6 +1024,32 @@ class CastDtypesForLibField(BaseField):
                 f"due to corresponding spec's restriction). 'False' means no. 'True' means yes to all OPs. "
                 f"A list of valid operator type names (case insensitive, corresponding to layer_type in float IR),"
                 f" e.g., Abs,reshape,tile means yes to all the specified OPs.")
+
+
+@field_register('min_compatible_zhouyi_target', 'default')
+class MinZhouyiTarget(BaseField):
+    @staticmethod
+    def _support_target():
+        return ['Z2', 'Z3', 'X1', 'X2', 'X3']
+
+    @staticmethod
+    def default():
+        return 'Z2'
+
+    @staticmethod
+    def check(us):
+        support_target_ = MinZhouyiTarget._support_target()
+        return str(us).upper() not in support_target_
+
+    @staticmethod
+    def error(cd):
+        support_target = MinZhouyiTarget._support_target()
+        return f"Require the 'min_compatible_zhouyi_target' field be {support_target}, but now is {cd}."
+
+    @staticmethod
+    def message():
+        support_target = MinZhouyiTarget._support_target()
+        return (f"The lowest compatible architecture version for deployment, it may affect some operators' quantization schema, currently support: {support_target}.")
 
 
 @field_register('force_dtype_int', 'default')
@@ -1639,8 +1665,50 @@ class ScalingBitsField(BaseField):
 @field_register('trigger_float_op', 'default')
 class TriggerFloatOpField(BaseField):
     @staticmethod
-    def _trigger_float_op():
-        return ['disable', 'automatic', 'float16_preferred', 'bfloat16_preferred', 'float32_preferred']
+    def _parse(tf):
+        dstr = 'disable'
+        roptype = r'\s*[a-zA-Z_0-9]+\s*'
+        roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
+        rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
+        rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
+        rmethod = r'\s*(((float16_preferred)|(bfloat16_preferred)|(float32_preferred)|\
+            (float32_act_int_wht)|(float16_act_int_wht)|(bfloat16_act_int_wht))(!)?)\s*'
+        rmethod_optypes = r'{}{}~(({})|({}))'.format(rmethod, roptypes, rmethod, dstr)
+        rmethod_layers = r'{}{}~(({})|({}))'.format(rmethod, rlayers, rmethod, dstr)
+        one_method = r'\s*(({})|({})|({}))\s*'.format(rmethod, rmethod_optypes, rmethod_layers)
+        # multi_methods = r'^{}(&{})*$'.format(one_method, one_method)
+        # multi methods is actually disabled for simplicity
+        multi_methods = r'^{}$'.format(one_method)
+        tfstr = str(tf).lower().strip()
+        if dstr == tfstr:
+            return (True, [('disable', [], dstr)])
+        elif re.match(multi_methods, tfstr):
+            valid_methods = []
+            for mstr in [x.lower().strip() for x in re.split(r'&', tfstr) if x.lower().strip()]:
+                name = mstr + ' '
+                name_idx = name.find('[')
+                name = name[:name_idx].strip()
+                oplist = []
+                ol_str = mstr[name_idx:]
+                if re.match(rmethod_optypes, mstr):
+                    alt_idx = ol_str.find('~')
+                    dstr = ol_str[alt_idx+1:].strip()
+                    ol_str = ol_str[:alt_idx]
+                    oplist = [o.lower().strip() for o in re.split(
+                        r',|\[|\]|\(|\)|\s+', ol_str) if o.lower().strip()]
+                elif re.match(rmethod_layers, mstr):
+                    alt_idx = ol_str.find('~')
+                    dstr = ol_str[alt_idx+1:].strip()
+                    ol_str = ol_str[:alt_idx]
+                    idx_list = re.split(r',|\[|\]|\(|\)|\s+', ol_str)
+                    layer_ranges = [int(idx) for idx in idx_list if idx.lower().strip()]
+                    for k in range(0, len(layer_ranges), 2):
+                        for l in range(layer_ranges[k], layer_ranges[k+1]+1):
+                            oplist.append(l)
+                valid_methods.append((name, set(oplist), dstr))
+            return (True, valid_methods)
+        else:
+            return (False, [])
 
     @staticmethod
     def default():
@@ -1648,18 +1716,41 @@ class TriggerFloatOpField(BaseField):
 
     @staticmethod
     def check(tfo):
-        _trg_fp_op = TriggerFloatOpField._trigger_float_op()
-        return True if not (isinstance(tfo, str) and tfo.lower() in _trg_fp_op) else False
+        m = tfo.lower()
+        if TriggerFloatOpField._parse(m)[0]:
+            return False
+        else:
+            return True
 
     @staticmethod
     def error(tfo):
-        _trg_fp_op = TriggerFloatOpField._trigger_float_op()
-        return f"The `trigger_float_op` filed requires the string type, and must be in {_trg_fp_op}."
+        return f"Parsing `trigger_float_op` failed, please double check the instruction of this field"
 
     @staticmethod
     def message():
-        _trg_fp_op = TriggerFloatOpField._trigger_float_op()
-        return f"The `trigger_float_op` is used for activating layer lib's float implementation when being enabled, and the configurable options is: {_trg_fp_op}. Where `automatic` means the output IR will automatically employ float type layers according to libs' dtype spec (the calibration dataset is still needed, as probably not all of the model's operators do have float type layer lib implementation and quantization will be applied under such circumstances), 'float16_preferred', 'bfloat16_preferred' and 'float32_preferred' means corresponding float type will be selected preferentially if existed."
+        return '''
+The `trigger_float_op` is used for activating layer lib's float implementation when being enabled, and the configurable options is:
+
+disable
+float16_preferred
+bfloat16_preffered
+float32_preffered
+float16_act_int_wht
+float32_act_int_wht
+bfloat16_act_int_wht
+
+Where 'float16_preferred', 'bfloat16_preferred' and 'float32_preferred' means corresponding float type will be selected preferentially if existed
+(the calibration dataset may still needed, as probably not all of the model's operators do have float type layer lib implementation
+and quantization will be applied under such circumstances).
+
+Option ended with _int_wht means weight-only quantization will be applied (activations will be kept as float).
+
+If you want to ignore the implementation limitations of libs' dtype spec and force the specified float type to be used, you can append a '!' behind (so 'disable' is no need to append a '!'), e.g. 'float16_preferred!', 'float16_act_int_wht![FullyConnected]'.
+
+You can also assign option to specific layers (with corresponding layer_id range in input IR, e.g. 'float16_act_int_wht[(1,10),(20,30)]~float16_preferred!', 'float32_act_int_wht[(1,10)]~float16_preferred') or operator types (with valid operator type names, e.g. 'float16_act_int_wht[Abs, BatchNorm]~float16_preferred!', 'float16_act_int_wht[BatchNorm]~disable'), for layers not being specified, will use option behind '~'.
+
+The default value is 'disable'.
+        '''
 
 
 @field_register('save_statistic_info', 'default')
@@ -1878,29 +1969,29 @@ class CompatQuantizedModelStrategyFeild(BaseField):
         return f"When compat_quantized_model = true, the compat_quantized_model_strategy can be choose from {CompatQuantizedModelStrategyFeild._strategies}, default to {CompatQuantizedModelStrategyFeild.default()}."
 
 
-@field_register('compat_quantized_model_multiplier_bits', 'hidden')
-class CompatQuantizedModelMultiplierBitsField(BaseField):
+@field_register('multiplier_bits', 'hidden')
+class MultiplierBitsField(BaseField):
     @staticmethod
     def _multiplier_bits():
         return list(range(2, 16))
 
     @staticmethod
     def default():
-        return '13'
+        return ''
 
     @staticmethod
     def check(mb):
-        _abits = CompatQuantizedModelMultiplierBitsField._multiplier_bits()
-        return True if not (isinstance(mb, int) and mb in _abits) else False
+        _abits = MultiplierBitsField._multiplier_bits()
+        return True if not (mb == '' or (isinstance(mb, int) and mb in _abits)) else False
 
     @staticmethod
     def error(mb):
-        _abits = CompatQuantizedModelMultiplierBitsField._multiplier_bits()
-        return f"Required the integer 'compat_quantized_model_multiplier_bits' field and must be in {_abits}, now is {type(mb)} type, {mb}."
+        _abits = MultiplierBitsField._multiplier_bits()
+        return f"Required the integer 'multiplier_bits' field and must be in {_abits} or equal to '', now is {type(mb)} type, {mb}, default value=''."
 
     @staticmethod
     def message():
-        _abits = CompatQuantizedModelMultiplierBitsField._multiplier_bits()
+        _abits = MultiplierBitsField._multiplier_bits()
         return f"The bits used to represent 'M' when applying 'scale = M / (2**N)'. Now Optimizer supports: {_abits}."
 
 

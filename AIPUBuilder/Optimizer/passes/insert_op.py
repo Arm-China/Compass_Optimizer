@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import OPT_INFO
@@ -85,7 +85,9 @@ class InsertCastOp(BaseInsertOp):
             and (not self.whether_an_inserted_cast_layer(parent_node))
             and (not self.whether_an_inserted_cast_layer(node))
             and (not node.get_param('unquantifiable', optional=True, default_value=False))
-            and (not parent_node.get_param('unquantifiable', optional=True, default_value=False)),
+            and (not parent_node.get_param('unquantifiable', optional=True, default_value=False)
+                 or parent_node.type in [OpType.Quantize])
+            and (not edge_tensor.qinvariant),
             # insert cast op for lib's dtypes spec
             lambda node, parent_node, edge_tensor:
             (node.type in self.op_need_cast_dtypes_for_lib)
@@ -105,7 +107,7 @@ class InsertCastOp(BaseInsertOp):
 
         for _cond in _conditions:
             self.inserted_cast_layers += self.g.insert_cast_op_ahead(condition_func=_cond)
-
+            self.g.set_tensor_quantization_attrs()
         return self.inserted_cast_layers
 
     def before_pass(self):
@@ -156,7 +158,8 @@ class InsertCastOp(BaseInsertOp):
             if len(candidates) < 1:
                 candidates = backups
             for i in range(len(candidates)):
-                score = 0.0
+                #(matched, redundant, insufficient)
+                score = [0.0, 0.0, 0.0]
                 for j, in_dtype in enumerate(candidates[i][0]):
                     if j > len(node.children[0].inputs) - 1:
                         continue
@@ -170,19 +173,25 @@ class InsertCastOp(BaseInsertOp):
                                 dt = cp.params['to_dtype']
                                 break
 
-                    if is_signed(dt) == is_signed(in_dtype):
-                        score += 0.01
-                    if dt == in_dtype:
-                        score += 2.0
-                    elif dtype2bits(dt) < dtype2bits(in_dtype):
-                        score += 1.0
-                    elif dtype2bits(dt) == dtype2bits(in_dtype):
-                        score += 1.5
+                    dqmin, dqmax = dtype2range(dt)
+                    iqmin, iqmax = dtype2range(in_dtype)
+                    if iqmin == dqmin and dqmax == iqmax:
+                        # matched
+                        # may increase the weight of higher bits dtype
+                        score[0] += (dqmax - dqmin)
+                    elif iqmin <= dqmin and dqmax <= iqmax:
+                        # redundant
+                        score[1] += (dqmin - iqmin) + (iqmax - dqmax)
                     else:
-                        score += dtype2bits(in_dtype) * 1.0 / dtype2bits(dt)
+                        # insufficient
+                        if iqmin > dqmin:
+                            score[2] += iqmin - dqmin
+                        if dqmax > iqmax:
+                            score[2] += dqmax - iqmax
                 candidates[i][1] = score
             if len(candidates) > 0:
-                best = sorted(candidates, key=lambda x: x[1])[-1][0]
+                # more matched, less insufficient, less redundant
+                best = sorted(candidates, key=lambda x: (x[1][0], -x[1][2], -x[1][1]))[-1][0]
                 return best
             else:
                 return []
@@ -256,6 +265,7 @@ class InsertQuantizeOp(BaseInsertOp):
 
             n.params['unquantifiable'] = True
             n.outputs[0].dtype = inpt.dtype
+            n.attrs['q_bits_activation'] = dtype2bits(n.outputs[0].dtype)
             n.attrs['qinfo'] = {
                 'qbits': inpt.qbits,
                 'qmin': inpt.qmin,

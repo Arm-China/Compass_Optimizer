@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -100,31 +100,24 @@ def sufficient_tatistics_forward(self, *args):
         output0 = torch.sum(m_ss, axis, keepdims=True)
         # Limit the number of items to 65535
         output0 = torch.clamp(output0, act_qmin, act_qmax)
-        out0.betensor = torch.clamp(((output0 * out0_scale) >> out0_shift) - out0.zerop, out0.qmin, out0.qmax).long()
+        out0.betensor = torch.clamp(torch.div(output0 * out0_scale, 2**out0_shift,
+                                    rounding_mode='trunc').int() - out0.zerop, out0.qmin, out0.qmax).long()
 
-        # calculate var
-        count = 1
-        for ax in axis:
-            count *= inp0.betensor.shape[ax]
-        ignore_low16 = (2 ** 16 * count * out1_scale) <= 2 ** out1_shift
         v_ss = (m_ss * m_ss).long()
         v_ss = torch.clamp(v_ss, 0, 2 ** 32 - 1)
         high16_v_ss = torch.div(v_ss, 2 ** 16, rounding_mode='floor')
         high_sum = torch.sum(high16_v_ss, axis, keepdims=True)
         high_sum = torch.clamp(high_sum, 0, 2 ** 32 - 1)
-        high_output = (high_sum * out1_scale) >> (out1_shift - 16)
-        if ignore_low16:
-            low_output = torch.zeros_like(high_output, device=high_output.device)
-        else:
-            low16_v_ss = v_ss - high16_v_ss * 2 ** 16
-            low_sum = torch.sum(low16_v_ss, axis, keepdims=True)
-            low_sum = torch.clamp(low_sum, 0, 2 ** 32 - 1)
-            low_output = (low_sum * out1_scale) >> (out1_shift)
-        out1.betensor = torch.clamp(high_output + low_output - out1.zerop, out1.qmin, out1.qmax).long()
+        high_output = (high_sum * out1_scale * 2**16)
+
+        low16_v_ss = v_ss - high16_v_ss * 2 ** 16
+        low_sum = torch.sum(low16_v_ss, axis, keepdims=True).long()
+        low_sum = torch.clamp(low_sum, 0, 2 ** 32 - 1)
+        low_output = (low_sum * out1_scale)
+        out1.betensor = torch.clamp(((high_output + low_output) >> out1_shift) - out1.zerop, out1.qmin, out1.qmax).int()
     else:
         m_ss = x - shift
         v_ss = m_ss * m_ss
         out0.betensor = torch.sum(m_ss, axis, keepdims=True)
         out1.betensor = torch.sum(v_ss, axis, keepdims=True)
-
     return out0.betensor, out1.betensor

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -127,7 +127,8 @@ def NMS_Q(box, score, iou_threshold=None):
     areas = areas >> area_shift
     # order = score.ravel().argsort()[::-1]
 
-    order = torch.argsort(torch.flatten(score), descending=True)
+    # order = torch.argsort(torch.flatten(score), descending=True)
+    order = torch.linspace(0, len(torch.flatten(score))-1, steps=len(torch.flatten(score)), device=score.device).long()
     keep = []
     while order.shape[0] > 0:
         i = order[0]
@@ -177,7 +178,7 @@ def generateproposals(self, *args):
     feat_stride = 16  # image_height / box_encoding.shape[1]
     num_anchors = 12  # class_score.shape[3]
 
-    if not generateproposals_context.tile_anchor_done:
+    if not generateproposals_context.tile_anchor_done and not self.quantized:
         _anchors = self.constants["weights"].betensor
         generateproposals_context.tile_anchor_done = True
         height, width = class_score.shape[1:3]
@@ -301,10 +302,10 @@ def generateproposals(self, *args):
             cy = ((lut_y.to(dev).int() * (ha_q).to(dev).int()) >> shift).int() + (ycenter_a_q).to(dev).int()
             cx = ((lut_x.to(dev).int() * (wa_q).to(dev).int()) >> shift).int() + (xcenter_a_q).to(dev).int()
 
-            ymin = cy - h / 2.
-            xmin = cx - w / 2.
-            ymax = cy + h / 2.
-            xmax = cx + w / 2.
+            ymin = cy - torch.div(h, 2, rounding_mode='trunc')
+            xmin = cx - torch.div(w, 2, rounding_mode='trunc')
+            ymax = cy + torch.div(h, 2, rounding_mode='trunc')
+            xmax = cx + torch.div(w, 2, rounding_mode='trunc')
 
             ymin = torch.clamp(ymin, 0, image_height - anchor_scale)
             ymax = torch.clamp(ymax, 0, image_height - anchor_scale)
@@ -337,7 +338,7 @@ def generateproposals(self, *args):
         keep = keep[:post_nms_topn]
 
         out_boxes[batch, 0:len(keep), :] = bboxes[keep, :]
-        out_scores[batch, :len(keep)] = proposal_scores[keep]
+        out_scores[batch, :len(keep)] = proposal_scores[[keep]]
 
         total_class_num[batch] = len(keep)
 

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -35,10 +35,8 @@ def _conv2d_torch_impl(self, *args):
 
     inp = nhwc2nchw(inp)
     weights = nhwc2nchw(weights)
-    if WinogradChecker.run(self):
+    if WinogradChecker.run(self) or self.get_param('with_winograd', optional=True, default_value=False):
         x = WinogradAllocator(self, inp, weights, bias)
-        if self.get_param('with_winograd', optional=True, default_value=False):
-            self.attrs['optimization_info']['with_winograd'] = True
     else:
         inp = torch.nn.functional.pad(inp, padding, value=pad_val)
         x = torch.nn.functional.conv2d(inp,
@@ -91,24 +89,14 @@ def conv2d(self, *args):
     return self.outputs[0].betensor
 
 
-def unify_shifts_for_aiff(scales, shifts):
-    scales = scales.long()
-    shifts = shifts.long()
-    m_shift = max(0, shifts.max().item())
-    new_scales = scales * (2 ** (m_shift - shifts))  # [s * (1 << (m_shift - ss)) for s, ss in zip(scales, shifts)]
-    # mask = 0xffff
-    while new_scales.max().item() > ((1 << 15) - 1):
-        new_scales = new_scales >> 1  # [s >> 1 for s in new_scales]
-        m_shift -= 1
-    return new_scales, torch.zeros_like(new_scales) + max(0, m_shift)
-
-
 @quant_register(OpType.Convolution)
 def conv2d_quantize(self, *args):
     if WinogradChecker.run(self):
         self.constants["weights"] = self.constants['WinogradWeights']
         linear_op_quantize(self, *args)
         self.constants.pop('WinogradWeights')
+        if self.get_param('with_winograd', optional=True, default_value=False):
+            self.attrs.update({'optimization_info': {'with_winograd': True}})
     else:
         linear_op_quantize(self, *args)
 
@@ -126,12 +114,13 @@ def linear_op_quantize(self, *args):
     q_bits_weight = self.attrs["q_bits_weight"]
     q_bits_bias = self.attrs["q_bits_bias"]
     q_bits_activation = self.attrs["q_bits_activation"]
+    multiplier_bits = self.attrs['multiplier_bits']
 
     inp = self.inputs[0]
 
     w = self.constants["weights"]
-    key_axis_c = w.key_axis_c
-    w_out_cnum = w.shape[key_axis_c]
+    key_axis = w.key_axis
+    w_out_cnum = w.shape[key_axis]
     w_scale_expand = []
     w_zerop_expand = []
     group = self.get_param('group', optional=True, default_value=1)
@@ -149,60 +138,26 @@ def linear_op_quantize(self, *args):
             mgroup = w_out_cnum
         else:
             mgroup = group
-        count = 0
-        t = PyTensor(self.name + '/temp_var' + str(count))
-        while mgroup >= 1:
-            current_per_group_cnum = w_out_cnum // mgroup
-            min_groups = torch.split(w.min_key_axis, current_per_group_cnum, dim=0)
-            max_groups = torch.split(w.max_key_axis, current_per_group_cnum, dim=0)
-            for i, min_values in enumerate(min_groups):
-                max_values = max_groups[i]
-                min_v = min_values.min().item()
-                max_v = max_values.max().item()
-                t.min = min_v
-                t.max = max_v
-                tmp_q_mode_weight = q_mode_weight.replace('channel', 'tensor')
-                scale, zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
-                    t, tmp_q_mode_weight, q_bits_weight, is_signed=True)
-                w_scale_expand.extend([scale] * min_values.shape[0])
-                w_zerop_expand.extend([zerop] * min_values.shape[0])
 
-            w.scale = torch.tensor(w_scale_expand, device=inp.betensor.device)
-            w.zerop = torch.tensor(w_zerop_expand, device=inp.betensor.device)
-            local_rescale = out.scale / (inp.scale * w.scale)
-            do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-                local_rescale, mult_bits=q_bits_activation, force_shift_positive=self.force_shift_positive)
-            if self.attrs['unify_shifts_for_aiff']:
-                new_scale, new_shift = unify_shifts_for_aiff(do_scale, do_shift)
-                do_scale, do_shift = new_scale, new_shift
-                # new_scale may narrow down to 0 after unify_shifts_for_aiff as there is no suitable results
-                if new_scale.min().item() > 0 or mgroup == 1:
-                    break
-            else:
-                break
-            mgroup = mgroup >> 1
-            count += 1
-            w_scale_expand.clear()
-            w_zerop_expand.clear()
-        if count != 0:
-            OPT_WARN('layer_id=%s, type=%s, due to hardware limitations, it is actually doing per-%s-channel, which may cause accuracy dropping'
-                     % (self.attrs['layer_id'], str(self.type), str(w_out_cnum//mgroup)))
+        do_scale, do_scale_type, do_shift, do_shift_type = unify_shifts_for_aiff_with_per_n_channel_quant(
+            self, w, q_mode_weight, q_bits_weight, True, lambda xt: out.scale / (inp.scale * xt.scale), initial_group=mgroup)
 
-        _, do_scale_type = range2dtype(0, do_scale.max().item())
-        _, do_shift_type = range2dtype(do_shift.min().item(), do_shift.max().item(), force_int=True)
-        self.constants["scale"] = PyTensor(
-            self.name+"/scale", do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
+        w_scale_expand = w.scale
+        w_zerop_expand = w.zerop
+        self.constants["scale"] = PyTensor(self.name+"/scale",
+                                           do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
         self.constants["scale"].dtype = do_scale_type
-        self.constants["shift"] = PyTensor(
-            self.name+"/shift", do_shift.cpu().numpy().astype(dtype2nptype(do_shift_type)))
+        self.constants["shift"] = PyTensor(self.name+"/shift",
+                                           do_shift.cpu().numpy().astype(dtype2nptype(do_shift_type)))
         self.constants["shift"].dtype = do_shift_type
 
     else:
-        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
-            w, q_mode_weight, q_bits_weight, is_signed=True)
+        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(w, q_mode_weight, q_bits_weight,
+                                                                                        is_signed=True)
         local_rescale = out.scale / (inp.scale * w.scale)
-        do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-            local_rescale, mult_bits=q_bits_activation, force_shift_positive=self.force_shift_positive)
+        do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(local_rescale,
+                                                                                          mult_bits=multiplier_bits,
+                                                                                          force_shift_positive=self.force_shift_positive)
         w_scale_expand.extend([w.scale] * w_out_cnum)
         w_zerop_expand.extend([w.zerop] * w_out_cnum)
         _, do_scale_type = range2dtype(0, do_scale)
@@ -212,9 +167,10 @@ def linear_op_quantize(self, *args):
         self.params["scale_type"] = do_scale_type
 
     # quantize weights
-    w_scale_expand = torch.tensor(w_scale_expand, device=inp.betensor.device)
-    w_zerop_expand = torch.tensor(w_zerop_expand, device=inp.betensor.device)
-    scale_zp_shape = [w.shape[ax] if ax == key_axis_c else 1 for ax in range(len(w.shape))]
+    if not isinstance(w_scale_expand, torch.Tensor):
+        w_scale_expand = torch.tensor(w_scale_expand, device=inp.betensor.device)
+        w_zerop_expand = torch.tensor(w_zerop_expand, device=inp.betensor.device)
+    scale_zp_shape = [w.shape[ax] if ax == key_axis else 1 for ax in range(len(w.shape))]
     w.betensor = linear_quantize_clip(w.betensor, w_scale_expand.reshape(scale_zp_shape),
                                       w_zerop_expand.reshape(scale_zp_shape), w.qmin, w.qmax)
     w.qbits = q_bits_weight
@@ -229,7 +185,7 @@ def linear_op_quantize(self, *args):
         b.scale = inp.scale * w.scale
         b.zerop = 0
         if isinstance(b.scale, torch.Tensor):
-            b_scale_shape = [b.shape[ax] if ax == b.key_axis_c else 1 for ax in range(len(b.shape))]
+            b_scale_shape = [b.shape[ax] if ax == b.key_axis else 1 for ax in range(len(b.shape))]
             b.scale = torch.reshape(b.scale, b_scale_shape)
 
         if self.attrs['bias_effective_bits'] != q_bits_bias:
@@ -271,8 +227,24 @@ def absorb_input_zp_to_bias(self, *args):
     w = self.constants["weights"]
     b = self.constants["biases"]
 
-    input_zp_mul_weight = compute_input_zp_mul_reduce_weight(self.inputs[0].zerop, w.betensor)
-    input_zp_mul_weight = input_zp_mul_weight.item() if b.ir_shape == TensorShape([]) else input_zp_mul_weight
+    if self.get_attrs('is_winograd_checker_passed', optional=True, default_value=False):
+        device = w.betensor.device
+        BT, _, AT = ArcReactor.run(2, 3)
+        BT = torch.from_numpy(BT).to(device)
+        AT = torch.from_numpy(AT).to(device)
+        input_zp = construct_torch_tensor(self.inputs[0].zerop, device)
+        weight = w.betensor.permute(0, 3, 1, 2)
+        repeated_input_zp = input_zp.repeat([1, BT.shape[0]])
+        data_tmp = torch.matmul(repeated_input_zp.float(), BT.permute(1, 0))
+        data_repeat_shape = [*weight.shape[0:3]] + [1]
+        BT_out = data_tmp.repeat(data_repeat_shape)
+        BT_out = BT_out * weight
+        AT_out = torch.matmul(BT_out, AT.permute(1, 0))
+        input_zp_mul_weight = AT_out.sum(dim=[1, 2])[:, 0]
+    else:
+        input_zp_mul_weight = compute_input_zp_mul_reduce_weight(self.inputs[0].zerop, w.betensor)
+        input_zp_mul_weight = input_zp_mul_weight.item() if b.ir_shape == TensorShape([]) else input_zp_mul_weight
+
     b.betensor += input_zp_mul_weight
     b.betensor = b.betensor.clamp(b.qmin, b.qmax)
 
@@ -287,9 +259,9 @@ def search_bias_bit_and_quantize(self, *args):
     q_bits_bias = self.attrs["q_bits_bias"]
     bias_effective_bits = self.attrs['bias_effective_bits']
     if bias_effective_bits > q_bits_bias:
-        OPT_WARN((f"layer_id = {self.attrs['layer_id']}, layer_type = {self.type}, layer_name = {self.name}",
-                  f"the bias_effective_bits(={bias_effective_bits}) > bias_bits(={q_bits_bias}), "
-                  f"we clip bias_effective_bits to bias_bits."))
+        OPT_WARN(f"layer_id = {self.attrs['layer_id']}, layer_type = {self.type}, layer_name = {self.name}",
+                 f"the bias_effective_bits(={bias_effective_bits}) > bias_bits(={q_bits_bias}), "
+                 f"we clip bias_effective_bits to bias_bits.")
         bias_effective_bits = q_bits_bias
         self.attrs['bias_effective_bits'] = bias_effective_bits
 
@@ -314,7 +286,7 @@ def search_bias_bit_and_quantize(self, *args):
         repeated_bias = torch.tile(bias_float_data, tuple([end_bits - begin_bits] + [1 for _ in range(len(b.shape))]))
         clamp_min = -2 ** (bits - 1)
         clamp_max = 2 ** (bits - 1) - 1
-        q_biases = linear_quantize_clip(repeated_bias, b.scale.unsqueeze(0), b.zerop,
+        q_biases = linear_quantize_clip(repeated_bias, construct_torch_tensor(b.scale, device=b.betensor.device).unsqueeze(0), b.zerop,
                                         clamp_min.unsqueeze(-1), clamp_max.unsqueeze(-1))
         b.betensor = q_biases.clone()
         clear_lower_bits_for_bias(self, grouped=True)

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import *
@@ -447,7 +447,7 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
         new_outp_tensor.ir_dtype = replaced_node.outputs[0].ir_dtype
         new_outp_tensor.dtype = replaced_node.outputs[0].dtype
         new_outp_tensor.qinvariant = replaced_node.outputs[0].qinvariant
-        new_outp_tensor.key_axis_c = replaced_node.outputs[0].key_axis_c
+        new_outp_tensor.key_axis = replaced_node.outputs[0].key_axis
 
     #################################################################################################
     ############################insert slice op######################################################

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -13,6 +13,7 @@ def concat_quantize(self, *args):
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Concat currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
+    multiplier_bits = self.attrs['multiplier_bits']
     # #decide the output tensors' key properties related to quantization
     out = self.outputs[0]
     onumel = 1
@@ -85,15 +86,15 @@ def concat_quantize(self, *args):
     branch_types2 = []
     for i, inp in enumerate(self.inputs):
         s = out.scale / inp.scale
-        multipiler, multipiler_type, shift, shift_type = get_scale_approximation_params(
-            s, out.qbits, force_shift_positive=self.force_shift_positive)
+        multipiler, multipiler_type, shift, shift_type = get_scale_approximation_params(s, multiplier_bits,
+                                                                                        force_shift_positive=self.force_shift_positive)
         branch_scales.append(int(multipiler))
         branch_shifts.append(int(shift))
         branch_types1.append(multipiler_type)
         branch_types2.append(shift_type)
 
     bs_threshold = float(self.get_attrs('unify_scales_for_multi_inputs_operator_threshold',
-                         optional=True, default_value=1.0))
+                                        optional=True, default_value=1.0))
     if ((max(scs) / (min(scs)+OPT_EPSILON)) <= bs_threshold and (max(zps) - min(zps)) < OPT_EPSILON) or out.qinvariant:
         self.attrs['need_align_scales'] = False
         OPT_DEBUG("layer_id=%s, %s, %s : this concat does not need to align scale/zerop" %

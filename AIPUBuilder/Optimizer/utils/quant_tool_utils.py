@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 from collections import namedtuple
@@ -19,6 +19,25 @@ ASYM2SYM_OP_DICT = {  # (op.type)      : (tensor_idx,         QuantMode)
 
 #########################################################################################################################
 # class routines
+
+
+class Target:
+    Support_Target = namedtuple('Target', ['name', 'level'])
+    target = [
+        # name                level
+        Support_Target("Z2",    0),
+        Support_Target("Z3",    0),
+        Support_Target("X1",    0),
+    ]
+    is_valid_ = defaultdict(lambda: False, {t.name: True for t in target})
+    support_target_list_ = {t.name: t.level for t in target}
+
+    @classmethod
+    def optimized_target_level(cls, target_name):
+        if cls.is_valid_[target_name.upper()]:
+            return cls.support_target_list_[target_name.upper()]
+        else:
+            return 1
 
 
 class QuantMode:
@@ -260,7 +279,7 @@ def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mul
 def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max):
     x_t = x if isinstance(x, torch.Tensor) else torch.tensor(x)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(x_t.float() * multiplier * (0.5 ** shift_bits)) -
+    y = torch.clamp(torch.round(x_t.double() * multiplier * (0.5 ** shift_bits)) -
                     zero_point, clamp_min, clamp_max).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))
@@ -275,7 +294,7 @@ def linear_requantize_floor(x, multiplier, shift_bits, zero_point, clamp_min, cl
     x_type = x_t.dtype
     shift_bits = shift_bits.to(torch.long) if isinstance(
         shift_bits, torch.Tensor) else torch.tensor(shift_bits, dtype=torch.long, device=x_t.device)
-    y_tmp = torch.round(x_t.float() * multiplier).to(torch.long)
+    y_tmp = torch.round(x_t.double() * multiplier).to(torch.long)
     y_tmp = torch.where(shift_bits >= 0, y_tmp >> shift_bits, y_tmp << torch.abs(shift_bits))
     y = torch.clamp(y_tmp - zero_point, clamp_min, clamp_max).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
@@ -284,6 +303,63 @@ def linear_requantize_floor(x, multiplier, shift_bits, zero_point, clamp_min, cl
         return y.to(x_type)
     else:
         return y
+
+
+def unify_shifts_for_aiff_with_per_n_channel_quant(node: PyNode, xt: PyTensor, xt_q_mode: str, xt_q_bits: int, xt_signed: bool, rescales_calc_func, initial_group: int = 0):
+    import math
+    # its very hard to find a general way to select perfect rescale from per-n-channel rescales groups,
+    # because the scale computation steps may be lossy (there are very tiny channel scales)
+    # so we have to merge min/max to per-n-channel groups from the beginning
+    # and use the rescales_calc_func to recompute rescales again and again
+    multiplier_bits = node.attrs['multiplier_bits']
+    force_shift_positive = node.force_shift_positive
+    snum = xt.min_key_axis.numel()
+    mgroup = snum if initial_group < 1 else min(initial_group, snum)
+    count = 0
+    current_per_group_cnum = math.ceil(float(snum) / float(mgroup))
+    t = PyTensor('temp_var_unify_shifts_for_aiff_with_per_n_channel_quant')
+    while mgroup >= 1:
+        current_per_group_cnum = math.ceil(float(snum) / float(mgroup))
+        current_pad_cnum = mgroup * current_per_group_cnum - snum
+        t.min_key_axis = torch.nn.functional.pad(xt.min_key_axis, (0, current_pad_cnum), mode="constant", value=0.).reshape(
+            [-1, current_per_group_cnum]).min(dim=1).values
+        t.max_key_axis = torch.nn.functional.pad(xt.max_key_axis, (0, current_pad_cnum), mode="constant", value=0.).reshape(
+            [-1, current_per_group_cnum]).max(dim=1).values
+        xt.scale, xt.zerop, xt.qmin, xt.qmax, xt.dtype = get_linear_quant_params_from_tensor(
+            t, QuantMode.to_per_channel(xt_q_mode), xt_q_bits, is_signed=xt_signed)
+        xt.scale = xt.scale.repeat_interleave(current_per_group_cnum)[:snum]
+        xt.zerop = xt.zerop.repeat_interleave(current_per_group_cnum)[:snum]
+        do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
+            rescales_calc_func(xt), mult_bits=multiplier_bits, force_shift_positive=force_shift_positive)
+        if node.attrs['unify_shifts_for_aiff']:
+            ##############################################################
+            scales = do_scale.long()
+            shifts = do_shift.long()
+            new_shifts = max(0, shifts.max().item())
+            new_scales = scales << (new_shifts - shifts)
+            mul = new_scales.max().item() / 32767.0
+            if mul > 1.0:
+                ashift = math.ceil(math.log2(mul))
+                new_shifts -= ashift
+                new_scales >>= ashift
+            do_scale = new_scales
+            do_shift = new_shifts + torch.zeros_like(new_scales)
+            do_scale_type = Dtype.UINT16
+            do_shift_type = SHIFT_DTYPE
+            ##############################################################
+            # new_scale may narrow down to 0 after unify_shifts_for_aiff as there is no suitable results
+            if do_scale.min().item() > 0 or mgroup == 1:
+                break
+        else:
+            break
+        # try per-n-channel strategy
+        mgroup = mgroup >> 1
+        count += 1
+    if count != 0:
+        OPT_WARN(f"due to hardware limitations, it is actually doing per-{current_per_group_cnum}-channel quantization, which may cause accuracy dropping: "
+                 f"layer_id={node.attrs['layer_id']}, type={node.type}, name={node.name}, rescale values differ sharpely whithin channels, ")
+
+    return do_scale, do_scale_type, do_shift, do_shift_type
 
 
 def whether_align_to_out_scale(n):

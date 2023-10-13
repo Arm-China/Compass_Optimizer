@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 import torch
@@ -23,7 +23,7 @@ class OpTestCosDistanceMetric(OptBaseMetric):
             else:  # if output is a scalar
                 x = o_p
                 y = o_t[0]
-                sim = (x == y)
+                sim = (x == y).item()
 
             sim_per_output.append(sim)
         self.sim.append(sim_per_output)

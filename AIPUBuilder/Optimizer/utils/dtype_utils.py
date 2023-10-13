@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 from AIPUBuilder.Optimizer.framework import *
@@ -460,5 +460,9 @@ def dtype2torch_type(tp):
         Dtype.INT32:        torch.int32,
         Dtype.UINT32:       torch.int64,
         Dtype.INT64:        torch.int64,
+        Dtype.ALIGNED_INT4: torch.int8,
+        Dtype.ALIGNED_UINT4: torch.int8,
+        Dtype.ALIGNED_INT12: torch.int16,
+        Dtype.ALIGNED_UINT12: torch.int16,
     }
     return th_dict[tp]

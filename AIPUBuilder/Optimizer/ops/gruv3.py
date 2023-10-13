@@ -1,10 +1,10 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.ops.rnn import *
-from AIPUBuilder.Optimizer.ops.conv import clear_lower_bits_for_bias, unify_shifts_for_aiff
+from AIPUBuilder.Optimizer.ops.conv import clear_lower_bits_for_bias
 from AIPUBuilder.Optimizer.logger import *
 import torch.nn as nn
 
@@ -256,43 +256,15 @@ def gruv3(self, *args):
 
 
 def adaptation_weights_for_unify_shifts_for_aiff(node, weights_name, multiplicator):
-    t = PyTensor(node.name + '/temp_var')
     w_ele_t = node.constants[weights_name]
     w_ele = w_ele_t.betensor
-    mgroup = w_ele.shape[0]
-    w_out_cnum = w_ele.shape[0]
-    w_scale_expand = []
-    w_zerop_expand = []
-    while mgroup >= 1:
-        min_groups = torch.split(w_ele_t.min_key_axis, w_out_cnum // mgroup, dim=0)
-        max_groups = torch.split(w_ele_t.max_key_axis, w_out_cnum // mgroup, dim=0)
-        for i, min_values in enumerate(min_groups):
-            max_values = max_groups[i]
-            min_v = min_values.min().item()
-            max_v = max_values.max().item()
-            t.min = min_v
-            t.max = max_v
-            scale, zerop, w_ele_t.qmin, w_ele_t.qmax, w_ele_t.dtype = get_linear_quant_params_from_tensor(
-                t, QuantMode.to_per_tensor(node.attrs["q_mode_weight"]), node.attrs["q_bits_weight"], is_signed=True)
-            w_scale_expand.extend([scale] * min_values.shape[0])
-            w_zerop_expand.extend([zerop] * min_values.shape[0])
-
-        local_scale = multiplicator / torch.tensor(w_scale_expand, device=w_ele.device)
-        do_scale, do_scale_type, do_shift, do_shift_type = \
-            get_scale_approximation_params(local_scale,
-                                           node.attrs["q_bits_weight"],
-                                           force_shift_positive=node.force_shift_positive)
-        new_scale, new_shift = unify_shifts_for_aiff(do_scale, do_shift)
-        if new_scale.min().item() > 0 or mgroup == 1:
-            break
-        w_scale_expand.clear()
-        w_zerop_expand.clear()
-
+    do_scale, do_scale_type, do_shift, do_shift_type = unify_shifts_for_aiff_with_per_n_channel_quant(
+        node, w_ele_t, node.attrs["q_mode_weight"], node.attrs["q_bits_weight"], True, lambda xt: multiplicator/xt.scale)
     scale_zp_shape = [w_ele.shape[0]] + [1 for i in range(len(w_ele.shape) - 1)]
-    w_scale_expand = torch.tensor(w_scale_expand, device=w_ele.device).reshape(scale_zp_shape)
-    w_zerop_expand = torch.tensor(w_zerop_expand, device=w_ele.device).reshape(scale_zp_shape)
+    w_scale_expand = w_ele_t.scale.reshape(scale_zp_shape)
+    w_zerop_expand = w_ele_t.zerop.reshape(scale_zp_shape)
     quantized_weight = linear_quantize_clip(w_ele, w_scale_expand, w_zerop_expand, w_ele_t.qmin, w_ele_t.qmax)
-    return quantized_weight, torch.squeeze(w_scale_expand), torch.squeeze(w_zerop_expand)
+    return quantized_weight, w_ele_t.scale, w_ele_t.zerop
 
 
 @quant_register(OpType.GRUv3)

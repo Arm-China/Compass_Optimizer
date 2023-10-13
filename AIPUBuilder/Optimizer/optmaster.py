@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 import numpy as np
@@ -21,7 +21,8 @@ from AIPUBuilder.Optimizer.passes import *
 
 class OptMaster(object):
 
-    def __init__(self, graph, hparams=None, calibration_dataloader=None, validation_dataloader=None, validation_metrics=[]):
+    def __init__(self, graph, hparams=None, calibration_dataloader=None, validation_dataloader=None,
+                 validation_metrics=[]):
         self.g = graph
         self.calibration_dataloader = calibration_dataloader
         self.validation_dataloader = validation_dataloader
@@ -29,25 +30,25 @@ class OptMaster(object):
         self.validation_metrics = validation_metrics
         self.f_metrics = []
         self.q_metrics = []
-# ----------------------------------------------------------------------------
-# |         | add/delete node | add/delete node | change quantization params |
-# |         | of float graph  | of quant graph  | (min/max, scales, etc)     |
-# ----------------------------------------------------------------------------
-# prepare datasets, metrics and set configurations
-# ----------------------------------------------------------------------------
-# | Stage 1 | allowed         | forbidden       | forbidden                  |
-# pre-quantization optimization
-# ----------------------------------------------------------------------------
-# statistic & initial calibration
-# ----------------------------------------------------------------------------
-# | Stage 2 | allowed         | forbidden       | allowed                    |
-# quantization aware optimization
-# ----------------------------------------------------------------------------
-# final calibration & quantize
-# ----------------------------------------------------------------------------
-# | Stage 3 |forbidden        | allowed         | forbidden                  |
-# post-quantization optimization
-# ----------------------------------------------------------------------------
+        # ----------------------------------------------------------------------------
+        # |         | add/delete node | add/delete node | change quantization params |
+        # |         | of float graph  | of quant graph  | (min/max, scales, etc)     |
+        # ----------------------------------------------------------------------------
+        # prepare datasets, metrics and set configurations
+        # ----------------------------------------------------------------------------
+        # | Stage 1 | allowed         | forbidden       | forbidden                  |
+        # pre-quantization optimization
+        # ----------------------------------------------------------------------------
+        # statistic & initial calibration
+        # ----------------------------------------------------------------------------
+        # | Stage 2 | allowed         | forbidden       | allowed                    |
+        # quantization aware optimization
+        # ----------------------------------------------------------------------------
+        # final calibration & quantize
+        # ----------------------------------------------------------------------------
+        # | Stage 3 |forbidden        | allowed         | forbidden                  |
+        # post-quantization optimization
+        # ----------------------------------------------------------------------------
         self.graph_optimize_stage1_flag = False
         self.graph_optimize_stage2_flag = False
         self.graph_optimize_stage3_flag = False
@@ -181,6 +182,9 @@ class OptMaster(object):
                             config_info[lname].update({k: v})
             except:
                 OPT_FATAL("Invalid opt_config file! please refer to opt_template.json")
+        # process trigger float op attr
+        from AIPUBuilder.Optimizer.config.cfg_fields import TriggerFloatOpField as tfof
+        tf_name, tf_ops, tf_alt = tfof._parse(self.hparams.trigger_float_op)[1][0]
         for node in self.g.nodes:
             properties = config_info[node.name]
 
@@ -208,17 +212,22 @@ class OptMaster(object):
             init_attrs('debug_fake_quantize', False)
             if node.type in [OpType.Resize, OpType.Interp, ]:
                 init_attrs('resize_degrade_to_nearest', self.hparams.resize_degrade_to_nearest)
-            if node.type in [OpType.Convolution, OpType.DepthwiseConv, OpType.ConvTranspose, OpType.Convolution3D, OpType.ConvTranspose3D]:
+            if node.type in [OpType.Convolution, OpType.DepthwiseConv, OpType.ConvTranspose, OpType.Convolution3D,
+                             OpType.ConvTranspose3D]:
                 init_attrs('with_winograd', self.hparams.with_winograd),
             init_attrs('lut_items_in_bits', self.hparams.lut_items_in_bits)
-            init_attrs('multiplier_bits', self.hparams.compat_quantized_model_multiplier_bits)
+            init_attrs('multiplier_bits', node.attrs['q_bits_activation'] if self.hparams.multiplier_bits == ''
+                       else self.hparams.multiplier_bits)
             init_attrs('force_dtype_int', self.hparams.force_dtype_int)
             init_attrs('force_shift_positive', self.hparams.force_shift_positive)
+            init_attrs('min_compatible_zhouyi_target', self.hparams.min_compatible_zhouyi_target)
             # init_attrs('force_dtype_int', False)
-            init_attrs('bias_effective_bits', self.hparams.bias_bits if self.hparams.bias_effective_bits == ''
+            init_attrs('bias_effective_bits', node.attrs['q_bits_bias'] if self.hparams.bias_effective_bits == ''
                        else self.hparams.bias_effective_bits)
             init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff)
-            init_attrs('trigger_float_op', self.hparams.trigger_float_op)
+            init_attrs('trigger_float_op', tf_name)
+            if len(tf_ops) > 0 and not (node.type.name.lower() in tf_ops or int(node.attrs['layer_id']) in tf_ops):
+                init_attrs('trigger_float_op', tf_alt)
             if node.type == OpType.Concat:
                 init_attrs('unify_scales_for_multi_inputs_operator_threshold',
                            self.hparams.unify_scales_for_concat_threshold)
@@ -237,18 +246,22 @@ class OptMaster(object):
             # check if each op exists in registered dict
             from AIPUBuilder.Optimizer.framework import OP_DICT, QUANT_OP_DICT
             if node.type not in OP_DICT:
-                OPT_ERROR('unsupported op "%s", can not find it in OP_DICT, please implement this op firstly' % str(node.type))
+                OPT_ERROR('unsupported op "%s", can not find it in OP_DICT, please implement this op firstly' % str(
+                    node.type))
             if node.type not in QUANT_OP_DICT:
-                OPT_ERROR('unsupported op "%s", can not find it in QUANT_OP_DICT, please implement this op firstly' % str(node.type))
+                OPT_ERROR(
+                    'unsupported op "%s", can not find it in QUANT_OP_DICT, please implement this op firstly' % str(
+                        node.type))
 
         # do a forward to check graph firstly and init placeholders,
         # force each op to be able to handle all zero inputs.
         inputs = []
-        for inp in self.g.input_tensors:
-            shape = list(inp.ir_shape)
-            dtype = inp.dtype
-            inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
-        if self.hparams.run_mode != 'quant_ir_forward' and not self.hparams.compat_quantized_model and not self.g.compat_quantized_model:
+        if self.hparams.run_mode != 'quant_ir_forward' and \
+           ((hasattr(self.g, 'compat_quantized_model') and not self.g.compat_quantized_model) or not hasattr(self.g, 'compat_quantized_model')):
+            for inp in self.g.input_tensors:
+                shape = list(inp.ir_shape)
+                dtype = inp.dtype
+                inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
             OPT_INFO("init graph by forwarding one sample filled with zeros")
             self.g.current_batch_size = self.batch_size_in_IR
             self.g.current_batch_idx = 0
@@ -259,7 +272,7 @@ class OptMaster(object):
         scopes_str_list = re.findall(r'\d+', argv.fake_quant_scopes_for_debug)
         for k in range(0, len(scopes_str_list), 2):
             start = int(scopes_str_list[k])
-            end = int(scopes_str_list[k+1])
+            end = int(scopes_str_list[k + 1])
             self.fake_quant_scopes.append((start, end))
         scopes_op_list = [x.lower().strip() for x in re.split(
             r',|\s+', argv.fake_quant_operators_for_debug) if x.lower().strip()]
@@ -316,10 +329,14 @@ class OptMaster(object):
             OPT_INFO('applying calibration strategy based on statistic info')
             with tqdm(total=len(self.g.nodes), desc='calibration', file=sys.stdout) as pbar:
                 for n in self.g.nodes:
-                    astrategy = n.attrs['q_strategy_activation'] if 'q_strategy_activation' in n.attrs else self.hparams.calibration_strategy_for_activation
-                    cstrategy = n.attrs['q_strategy_weight'] if 'q_strategy_weight' in n.attrs else self.hparams.calibration_strategy_for_weight
-                    qmethod_wht = n.attrs['q_mode_weight'] if 'q_mode_weight' in n.attrs else self.hparams.quantize_method_for_weight
-                    qmethod_act = n.attrs['q_mode_activation'] if 'q_mode_activation' in n.attrs else self.hparams.quantize_method_for_activaion
+                    astrategy = n.attrs[
+                        'q_strategy_activation'] if 'q_strategy_activation' in n.attrs else self.hparams.calibration_strategy_for_activation
+                    cstrategy = n.attrs[
+                        'q_strategy_weight'] if 'q_strategy_weight' in n.attrs else self.hparams.calibration_strategy_for_weight
+                    qmethod_wht = n.attrs[
+                        'q_mode_weight'] if 'q_mode_weight' in n.attrs else self.hparams.quantize_method_for_weight
+                    qmethod_act = n.attrs[
+                        'q_mode_activation'] if 'q_mode_activation' in n.attrs else self.hparams.quantize_method_for_activaion
                     for o in n.outputs:
                         o.qbits = n.attrs['q_bits_activation']
                         apply_calibration_strategy(o, astrategy, qmethod_act)
@@ -363,7 +380,9 @@ class OptMaster(object):
         need_replace_ops = []
         for n in self.g.quantgraph.nodes:
             if n != None:
-                if (n.type == OpType.Cast and n.parents[0].attrs['q_mode_activation'] == n.attrs['q_mode_activation'] and len(n.inputs) > 0 and len(n.outputs) > 0 and n.inputs[0].dtype == n.outputs[0].dtype) \
+                if (n.type == OpType.Cast and n.parents[0].attrs['q_mode_activation'] == n.attrs[
+                    'q_mode_activation'] and len(n.inputs) > 0 and len(n.outputs) > 0 and n.inputs[0].dtype ==
+                    n.outputs[0].dtype) \
                         or (n.type == OpType.FakeQuantWithMinMaxVars):
                     # create reshape node
                     transform_op = PyNode(n.name, OpType.Reshape)
@@ -381,7 +400,7 @@ class OptMaster(object):
         item_num = [self.hparams.featuremap_splits_item_y, self.hparams.featuremap_splits_item_x]
         sram_size = self.hparams.featuremap_splits_sram_size
         concat_block = self.hparams.featuremap_splits_concat_blk
-        ratio = self.hparams.featuremap_splits_overlap_rate/100
+        ratio = self.hparams.featuremap_splits_overlap_rate / 100
         if item_num[0] * item_num[1] != 1 or sram_size != 0 or len(tiling_list):
             featuremap_partition_for_data_parallel(self.g.quantgraph,
                                                    item_num,
@@ -453,7 +472,7 @@ class OptMaster(object):
                         current_batch_idx += 1
                         if current_batch_idx * dataloader.batch_size > len(dataloader.dataset):
                             self.g.current_batch_size = len(dataloader.dataset) - \
-                                (current_batch_idx-1) * dataloader.batch_size
+                                (current_batch_idx - 1) * dataloader.batch_size
                         self.g.statistic(inp, self.hparams)
 
                     pbar.refresh()
@@ -521,7 +540,8 @@ class OptMaster(object):
         # this pass will insert cast/quantize/dequantize op which meets the requirement
         insert_obj = [InsertQuantizeOp, InsertDeQuantizeOp, InsertCastOp]
         insert_op_pass(self.g, self.hparams, insert_obj)
-        self.g.quantgraph = self.g.clone()
+        # it's not necessary to hold the original graph when self.dataloader4debug is none (cosine similarity and metric are skipped) to save memory
+        self.g.quantgraph = self.g.clone() if self.dataloader4debug is not None else self.g
         unify_scales_for_multi_inputs_op_pass(self.g.quantgraph, self.hparams)
         adapt_float_subgraph_pass(self.g.quantgraph, self.hparams)
         self.g.quantize()
@@ -538,7 +558,7 @@ class OptMaster(object):
             dmsg = 'These layers: \n'
             nset = {}
             for scope in fake_quant_scopes:
-                for id in range(scope[0], scope[-1]+1):
+                for id in range(scope[0], scope[-1] + 1):
                     for n in self.g.quantgraph.nodes:
                         if int(n.attrs['layer_id']) == id:
                             n.attrs['debug_fake_quantize'] = True
@@ -575,7 +595,8 @@ class OptMaster(object):
         # then serialize
         if opt_use_cuda():
             torch.cuda.empty_cache()
-        qg.serialize(name+".txt", name+".bin")
+        OPT_INFO('Begin to serialzie IR')
+        qg.serialize(name + ".txt", name + ".bin")
 
         # currently no need, because it's better to be hanled by GUI.
         # write opt_config_file for debug usage or internal development usage
@@ -609,7 +630,8 @@ class OptMaster(object):
             node_attrs[node.name]['just_for_display'] = {}
             node_attrs[node.name]['just_for_display']['quantization_info'] = str(node.attrs['quantization_info'])
             node_attrs[node.name]['just_for_display']['optimization_info'] = str(node.attrs['optimization_info'])
-            node_attrs[node.name]['just_for_display']['brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s' % (
+            node_attrs[node.name]['just_for_display'][
+                'brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s' % (
                 node.attrs['layer_id'], str(node.type), similarity_str)
         opt_config_file = os.path.join(self.hparams.output_dir, "%s_%s" %
                                        (self.hparams.model_name, DEFAULT_CONFIG_FILE))
@@ -658,7 +680,7 @@ class OptMaster(object):
 
         if self.hparams.record_debug_acc_info:
             # just for debug
-            save_fn = os.path.join(self.hparams.output_dir, self.hparams.model_name+'_record_model_acc.txt')
+            save_fn = os.path.join(self.hparams.output_dir, self.hparams.model_name + '_record_model_acc.txt')
             if not os.path.exists(save_fn):
                 save_fn = make_path(save_fn)
             with open(save_fn, 'a+') as fw:
@@ -676,7 +698,7 @@ class OptMaster(object):
                            f"bias_bits={self.hparams.bias_bits}, " \
                            f"lut_items_in_bits={self.hparams.lut_items_in_bits},"
                 fw.write(wtime)
-                fw.write(cfg_info+'\n')
+                fw.write(cfg_info + '\n')
                 fw.write(str(report_dict))
 
         return report_dict
@@ -686,7 +708,9 @@ class OptMaster(object):
         """
         dump (float graph and quant graph) all nodes' tensors(constants, outputs, placeholders)
         """
-        def _dump(node, md_name, path, enable_inputs=False, enable_outputs=False, enable_constants=False, enable_placeholder=False, enable_params=False):
+
+        def _dump(node, md_name, path, enable_inputs=False, enable_outputs=False, enable_constants=False,
+                  enable_placeholder=False, enable_params=False):
             statvfs = os.statvfs(path)
             fn_max_len = statvfs.f_namemax
 
@@ -695,16 +719,16 @@ class OptMaster(object):
 
             def _get_fn(key, tensor_name=None):
                 fn = ('_'.join([md_name, op_type, layer_name, key, tensor_name])).replace('/', '_').replace(':', '_')
-                return fn[:(fn_max_len-5)]
+                return fn[:(fn_max_len - 5)]
 
             if enable_inputs:
                 for i, inpt in enumerate(node.inputs):
-                    fn = _get_fn('i'+str(i), inpt.name)
+                    fn = _get_fn('i' + str(i), inpt.name)
                     np.save(os.path.join(path, fn), inpt.betensor.cpu().numpy().astype(dtype2nptype(inpt.dtype)))
                     # inpt.betensor.cpu().numpy().astype(dtype2nptype(inpt.dtype)).tofile(os.path.join(path, fn) +  '_layer_' + n.attrs['layer_id'] + '.bin')
             if enable_outputs:
                 for i, outt in enumerate(node.outputs):
-                    fn = _get_fn('o'+str(i), outt.name)
+                    fn = _get_fn('o' + str(i), outt.name)
                     np.save(os.path.join(path, fn), outt.betensor.cpu().numpy().astype(dtype2nptype(outt.dtype)))
                     # outt.betensor.cpu().numpy().astype(dtype2nptype(outt.dtype)).tofile(os.path.join(path, fn) + '_layer_' + n.attrs['layer_id'] + '.bin')
             if enable_constants:
@@ -719,11 +743,12 @@ class OptMaster(object):
                     # consts.betensor.cpu().numpy().astype(dtype2nptype(consts.dtype)).tofile(os.path.join(path, fn) +  '_layer_' + n.attrs['layer_id'] + '.bin')
             if enable_placeholder:
                 for i, plt in enumerate(node.placeholders):
-                    fn = _get_fn('p'+str(i), plt.name)
+                    fn = _get_fn('p' + str(i), plt.name)
                     np.save(os.path.join(path, fn), plt.betensor.cpu().numpy())
             if enable_params:
                 # TODO
                 pass
+
         _dump_inputs = functools.partial(_dump, enable_inputs=True)
         _dump_outputs = functools.partial(_dump, enable_outputs=True)
         _dump_placeholders = functools.partial(_dump, enable_placeholders=True)
@@ -811,7 +836,7 @@ class OptMaster(object):
                 inp, _ = sample
                 self.g.current_batch_idx = i
                 self.g.quantgraph.current_batch_idx = i
-                if (i+1) * self.dataloader4debug.batch_size > len(self.dataloader4debug.dataset):
+                if (i + 1) * self.dataloader4debug.batch_size > len(self.dataloader4debug.dataset):
                     bsize = len(self.dataloader4debug.dataset) - i * self.dataloader4debug.batch_size
                     self.g.current_batch_size = bsize
                     self.g.quantgraph.current_batch_size = bsize
@@ -857,35 +882,44 @@ class OptMaster(object):
         for node in self.g.quantgraph.nodes:
             node.quantized = False
 
-    def _deduce_quantization_info_to_tensor_from_ir(self, node, updated_fields):
-
-        in_out_tensors = [*node.inputs, *node.outputs]
-        for t in in_out_tensors:
-            o_dtype = t.dtype
-            qmin, qmax = dtype2range(o_dtype)
-            qbits = dtype2bits(o_dtype)
-            quantization_infos = {
-                'qmin': qmin,
-                'qmax': qmax,
-                'qbits': qbits
-            }
-            for field in updated_fields:
-                if field in quantization_infos.keys():
-                    t.__setattr__(field, quantization_infos[field])
-
     def deduce_quantization_infos(self, graph):
+        def _deduce_quantization_info_to_tensor_from_ir(node, updated_fields):
+            in_out_tensors = [*node.inputs, *node.outputs]
+            for t in in_out_tensors:
+                if is_float(t.dtype):
+                    continue
+                o_dtype = t.dtype
+                qmin, qmax = dtype2range(o_dtype)
+                qbits = dtype2bits(o_dtype)
+                quantization_infos = {
+                    'qmin': qmin,
+                    'qmax': qmax,
+                    'qbits': qbits
+                }
+                for field in updated_fields:
+                    if field in quantization_infos.keys():
+                        t.__setattr__(field, quantization_infos[field])
+
         if graph is None:
-            OPT_ERROR(f"please check the graph, which is None.")
+            OPT_ERROR(f"please check the graph(==None) before deduce quantization information.")
             return None
+
         for node in graph.nodes:
-            dtypes = [t.dtype for t in (list(node.outputs) + list(node.constants.values()))]
             node.quantized = True
-            for dt in dtypes:
-                if is_float(dt):
-                    node.quantized = False
-                    break
+            if node.type in [OpType.Quantize]:
+                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
+                continue
+
+            if node.get_param('unquantifiable', optional=True, default_value=False):
+                node.quantized = False
+            else:
+                dtypes = [t.dtype for t in (list(node.outputs) + list(node.constants.values())) + list(node.inputs)]
+                for dt in dtypes:
+                    if is_float(dt):
+                        node.quantized = False
+                        break
             if node.quantized:
-                self._deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
+                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
         return graph
 
     def run_quant_ir_forward(self):
@@ -913,7 +947,7 @@ class OptMaster(object):
 
     def __call__(self, *args, **kwargs):
         self.prepare(self.hparams)
-        if self.hparams.compat_quantized_model or self.g.compat_quantized_model:
+        if hasattr(self.g, 'compat_quantized_model') and self.g.compat_quantized_model:
             OPT_INFO(f"Now we do quantization transform in Optimizer.")
             try:
                 from AIPUBuilder.core import quantize_transform as qtlib_quantize_transform
@@ -932,6 +966,8 @@ class OptMaster(object):
             convert_resize_to_convolution(self.g)
             for n in self.g.nodes:
                 n.attrs['unify_shifts_mode'] = self.hparams.compat_quantized_model_unify_shifts_mode
+                # now qat model fixed to 13bits, TODO: set by cfg fields and distinguish with opt flow.
+                n.attrs['multiplier_bits'] = 13
                 if 'conv_from_resize_opt' not in n.attrs:
                     n.attrs['trigger_float_op'] = 'float16_preferred' if self.hparams.trigger_float_op.lower(
                     ) == 'disable' else self.hparams.trigger_float_op.lower()
@@ -970,10 +1006,12 @@ class OptMaster(object):
             OPT_INFO(f"Now configure the Float Compass IR, and Optimizer uses this IR only to float inference.")
             self.run_float_ir_forward()
         elif self.hparams.run_mode == 'quant_ir_forward':
-            OPT_INFO(f"Now configure the Quantization Compass IR, and Optimizer uses this IR only to quantization inference.")
+            OPT_INFO(
+                f"Now configure the Quantization Compass IR, and Optimizer uses this IR only to quantization inference.")
             self.run_quant_ir_forward()
         elif self.hparams.run_mode == 'mixed_ir_forward':
-            OPT_INFO(f"Now configure the Mixed-Float-Quantization Compass IR, and Optimizer uses this IR only to inference.")
+            OPT_INFO(
+                f"Now configure the Mixed-Float-Quantization Compass IR, and Optimizer uses this IR only to inference.")
             self.run_mixed_ir_forward()
         else:
             self.run_default()

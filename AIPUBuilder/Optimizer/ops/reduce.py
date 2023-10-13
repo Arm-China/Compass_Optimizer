@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
@@ -287,7 +287,7 @@ def reduce_quantize(self, *args):
                     input_do_scale, input_do_shift = int(
                         input_do_scale), int(input_do_shift)
                     do_scale, do_shift = int(do_scale), int(do_shift)
-                    input_shape = list(inp.shape)
+                    input_shape = list(inp.ir_shape)
                     threshold_min, threshold_max = bits2range(15, False)
                     # input_do_scale ** n * do_scale = Q16 * 2 ** left_shifts
                     step = 1

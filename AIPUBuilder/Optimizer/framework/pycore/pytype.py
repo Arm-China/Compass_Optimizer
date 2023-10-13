@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -38,6 +38,24 @@ class Dtype(AutoName):
     ALIGNED_UINT4 = auto()
     ALIGNED_INT12 = auto()
     ALIGNED_UINT12 = auto()
+
+
+def dtype_string_name(dtype):
+    _dname = str(dtype)[6:]
+    _to_dict = {
+        'BFP16': 'BFLOAT16',
+        'FP16': 'FLOAT16',
+        'FP32': 'FLOAT32',
+        'FP64': 'FLOAT64'
+    }
+
+    if _dname in _to_dict:
+        return _to_dict[_dname]
+    else:
+        return _dname
+
+
+Dtype.name = property(dtype_string_name, None)
 
 
 class _OpType:
@@ -216,3 +234,4 @@ register_optype('UpsampleByIndex')
 register_optype('Where')
 register_optype('YuvToRgb')
 register_optype('ZeroFraction')
+register_optype('DivMod')

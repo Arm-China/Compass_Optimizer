@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -20,6 +20,11 @@ def singleGatherNd(inp_betensors, inp_indice):
         inp_indice = inp_indice.reshape(m, inp_indice.shape[-1])
         newshape = (m,)+inp_betensors.shape[inp_indice.shape[-1]:]
         out = torch.zeros(newshape, device=inp_betensors.device)
+
+    last_dims = inp_indice.shape[-1]
+    for dim in range(last_dims):
+        inp_indice[..., dim] = torch.minimum(torch.tensor(
+            inp_betensors.shape[dim]-1, device=inp_betensors.device), inp_indice[..., dim])
 
     if(inp_betensors.ndim == inp_indice.shape[-1]):
         inp_betensors = inp_betensors.unsqueeze(-1)

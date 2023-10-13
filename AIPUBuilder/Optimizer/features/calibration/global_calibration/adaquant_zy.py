@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_DEBUG, OPT_WARN
@@ -40,12 +40,12 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
                 s = 1.0
                 z = 0
                 if isinstance(t.scale, torch.Tensor):
-                    kshape = [t.shape[ax] if ax == t.key_axis_c else 1 for ax in range(len(t.shape))]
+                    kshape = [t.shape[ax] if ax == t.key_axis else 1 for ax in range(len(t.shape))]
                     s = t.scale.float().clone().detach().reshape(kshape)
                 else:
                     s = torch.tensor(t.scale, dtype=torch.float, device=dev)
                 if isinstance(t.zerop, torch.Tensor):
-                    kshape = [t.shape[ax] if ax == t.key_axis_c else 1 for ax in range(len(t.shape))]
+                    kshape = [t.shape[ax] if ax == t.key_axis else 1 for ax in range(len(t.shape))]
                     z = t.zerop.float().clone().detach().reshape(kshape)
                 else:
                     z = torch.tensor(t.zerop, dtype=torch.float, device=dev)

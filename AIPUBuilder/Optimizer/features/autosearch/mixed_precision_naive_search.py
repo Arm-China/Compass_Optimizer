@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import graph_inference
 from AIPUBuilder.Optimizer.passes import InsertCastOp, insert_op_pass
@@ -168,8 +168,8 @@ class NaiveAutoSearchMixedPrecision(object):
                 smsg += (f"unquantifiable layers is [{fid}, {gnodes-1}], and these layers would run on CPU device "
                          f"using float32 type. if you want to run these unquantifiable layers in AIPU device, "
                          f"please make sure AIPU hardware configuration can support float type. "
-                         f"and then configure 'trigger_float_op=automatic' in Optimizer cfg or "
-                         f"modify in opt config file. \n!Attention: because AIPU lib operators "
+                         f"and then configure 'trigger_float_op' in Optimizer cfg or "
+                         f"modify in per-layer json format template file. \n!Attention: because AIPU lib operators "
                          f"may not completely support float type on some hardware configureations, "
                          f"the model maybe has different accuracy comparing to running on CPU device "
                          f"when running on AIPU device with float type.")

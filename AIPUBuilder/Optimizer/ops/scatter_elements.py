@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.eltwise import *
 from AIPUBuilder.Optimizer.framework import *
@@ -132,6 +132,7 @@ def ScatterElements(self, *args):
     # to adjust negative index
     max_idx = self.inputs[0].ir_shape[axis]
     indices = torch.where(indices < 0, indices + max_idx, indices)
+    indices = torch.clamp(indices, 0, max_idx - 1)
 
     if len(self.placeholders) < 1:
         ph0 = PyTensor(self.name+"/tmp_s", torch.tensor(0.).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
@@ -139,10 +140,12 @@ def ScatterElements(self, *args):
 
     if self.quantized:
         scale, scale0, scale1 = self.params["scale_value"]
-        shift = self.params['shift_value']
+        # shift = self.params['shift_value']
 
         if reduce_method == 'MUL':
             shift, shift0, shift1 = self.params['shift_value']
+        else:
+            shift, shift0, shift1 = self.params['shift_value'], 0, 0
 
         if is_signed(self.outputs[0].dtype):
             inner_min = -2 ** (self.inputs[0].qbits + self.inputs[2].qbits-1)
@@ -151,30 +154,27 @@ def ScatterElements(self, *args):
             inner_min = 0
             inner_max = 2 ** (self.inputs[0].qbits + self.inputs[2].qbits) - 1
 
+        data = linear_requantize(data + self.inputs[0].zerop, scale0, shift0, 0, inner_min, inner_max)
+        updates = linear_requantize(updates + self.inputs[2].zerop, scale1, shift1, 0, inner_min, inner_max)
+        data = data.to(updates.dtype)
+
         if reduce_method == 'ADD':
-            data = linear_requantize(data + self.inputs[0].zerop, scale0, 0, 0, inner_min, inner_max)
-            updates = linear_requantize(updates + self.inputs[2].zerop, scale1, 0, 0, inner_min, inner_max)
             output = data.clone().scatter_(axis, indices, updates, reduce='add')
 
         elif reduce_method == 'MUL':
-            data = linear_requantize(data + self.inputs[0].zerop, scale0, shift0, 0, inner_min, inner_max)
             #  see bottom for implement details, this code is only for forward speed
-            output = data.clone().scatter_(
-                axis, indices, (updates + self.inputs[2].zerop)*scale1*0.5**shift1, reduce='multiply')
+            output = data.clone().scatter_(axis, indices, updates, reduce='multiply')
 
         elif reduce_method == 'NONE':
-            data = linear_requantize(data + self.inputs[0].zerop, scale0, 0, 0, inner_min, inner_max)
-            updates = linear_requantize(updates + self.inputs[2].zerop, scale1, 0, 0, inner_min, inner_max)
             output = data.clone().scatter_(axis, indices, updates)
 
         elif reduce_method in ['MIN', 'MAX']:
-            data = linear_requantize(data + self.inputs[0].zerop, scale0, 0, 0, inner_min, inner_max)
-            updates = linear_requantize(updates + self.inputs[2].zerop, scale1, 0, 0, inner_min, inner_max)
             output = data.clone().scatter_reduce(axis, indices, updates, reduce='a'+reduce_method.lower(), include_self=True)
 
         output = linear_requantize(output, scale, shift, out.zerop, out.qmin, out.qmax)
 
     else:
+        data = data.to(updates.dtype)
         if reduce_method == 'ADD':
             output = data.clone().scatter_(axis, indices, updates, reduce='add')
         elif reduce_method == 'MUL':

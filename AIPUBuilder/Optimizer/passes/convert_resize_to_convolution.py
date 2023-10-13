@@ -178,8 +178,10 @@ class BilinearResizeSubgraph(OptSubgraph):
 
     def build_subgraph(self, resize_node):
         resize_attrs = resize_node.attrs
-        resize_input = copy.deepcopy(resize_node.inputs[0])
-        resize_output = copy.deepcopy(resize_node.outputs[0])
+        # resize_input = copy.deepcopy(resize_node.inputs[0])
+        # resize_output = copy.deepcopy(resize_node.outputs[0])
+        resize_input = resize_node.inputs[0].clone(resize_node.inputs[0].name)
+        resize_output = resize_node.outputs[0].clone(resize_node.outputs[0].name)
 
         H, W, i_c = resize_node.inputs[0].ir_shape[1:]
         ResH, ResW = resize_node.outputs[0].ir_shape[1:3]

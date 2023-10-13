@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 import datetime
 import numpy as np
 import torch.nn as nn
@@ -96,7 +96,7 @@ class WinogradChecker(object):
     }
 
     def _checker(self, Target, node):
-        if node.type != OpType.Convolution or 'with_winograd' not in node.attrs.keys():
+        if node.type != OpType.Convolution or 'with_winograd' not in node.attrs.keys() or not node.attrs['with_winograd']:
             return False
 
         # PadedInputWidth = node.inputs[0].ir_shape[2] + (node.get_param('pad_left')+ node.get_param('pad_right'))
@@ -178,8 +178,8 @@ class WinogradChecker(object):
             for Target in cls.__WinogradConfig["TargetList"]:
                 status = status and cls()._checker(Target, node)
 
-            status = status and node.get_attrs("with_winograd")
             cls.__WinogradConfig["WinogradChecked"][LayeridString] = status
+            node.attrs['is_winograd_checker_passed'] = status
             return status
 
         except Exception:
@@ -420,7 +420,7 @@ def winograd_conv_1D_HP(self, inp, weights, bias, m=2, r=3, DEBUG=True):
                                             winogradPadBottom), value=self.inputs[0].zerop)  # need NCHW, 2d: ( left,right,up, down,)
     PaddingInp = WinogradPaddingFunc(tmp)
 
-    if 'WinogradWeights' not in self.attrs.keys():
+    if 'WinogradWeights' not in self.attrs.keys() and not self.get_param('with_winograd', optional=True, default_value=False):
         # generate G*g
         WinogradWeights = torch.zeros((_Cout, _Cin, _KernelHeight, TileInWidth),
                                       device=inp.device, dtype=torch.float32)  # 64,64,3,4

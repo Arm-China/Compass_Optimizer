@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -153,7 +153,7 @@ def convert_aipu_graph_to_opt_graph(cg):
             pn.params[k] = cast_from_NodeParamValue_string(str(v))
         for k, v in n.constants.items():
             pv = PyTensor(v.name, v.data())
-            pv.dtype = dt_dict[str(v._dtype().name)]
+            pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
             pv.ir_dtype = pv.dtype
             pv.ir_shape = tuple(v.shape)
             pv.scale = torch.tensor(v.quantization.scales, device=pv.betensor.device)
@@ -166,7 +166,7 @@ def convert_aipu_graph_to_opt_graph(cg):
         layer_top_range = []
         for v in n.outputs:
             pv = PyTensor(v.name, v.data())
-            pv.dtype = dt_dict[str(v._dtype().name)]
+            pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
             pv.ir_dtype = pv.dtype
             pv.ir_shape = tuple(v.shape)
             pv.scale = torch.tensor(v.quantization.scales, device=pv.betensor.device)
@@ -245,7 +245,7 @@ def convert_opt_graph_to_aipu_graph(g):
             return _OpType.__entries[t][0]
         return v
     ot_dict = {str(t[0]): t[0] for t in _OpType.__entries.values()}
-    dt_dict = {str(t[0].name): t[0] for t in _Dtype.__entries.values()}
+    dt_dict = {t[0].__to_str__().upper(): t[0] for t in _Dtype.__entries.values()}
     cg = _Graph(g.name)
     # cg.name = g.name
     # store edges
@@ -256,7 +256,7 @@ def convert_opt_graph_to_aipu_graph(g):
             # ct._set_dtype(dt_dict[v.dtype.name])
             ct.quantization.scales = _convert_scale_zp_to_list(v.scale)
             ct.quantization.offsets = [int(zp) for zp in _convert_scale_zp_to_list(v.zerop)]
-            ct.quantization.bits = v.qbits if v.qbits else n.attrs['q_bits_activation']
+            ct.quantization.bits = v.qbits if v.qbits else n.attrs['q_bits_activation'] if 'q_bits_activation' in n.attrs else -1
             ct.quantization.qinvariant = v.qinvariant
             emap[ct.name] = ct
     for n in g.nodes:
@@ -274,9 +274,9 @@ def convert_opt_graph_to_aipu_graph(g):
             if v.qbits:
                 ct.quantization.bits = v.qbits
             elif 'weights' == k:
-                ct.quantization.bits = n.attrs['q_bits_weight']
+                ct.quantization.bits = n.attrs['q_bits_weight'] if 'q_bits_weight' in n.attrs else -1
             elif 'biases' == k:
-                ct.quantization.bits = n.attrs['q_bits_bias']
+                ct.quantization.bits = n.attrs['q_bits_bias'] if 'q_bits_bias' in n.attrs else -1
             ct.quantization.qinvariant = v.qinvariant
             cn.constants[k] = ct
         for v in n.inputs:
@@ -299,19 +299,19 @@ def parse_graph_from_ir(ir_txt, ir_bin):
     from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
     from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
     from AIPUBuilder.Optimizer.framework.pycore.pytype import register_optype, OpType
-    from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN, OPT_DEBUG
+    from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN, OPT_DEBUG, tqdm
     from AIPUBuilder.Optimizer.utils.dtype_utils import str2dtype, dtype2nptype
+    import mmap
+    import os
+    import sys
     import re
     import numpy as np
     import torch
     g = QuantizeGraph()
     OPT_INFO('Suggest using "aipuchecker" to validate the IR firstly if you are not sure about its validity.')
     gstr = ''
-    bstr = b''
     with open(ir_txt, 'r') as ftxt:
-        with open(ir_bin, 'rb') as fbin:
-            gstr += ftxt.read()
-            bstr += fbin.read()
+        gstr += ftxt.read()
     # get sections of key value pairs
     msg = 'Invalid IR, please use "aipuchecker" to diagnose it for more specific information.'
     try:
@@ -329,8 +329,8 @@ def parse_graph_from_ir(ir_txt, ir_bin):
         if len(sections) > 1:
             abstract = sections[0]
             g.name = abstract['model_name']
-            g.compat_quantized_model = True if 'compat_quantized_model' in abstract and abstract['compat_quantized_model'].lower(
-            ) == 'true' else False
+            if 'compat_quantized_model' in abstract:
+                g.compat_quantized_model = True if abstract['compat_quantized_model'].lower() == 'true' else False
             inp_tensor_names = cast_from_NodeParamValue_string(
                 abstract['input_tensors']) if 'input_tensors' in abstract.keys() else []
             inp_tensor_names = [str(s) for s in inp_tensor_names]
@@ -360,7 +360,12 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                         t.zerop = torch.tensor(top_zerop[j], device=t.betensor.device) if isinstance(
                             top_zerop[j], list) else top_zerop[j]
                     emap[t.name] = t
-            for i in range(1, len(sections)):
+            OPT_INFO("IR loaded.")
+            tensor_list = []
+            need_reordering = False
+            old_offset = -1
+            pbar = tqdm(range(1, len(sections)), desc="Building graph", file=sys.stdout)
+            for i in pbar:
                 sec = sections[i]
                 n = PyNode(sec['layer_name'], register_optype(sec['layer_type']))
                 n.attrs['layer_id'] = sec['layer_id']
@@ -387,14 +392,15 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                         ckey_zerop = ckey + '_zp'
                         if ckey_type in sec.keys() and ckey_size in sec.keys() and ckey_shape in sec.keys():
                             bytes_offset = int(sec[ckey_offset])
+                            if not need_reordering and bytes_offset < old_offset:
+                                need_reordering = True
+                            old_offset = bytes_offset
                             bytes_size = int(sec[ckey_size])
-                            bstr_sub = bstr[bytes_offset: bytes_offset + bytes_size]
-                            arr = np.frombuffer(bstr_sub, dtype=dtype2nptype(str2dtype(sec[ckey_type])))
-                            t = PyTensor(f'{n.name}{ckey}', arr)
+                            t = PyTensor(f'{n.name}{ckey}')
                             t.ir_shape = TensorShape(cast_from_NodeParamValue_string(sec[ckey_shape]))
                             t.ir_dtype = cast_from_NodeParamValue_string(sec[ckey_type])
                             t.dtype = t.ir_dtype
-                            t.betensor = t.betensor.reshape(t.ir_shape)
+                            tensor_list.append([bytes_offset, bytes_size, t, dtype2nptype(str2dtype(sec[ckey_type]))])
                             if set((ckey_scale, ckey_zerop)).issubset(set(sec.keys())):
                                 t.scale = cast_from_NodeParamValue_string(sec[ckey_scale])
                                 t.zerop = cast_from_NodeParamValue_string(sec[ckey_zerop])
@@ -408,6 +414,53 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                     if key not in non_param_keys:
                         n.params[key] = cast_from_NodeParamValue_string(sec[key])
                 g.nodes.append(n)
+            pbar.refresh()
+            OPT_INFO("Begin to load weights.")
+            f = open(ir_bin, "rb")
+            fsize = os.path.getsize(ir_bin)
+            if fsize == 0 or len(tensor_list) == 0:
+                bstr = b''
+            else:
+                bstr = mmap.mmap(f.fileno(), fsize, access=mmap.ACCESS_READ)
+                page_size = mmap.PAGESIZE
+                page_count = fsize // page_size
+                cores = torch.multiprocessing.cpu_count()  # Use multicores to preload
+                pages_per_core = page_count // cores
+                jobs = [[core * pages_per_core, (core+1) * pages_per_core] for core in range(cores)]
+
+                def load_page(ranges):
+                    for i in range(ranges[0], ranges[1]):
+                        _ = bstr[i * 4096]
+                ps = []
+                for core in range(cores):
+                    p = torch.multiprocessing.Process(target=load_page, args=(jobs[core],))
+                    p.start()
+                    ps.append(p)
+                for p in ps:
+                    p.join()
+            OPT_INFO("Weights loaded.")
+            global_offset = 0
+            forward_threshold = 2**29  # 512MB
+            if need_reordering:
+                tensor_list = sorted(tensor_list, key=lambda x: x[0])
+            pbar = tqdm(tensor_list, desc="Deserializing bin", file=sys.stdout)
+            for bytes_offset, bytes_size, t, dtype in pbar:
+                bytes_offset -= global_offset
+                arr = np.frombuffer(bstr[bytes_offset: bytes_offset + bytes_size], dtype=dtype)
+                if bytes_offset + bytes_size > forward_threshold:
+                    OPT_DEBUG(
+                        "Due to reading large bin file, OPT will split the large file to accelerate loading process.", log_once=True)
+                    global_offset += bytes_offset + bytes_size
+                    global_offset -= global_offset % mmap.ALLOCATIONGRANULARITY
+                    f.close()
+                    f = open(ir_bin, "rb")
+                    bstr = mmap.mmap(f.fileno(), fsize - global_offset,
+                                     access=mmap.ACCESS_READ, offset=int(global_offset))
+                tmp = PyTensor("bintmp", arr)
+                t.betensor = tmp.betensor.reshape(t.ir_shape)
+            pbar.refresh()
+            f.close()
+
             inp_tensors = []
             for tname in inp_tensor_names:
                 inp_tensors.append(emap[tname])
@@ -469,6 +522,10 @@ def parse_graph_from_ir(ir_txt, ir_bin):
 
 def serialize_graph_to_ir(g, ir_txt, ir_bin):
     from AIPUBuilder.Optimizer.utils import dtype2str, dtype2bytes, dtype2nptype, make_path
+    from AIPUBuilder.Optimizer.logger import OPT_INFO, tqdm
+    import mmap
+    import threading
+    import sys
 
     def _convert_scale_zp_to_list(data):
         import torch
@@ -478,12 +535,12 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
             ret_data = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             ret_data = data.tolist()
+            ret_data = _convert_scale_zp_to_list(ret_data)
         else:
             ret_data = data
         return ret_data
 
     gstr = ''
-    bstr = b''
     gstr += f'model_name={g.name}\nlayer_number={len(g.nodes)}\n'
     inp_tensor_names = []
     for t in g.input_tensors:
@@ -495,7 +552,9 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
     gstr += f'output_tensors={cast_to_NodeParamValue_string(out_tensor_names)}\n'
     gstr += '\n'
     offset = 0
-    for i, n in enumerate(g.nodes):
+    tensor_list = []
+    pbar = tqdm(enumerate(g.nodes), desc="Writing IR", file=sys.stdout)
+    for i, n in pbar:
         gstr += f'layer_id={i}\nlayer_name={n.name}\nlayer_type={n.type.name}\n'
         bottom_names = []
         bottom_shape = []
@@ -530,14 +589,75 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
             gstr += f'{c}_offset={offset}\n'
             gstr += f'{c}_size={c_size}\n'
             gstr += f'{c}_shape={cast_to_NodeParamValue_string(list(ct.betensor.shape))}\n'
-            bstr += ct.betensor.cpu().contiguous().numpy().astype(dtype2nptype(ct.dtype)).tobytes()
+            # bstr += ct.betensor.cpu().contiguous().numpy().astype(dtype2nptype(ct.dtype)).tobytes()
+            tensor_list.append([offset, c_size, ct])
             offset += c_size
         for k, v in n.params.items():
             gstr += f'{k}={cast_to_NodeParamValue_string(v)}\n'
         gstr += '\n'
+    pbar.refresh()
     make_path(ir_txt)
     make_path(ir_bin)
     with open(ir_txt, 'w') as ftxt:
         ftxt.write(gstr)
-    with open(ir_bin, 'wb') as fbin:
-        fbin.write(bstr)
+
+    if len(tensor_list) == 0:
+        with open(ir_bin, 'wb') as fbin:
+            pass
+        return
+
+    total_size = tensor_list[-1][0] + tensor_list[-1][1]
+    mem_seg = 2 ** 29 - (2**29 % mmap.ALLOCATIONGRANULARITY)  # 512MB
+
+    job_list = []
+    job = []
+    workloads = 0
+    for offset, size, ct in tensor_list:
+        offset = offset % mem_seg
+        job.append([offset, size, ct])
+        if offset + size > mem_seg:
+            remains = mem_seg - offset
+            job_list.append(job)
+            workloads += len(job)
+            job = [[0, size - remains, ct]]
+    if len(job) > 0:
+        job_list.append(job)
+        workloads += len(job)
+
+    def write_to_kernel(origin_offset, job, fileno, pbar):
+        length = mem_seg
+        if origin_offset + mem_seg > total_size:
+            length = total_size - origin_offset
+        mem = mmap.mmap(fileno, length, flags=mmap.MAP_SHARED, access=mmap.ACCESS_WRITE, offset=origin_offset)
+        for offset, size, ct in job:
+            bytes = ct.betensor.cpu().contiguous().numpy().astype(dtype2nptype(ct.dtype)).tobytes()
+            if size == len(bytes):
+                if offset + size <= mem_seg:
+                    mem[offset:offset+size] = bytes
+                else:
+                    mem[offset:] = bytes[:length-offset]
+            else:
+                mem[:size] = bytes[-size:]
+            pbar.update(1)
+        mem.close()
+
+    cores = len(job_list)
+    # alloc space on disk
+    fbin = open(ir_bin, 'wb')
+    fbin.seek(total_size-1)
+    fbin.write(b'\0')
+    fbin.close()
+    fbin = open(ir_bin, 'r+b')
+
+    tpbar = tqdm(total=workloads, desc="Serializing bin", file=sys.stdout)
+    ps = []
+    for i in range(cores):
+        p = threading.Thread(target=write_to_kernel, args=(i*mem_seg, job_list[i], fbin.fileno(), tpbar))
+        p.start()
+        ps.append(p)
+
+    for p in ps:
+        p.join()
+    tpbar.refresh()
+
+    fbin.close()

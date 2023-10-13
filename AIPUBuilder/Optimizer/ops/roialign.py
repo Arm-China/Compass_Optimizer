@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_WARN
 from AIPUBuilder.Optimizer.utils import *
@@ -367,7 +367,7 @@ def roialign_quantize(self, *args):
     out = self.outputs[0]
     out_h, out_w = self.get_param('pooled_shape')
     sample_h, sample_w = self.get_param('sample')
-    fm_h, fm_w = inp.betensor.shape[1:3]
+    fm_h, fm_w = inp.ir_shape[1:3]
 
     out.qbits = q_bits_activation
     out_sign = is_signed(inp.dtype)

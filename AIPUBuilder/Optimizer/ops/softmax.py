@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -22,12 +22,11 @@ def softmax_quantize(self, *args):
     scaling_bits = self.attrs['scaling_bits']
     mbits = max(8, 32-ibits) if scaling_bits[0] < 1 else scaling_bits[0]
     max_val = torch.tensor((1 << mbits)-1, device=dev)
-    max_inp = linear_quantize_clip(torch.log(max_val), inp.scale, inp.zerop,
-                                   torch.iinfo(torch.int64).min,
-                                   torch.iinfo(torch.int64).max)
+    max_inp = torch.log(max_val)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = linear_dequantize(torch.linspace(0, 2 ** inp.qbits - 1, steps=lsteps, device=dev) + max_inp - 2 ** inp.qbits,
-                            inp.scale, inp.zerop)
+    quant_range_linspace = torch.linspace(0, 2 ** inp.qbits - 1, steps=lsteps, device=dev)
+    max_inp -= inp.zerop / inp.scale
+    lut = linear_dequantize(quant_range_linspace - (2 ** inp.qbits - 1), inp.scale, inp.zerop) + max_inp
     lut = torch.exp(lut).round().clamp(0, max_val)
     self.constants["lut"] = PyTensor(
         self.name + "/explut", lut.cpu().numpy().astype(dtype2nptype(range2dtype(0, max_val.item())[1])))
@@ -78,9 +77,11 @@ def softmax(self, *args):
         existed is because of in small data numbers the saved enlarge_bits acurracy in division is faster than 31bits, the lib
         has better preformance, so in order to compatiblity the lib impl, we also has two kind of quantized forward.
         '''
+        # 31->30: Adaptation the lut.max=1 case in android and these case lib would overflow using base_bits=31
+        base_bits = 30 if lut.max() == 1 else 31
         if shape_value_in_axis < 8 and in_size % 128 == 0:
             scale_bits = torch.ceil(torch.log2(lut.max())).long()
-            enlarge_bits = 31 - scale_bits
+            enlarge_bits = base_bits - scale_bits
             numerator = (y.long() << enlarge_bits) + (y_sum >> 1)
             denominator = torch.maximum(y_sum, torch.ones_like(y_sum))
             z = torch.div(numerator, denominator, rounding_mode='trunc')
@@ -89,7 +90,7 @@ def softmax(self, *args):
         else:
             denominator = torch.maximum(y_sum, torch.ones_like(y_sum))
             scale_bits = torch.ceil(torch.log2(torch.tensor(do_scale))).long()
-            enlarge_bits = 31 - scale_bits
+            enlarge_bits = base_bits - scale_bits
             enlarge_shift = do_shift + enlarge_bits
             enlarge_scale = do_scale * (2 ** enlarge_bits)
             reverse_sum = torch.div(enlarge_scale, denominator, rounding_mode='trunc')

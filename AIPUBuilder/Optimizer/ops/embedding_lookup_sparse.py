@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -190,8 +190,8 @@ def lookupsparse(self, *args):
         do_scale = self.get_param('scale_value')
         do_shift = self.get_param('shift_value')
 
-        params_data = params_data.long() + self.inputs[0].zerop
-        weights_value = weights_value.long() + self.inputs[3].zerop
+        params_data = (params_data + self.inputs[0].zerop).long()
+        weights_value = (weights_value + self.inputs[3].zerop).long()
         params_weight = (params_data * weights_value).long()
         params_sum = segment_sum(params_weight, indices).long()
         if combiner == 'sum':

@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import time
 import os
@@ -25,7 +25,7 @@ class OptLogManagement(object):
         import torch
         import os
         cuda = torch.cuda.is_available()
-        cuda_visible = os.getenv('CUDA_VISIBLE_DEVICES')
+        cuda_visible = os.getenv('CUDA_VISIBLE_DEVICES', '0')
         device = f"cuda::{cuda_visible}" if cuda else "cpu"
         OPT_INFO(f"tool name: {TOOL_NAME}, version: {VERSION}, use cuda: {cuda}, running device: {device}")
         cfg_str = '[model name]: ' + cfg.model_name + ', ' + \

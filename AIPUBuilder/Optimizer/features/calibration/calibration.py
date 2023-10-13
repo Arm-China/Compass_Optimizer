@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.logger import *
 from . local_calibration import *
@@ -62,7 +62,11 @@ def apply_global_calibration(g, cdataloader, strategy):
             elif 'svd_quant' == mname:
                 svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
             elif 'mvn_correction' == mname:
-                from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
-                mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
+                try:
+                    from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
+                    mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
+                except:
+                    OPT_ERROR('no global calibration strategy named "mvn_correction" found')
+                    pass
             else:
                 pass

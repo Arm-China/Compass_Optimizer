@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -36,5 +36,7 @@ def constant_quantize(self, *args):
     w.dtype = out.dtype
     w.qmin = out.qmin
     w.qmax = out.qmax
+    if out.scale == 1 and out.zerop == 0:
+        out.qinvariant = True
     w.qinvariant = out.qinvariant
     w.betensor = linear_quantize_clip(w.betensor, w.scale, w.zerop, w.qmin, w.qmax)

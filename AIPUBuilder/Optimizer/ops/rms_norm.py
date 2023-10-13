@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -128,17 +128,17 @@ def RMSNorm(self, *args):
     if 'weights' in self.constants:
         w = self.constants["weights"]
         # must be positive axis
-        w.key_axis_c = len(w.shape)-1
+        w.key_axis = len(w.shape)-1
         w_zerop = w.zerop
         if isinstance(w.zerop, torch.Tensor):
-            zerop_shape = [w.shape[ax] if ax == w.key_axis_c else 1 for ax in range(len(w.shape))]
+            zerop_shape = [w.shape[ax] if ax == w.key_axis else 1 for ax in range(len(w.shape))]
             w_zerop = torch.reshape(w.zerop, zerop_shape)
         gamma = w.betensor + w_zerop
         gamma = torch.reshape(gamma, axis_reshape)
     beta = 0.0
     if 'biases' in self.constants:
         b = self.constants["biases"]
-        b.key_axis_c = len(b.shape)-1
+        b.key_axis = len(b.shape)-1
         beta = b.betensor + b.zerop
         beta = torch.reshape(beta, axis_reshape)
     out.betensor = gamma * normalized + beta

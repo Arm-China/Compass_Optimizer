@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import torch
 import numpy as np
@@ -63,6 +63,9 @@ def decode_box(bbox, anchor, param, quantized):
         cy = ty * ha + ya
         cx = tx * wa + xa
 
+        h = h.clamp(0, h_max - h_min)
+        w = w.clamp(0, w_max - w_min)
+
         ymin = cy - h / 2.
         xmin = cx - w / 2.
         ymax = cy + h / 2.
@@ -89,6 +92,9 @@ def decode_box(bbox, anchor, param, quantized):
         w = (lut_w.to(dev).int() * wa.to(dev).int()) >> shift
         cy = ((lut_y.to(dev).int() * ha.to(dev).int()) >> shift).int() + ya.to(dev).int()
         cx = ((lut_x.to(dev).int() * wa.to(dev).int()) >> shift).int() + xa.to(dev).int()
+
+        h = h.clamp(0, h_max - h_min)
+        w = w.clamp(0, w_max - w_min)
 
         ymin = cy - (h >> 1)
         xmin = cx - (w >> 1)
@@ -332,15 +338,15 @@ def quantize_decodebox(self, *args):
         in_anchor_t.qbits = stats_coords.qbits
         in_anchor_t.qinvariant = in_bbox.qinvariant
 
-        coord_scale = 2**(torch.floor(torch.log2(torch.tensor(stats_coords.scale)))).int()
+        coord_scale = max(1, 2**(torch.floor(torch.log2(torch.tensor(stats_coords.scale)))).int().item())
         q_in_anchor = in_anchor * coord_scale
         q_in_anchor = torch.clamp(q_in_anchor, stats_coords.qmin, stats_coords.qmax).short()
 
         # self.attrs['weights'] = q_in_anchor
         coord_zp = stats_coords.zerop
 
-    self.params['height'] = coord_scale.item()
-    self.params['width'] = coord_scale.item()
+    self.params['height'] = coord_scale
+    self.params['width'] = coord_scale
 
     # step3
     sign = is_signed(in_bbox.dtype)

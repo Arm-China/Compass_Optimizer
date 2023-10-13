@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.pad import pad
 from AIPUBuilder.Optimizer.ops.multibox_transform_Loc import calculate_box_quantization, apply_box_deltas, apply_box_deltas_q

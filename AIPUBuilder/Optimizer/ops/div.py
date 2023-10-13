@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -16,7 +16,7 @@ def div_quantize(self, *args):
     inp0 = self.inputs[0]
     inp1 = self.inputs[1]
     out = self.outputs[0]
-    out_sign = is_signed(inp0.dtype) or is_signed(inp0.dtype)
+    out_sign = is_signed(inp0.dtype) or is_signed(inp1.dtype)
     out.qinvariant = False
     out.qbits = q_bits_activation
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(

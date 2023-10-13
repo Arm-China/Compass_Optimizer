@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -9,7 +9,7 @@ from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_act
 import torch
 
 
-def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, layer_type, layer_id='unknow'):
+def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, multiplier_bits, layer_type, layer_id='unknow'):
     # ######################################################################################################
     # # former schema
     # clip_max = doscale_clip_max
@@ -56,7 +56,7 @@ def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, layer_t
     # local_rescale = out.scale / (inp_scale_max)
     # do_scale, do_scale_type, do_shift, do_shift_type = \
     #     get_scale_approximation_params(local_rescale / (2**g_eltwise_scale_bits),
-    #                                     mult_bits=out.qbits,
+    #                                     mult_bits=multiplier_bits,
     #                                     force_shift_positive=True)
     # plh_scale = max(inp0.scale, inp1.scale) * (2**g_eltwise_scale_bits)
     # return scale0, scale1, do_scale, do_shift, do_scale_type, do_shift_type, plh_scale
@@ -97,7 +97,7 @@ def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, layer_t
                       f"are very disproportional and caused out of range scale value during quantization, please pay attention.")
     scale0 = max(0, min(doscale_clip_max, round(scale0)))
     scale1 = max(0, min(doscale_clip_max, round(scale1)))
-    do_scale, _, do_shift, _ = get_scale_approximation_params(rscale, mult_bits=out.qbits)
+    do_scale, _, do_shift, _ = get_scale_approximation_params(rscale, mult_bits=multiplier_bits)
     if do_shift < 0:
         do_scale = max(1, min(doscale_clip_max, do_scale * (2.0 ** abs(do_shift))))
         do_shift = 0
@@ -111,6 +111,7 @@ def eltwise_quantizes(self, *args):
     out = self.outputs[0]
     method = self.get_param("method").upper()
     q_mode_activation = self.attrs["q_mode_activation"]
+    multiplier_bits = self.attrs['multiplier_bits']
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Eltwise currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
@@ -142,21 +143,21 @@ def eltwise_quantizes(self, *args):
         # due to aiff don't support uint16 max 65535,so we use INT16 replace UINT16
         _, clip_max = dtype2range(Dtype.INT16)
         scale0, scale1, do_scale, do_shift, do_scale_type, do_shift_type, plh_scale = calc_eltwise_add_like_scale_shift(
-            inp0, inp1, out, clip_max, self.type, self.attrs["layer_id"])
+            inp0, inp1, out, clip_max, multiplier_bits, self.type, self.attrs["layer_id"])
         # placeholders is only useful for ideal_mode (to help recording the float scale of var before activation)
         # which is now deprecated and can be remove in future
         if len(self.placeholders) < 1:
-            tensor_name = self.graph.get_valid_tensor_name(self.name)
+            tensor_name = f"{self.name}_plh0"
             ph0 = PyTensor(tensor_name, torch.tensor(0.).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
             self.placeholders.append(ph0)
         self.placeholders[0].scale = plh_scale
 
         bs_threshold = float(self.get_attrs('unify_scales_for_multi_inputs_operator_threshold',
-                             optional=True, default_value=1.0))
+                                            optional=True, default_value=1.0))
         if (max(inp0.scale, inp1.scale) / (min(inp0.scale, inp1.scale) + OPT_EPSILON)) <= bs_threshold and abs(inp0.zerop - inp1.zerop) <= OPT_EPSILON:
             if method in {"ADD", }:
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-                    out.scale / inp0.scale, mult_bits=q_bits_activation, force_shift_positive=self.force_shift_positive)
+                    out.scale / inp0.scale, mult_bits=multiplier_bits, force_shift_positive=self.force_shift_positive)
             else:
                 do_scale = 1
                 do_shift = 0
@@ -175,7 +176,7 @@ def eltwise_quantizes(self, *args):
     elif method == "MUL":
         local_rescale = out.scale / (inp0.scale * inp1.scale)
         do_scale, do_scale_type, do_shift, do_shift_type = \
-            get_scale_approximation_params(local_rescale, mult_bits=q_bits_activation,
+            get_scale_approximation_params(local_rescale, mult_bits=multiplier_bits,
                                            force_shift_positive=self.force_shift_positive)
         self.params["shift_value"] = int(do_shift)
         self.params["shift_type"] = do_shift_type
@@ -215,7 +216,7 @@ def eltwise(self, *args):
     x_scale = 1.0
     x_zerop = 0
     if len(self.placeholders) < 1:
-        tensor_name = self.graph.get_valid_tensor_name(self.name)
+        tensor_name = f"{self.name}_plh0"
         ph0 = PyTensor(tensor_name, torch.tensor(0.).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
         self.placeholders.append(ph0)
     if method in {"ADD", "SUB", "MAX", "MIN"}:

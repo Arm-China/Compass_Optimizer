@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
@@ -75,6 +75,7 @@ def cast_quantize(self, *args):
                 OPT_FATAL("wrong to_dtype for only_for_quantized situation.")
             out.dtype = self.params['to_dtype']
             out.qbits = dtype2bits(out.dtype)
+
             out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                 out, q_mode_activation, out.qbits, is_signed(out.dtype))
             do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(

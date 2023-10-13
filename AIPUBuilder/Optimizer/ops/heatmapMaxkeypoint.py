@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -143,13 +143,13 @@ def solveForDelta_quant(localGrid, numBoxes, numKeypoints, heatmapsize_max_score
     A01_valid = A01[valid_mask]
     A10_valid = A10[valid_mask]
     A11_valid = A11[valid_mask]
-    delta0 = torch.div((A11_valid * b0_valid - A01_valid * b1_valid) * (2**8), detA_valid, rounding_mode='floor').int()
-    delta1 = torch.div((A00_valid * b1_valid - A10_valid * b0_valid) * (2**8), detA_valid, rounding_mode='floor').int()
+    delta0 = torch.div((A11_valid * b0_valid - A01_valid * b1_valid) * (2**8), detA_valid, rounding_mode='trunc').int()
+    delta1 = torch.div((A00_valid * b1_valid - A10_valid * b0_valid) * (2**8), detA_valid, rounding_mode='trunc').int()
 
     gt_thres_mask = torch.bitwise_or(torch.abs(delta0) > (1.5 * 256), torch.abs(delta1) > (1.5 * 256))
     if len(gt_thres_mask) > 0:
         scale = torch.div(
-            (1.5*256)*256, torch.maximum(torch.abs(delta0[gt_thres_mask]), torch.abs(delta1[gt_thres_mask])), rounding_mode='floor').long()
+            (1.5*256)*256, torch.maximum(torch.abs(delta0[gt_thres_mask]), torch.abs(delta1[gt_thres_mask])), rounding_mode='trunc').long()
         delta0[gt_thres_mask] *= scale
         delta1[gt_thres_mask] *= scale
         delta0[gt_thres_mask] = delta0[gt_thres_mask].int() >> 8
@@ -211,8 +211,8 @@ def HeatmapMaxKeypoint_forward(self, *args):
     hRoiStart = box[:, 1]
     wRoiEnd = box[:, 2]
     hRoiEnd = box[:, 3]
-    roiWidth = wRoiEnd - wRoiStart
-    roiHeight = hRoiEnd - hRoiStart
+    roiWidth = torch.clamp(wRoiEnd - wRoiStart, 1)
+    roiHeight = torch.clamp(hRoiEnd - hRoiStart, 1)
 
     if self.quantized:
         score_scale, score_shift = self.get_param('score_scale_value'), self.get_param('score_shift_value')

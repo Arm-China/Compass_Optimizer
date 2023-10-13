@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -219,6 +219,8 @@ class PyGraph:
             for n in g:
                 n.attrs['tgid'] = i
                 n.graph = self
+                for ot in n.outputs:
+                    ot.pnode = n
 
         self.net_ = net
         return self.net_

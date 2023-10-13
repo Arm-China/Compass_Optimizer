@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 # for built in dataset
 from . import aipubt_dataset_numpy
@@ -61,6 +61,8 @@ from . import aipubt_metric_retinanetmAP
 from . import aipubt_metric_f1mesure
 from . import aipubt_metric_MaxAbsError_with_seqlen
 from . import aipubt_metric_roc
+from . import aipubt_metric_imdb
+
 
 # for built in op
 from . import aipubt_op_tile

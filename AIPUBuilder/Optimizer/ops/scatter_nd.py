@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.eltwise import *
 from AIPUBuilder.Optimizer.framework import *
@@ -133,20 +133,29 @@ def ScatterND(self, *args):
         "MIN": lambda a, b: torch.min(a, b),
         'NONE': lambda a, b: b,
     }
+
+    def get_valid_idxx(indices, idx, shape):
+        idxx = indices[idx]
+        max_idxx = torch.tensor(shape, device=indices.device)[:idxx.numel()]
+        invalid_idxx = idxx >= max_idxx
+        idxx[invalid_idxx] = max_idxx[invalid_idxx] - 1
+        idxx = list(idxx)
+        return idxx
+
     if reduce_method in ['ADD', 'MIN', 'MAX', 'NONE']:
         for idx in idxs:
             if idx != ():
                 idx = list(idx) if len(idx.shape) >= 1 else int(idx)
-            idxx = list(indices[idx])
+            idxx = get_valid_idxx(indices, idx, output.shape)
             output[idxx] = method[reduce_method](output[idxx], updates[idx])
             if self.quantized:
-                output[idxx] = torch.clamp(output[idxx], inner_min, inner_max)
+                output[idxx] = torch.clamp(output[idxx].long(), inner_min, inner_max)
     if reduce_method == 'MUL':
         if self.quantized:
             for idx in idxs:
                 if idx != ():
                     idx = list(idx) if len(idx.shape) >= 1 else int(idx)
-                idxx = list(indices[idx])
+                idxx = get_valid_idxx(indices, idx, output.shape)
                 if qbits <= 8:
                     output[idxx] = linear_requantize(output[idxx] * updates[idx], 1, shift_, 0, inner_min, inner_max)
                 else:  # rounding at 16+bit is much slower than shift
@@ -156,7 +165,7 @@ def ScatterND(self, *args):
             for idx in idxs:
                 if idx != ():
                     idx = list(idx) if len(idx.shape) >= 1 else int(idx)
-                idxx = list(indices[idx])
+                idxx = get_valid_idxx(indices, idx, output.shape)
                 output[idxx] = output[idxx] * updates[idx]
     if self.quantized:
         if qbits <= 8:

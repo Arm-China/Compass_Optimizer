@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -60,8 +60,8 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
 
     current_box_num = box.shape[0]
 
-    greater_score_thres_mask = score > score_threshold
-    box_index = torch.arange(current_box_num)[greater_score_thres_mask]
+    greater_score_thres_mask = score.float() > score_threshold
+    box_index = torch.arange(current_box_num, device=score.device)[greater_score_thres_mask]
     score_cand = score[greater_score_thres_mask].clone()
     areas_cand = areas[greater_score_thres_mask].clone()
     filter_score_num = len(score_cand)
@@ -77,7 +77,7 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
         box_index = del_tensor_from_index(box_index, argmax_idx)
         areas_cand = del_tensor_from_index(areas_cand, argmax_idx)
 
-        if score_value <= score_threshold:
+        if score_value.float() <= score_threshold:
             break
 
         # nms difference of tf or tflite is in here, tflite contains the following code, but tf don't

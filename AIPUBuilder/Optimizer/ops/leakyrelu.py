@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
@@ -56,12 +56,13 @@ def leakyrelu_quantize(self, *args):
         OPT_FATAL("Currently not support per-channel quantization")
 
     q_bits_activation = self.attrs["q_bits_activation"]
+    multiplier_bits = self.attrs['multiplier_bits']
     out.qinvariant = False
     out.qbits = q_bits_activation
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
         out, q_mode_activation, out.qbits, True)
     do_scale, do_scale_type, do_shift, do_shift_type = \
-        get_scale_approximation_params(out.scale / inp.scale, mult_bits=out.qbits,
+        get_scale_approximation_params(out.scale / inp.scale, mult_bits=multiplier_bits,
                                        force_shift_positive=self.force_shift_positive)
 
     negative_slope = int(round(self.get_param('negative_slope_value') * 2 ** out.qbits))

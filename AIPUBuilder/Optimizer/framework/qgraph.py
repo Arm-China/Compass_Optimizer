@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -50,7 +50,7 @@ def graph_inference(graph, g_forward, dataloader, metrics, with_float=False, max
                 if with_float:
                     prediction.append(t.betensor)
                 else:
-                    if t.debug_flag:
+                    if t.debug_flag or (t.pnode is not None and t.pnode.get_param('unquantifiable', optional=True, default_value=False)):
                         dtb = t.betensor
                     else:
                         dtb = linear_dequantize(t.betensor, t.scale, t.zerop)
@@ -129,16 +129,16 @@ class QuantizeGraph(PyGraph):
                     qmethod_wht = n.get_attrs('q_mode_weight')
                     if not n.quantized:
                         for _, v in n.constants.items():
-                            key_axis_c = v.key_axis_c if v.ir_shape != TensorShape([]) else None
+                            key_axis = v.key_axis if v.ir_shape != TensorShape([]) else None
                             if time_saving_mode:
                                 if not (QuantMode.is_per_channel(qmethod_wht) or n.get_param('group', optional=True, default_value=1) > 1):
-                                    key_axis_c = None
+                                    key_axis = None
                                 r = CalibrationStrategyField._need_statistic_info(cstrategy)
                                 if not r['histc']:
                                     histc_bins = None
                                 if not r['std_mean']:
                                     statistic_std_mean = False
-                            v.statistic(running_statistic_momentum, key_axis=key_axis_c,
+                            v.statistic(running_statistic_momentum, key_axis=key_axis,
                                         histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
                                         trim_infinity=trim_inf[n],
                                         reset=True)
@@ -382,6 +382,13 @@ class QuantizeGraph(PyGraph):
         from AIPUBuilder.Optimizer.logger import tqdm
         if self.quantgraph is None:
             self.quantgraph = self.clone()
+
+        # record the map between quantized node's name and source node object pointer
+        qnmap = {}
+        for qn, n in zip(self.quantgraph.nodes, self.nodes):
+            qnmap[qn.name] = n
+        for qn in self.quantgraph.nodes:
+            qn.attrs['map_to_original_node'] = qnmap
 
         with tqdm(total=len(self.quantgraph.nodes), desc='quantize each layer', file=sys.stdout, leave=True) as pbar:
             for n in self.quantgraph.nodes:

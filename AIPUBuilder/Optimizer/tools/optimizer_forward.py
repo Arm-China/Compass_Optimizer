@@ -1,39 +1,49 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 import os
 from AIPUBuilder.Optimizer.plugins import *
 from AIPUBuilder.Optimizer.framework import *
+from AIPUBuilder.Optimizer.utils import dtype2nptype
 from AIPUBuilder.Optimizer.optmaster import *
 from AIPUBuilder.Optimizer.logger import *
 
 
 class OptForward(object):
 
-    def __init__(self, ir_txt, ir_bin, forward_type='float'):
-        '''
-        OptForward is a interface for float/quantized graph forward calling the optimizer ops's forward, and only
-        provides the Compass IR.
-        :param ir_txt: Compass IR .txt path
-        :param ir_bin:  Compass IR .bin path
-        :param forward_type: ['float', 'quantized', 'mixed']
-        '''
+    def __init__(self, ir_txt_or_pyg, ir_bin=None):
+        """
+        OptForward is a interface for float/quantized/mixed graph forward calling the optimizer ops's forward.
+        :param ir_txt_or_pyg: Compass IR .txt path or a PyGraph instance
+        :param ir_bin: Compass IR .bin path when ir_txt_or_pyg is Compass IR .txt, otherwise ir_bin is None
+        """
+
         traverse_opt_plugins()
-        self.ir_txt = ir_txt
-        self.ir_bin = ir_bin
-        self.forward_type = forward_type.lower()
 
-        if not self.check_path():
-            OPT_FATAL(f"please check the ir_txt and ir_bin, and OptFloatForward init failed.")
+        if isinstance(ir_txt_or_pyg, PyGraph):
+            self.graph = ir_txt_or_pyg
+        else:
 
-        self.graph = QuantizeGraph.parse(ir_txt, ir_bin)
+            self.ir_txt = ir_txt_or_pyg
+            self.ir_bin = ir_bin
+
+            if not self.check_path():
+                OPT_ERROR(f"please check the ir_txt and ir_bin, and OptFloatForward init failed.")
+
+            self.graph = QuantizeGraph.parse(self.ir_txt, self.ir_bin)
         self.optimizer = OptMaster(self.graph, None)
+        if self.optimizer.g is None:
+            OPT_ERROR("build optimizer graph failed.")
+
         for node in self.optimizer.g.nodes:
             node.attrs['layer_id'] = str(node.attrs.get('layer_id', -1))
-        if self.forward_type != 'float':
-            if self.optimizer.g.quantgraph is None:
-                self.optimizer.g.quantgraph = self.optimizer.g.clone()
-            self.optimizer.deduce_quantization_infos(self.optimizer.g.quantgraph)
+
+        if not hasattr(self.optimizer.g, 'compat_quantized_model'):  # gsim output IR or opt output IR or self-define IR
+            self.optimizer.deduce_quantization_infos(self.optimizer.g)
+        elif self.optimizer.g.compat_quantized_model:
+            OPT_ERROR(f"OptForward only uses Compass IR to inference output, not compat_quantized_model=true IR.")
+        else:  # compat_quantized_model=False parser output float IR
+            pass
 
     def check_path(self):
         ret = True
@@ -54,58 +64,59 @@ class OptForward(object):
             return False
         return data_list
 
-    def get_qgraph_input_output(self):
-        ''' this is use to get the quantized graph input and output tensors after quantized forward.'''
-        if self.optimizer.g.quantgraph is None:
-            OPT_ERROR(f"please run quantized forward firstly.")
-            return
-        qgraph = self.optimizer.g.quantgraph
-        input_tensors = [i.betensor.cpu().numpy().astype(dtype2nptype(i.dtype)) for i in qgraph.input_tensors]
-        output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in qgraph.output_tensors]
+    def get_input_output_tensors(self):
+        ''' this is use to get the graph input and output tensors after graph forward.'''
+        g = self.optimizer.g
+        input_tensors = [i.betensor.cpu().numpy().astype(dtype2nptype(i.dtype)) for i in g.input_tensors]
+        output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in g.output_tensors]
         return input_tensors, output_tensors
 
-    def _float_forward(self, data, keep_tensors=False):
+    def forward(self, data, transfer_to_float=False, keep_tensors=False):
+        """
+        :param data: input float data uses to forward
+        :param transfer_to_float: whether dequantize the output data, default=False
+        :param keep_tensors: whether reserve the intermediate data, default=False
+        :return: the forward result
+        """
+        output_data = []
         input_data = self.check_input_data(data)
         if input_data:
-            output = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
-            output_data = [o.betensor.cpu().numpy() for o in output]
-        else:
-            output_data = None
+            out = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
+            for o in out:
+                o_data = o.betensor.cpu().numpy()
+                if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
+                    o_data = linear_dequantize(o_data, o.scale, o.zerop)
+                else:
+                    # keep the ir_dtype
+                    o_data = o_data.astype(dtype2nptype(o.ir_dtype))
+                output_data.append(o_data)
 
         return output_data
 
-    def _quantized_forward(self, data, transfer_to_float, keep_tensors=False):
-        input_data = self.check_input_data(data)
-        if input_data:
-            out = self.optimizer.g.qforward(input_data, keep_tensors=keep_tensors)
-            if transfer_to_float:
-                output_data = [linear_dequantize(o.betensor, o.scale, o.zerop).cpu().numpy() for o in out]
-            else:
-                output_data = [o.betensor.cpu().numpy() for o in out]
-        else:
-            output_data = None
+    def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False):
+        """
+        default this function is used when input data which is used to forward is quantized.
+        :param quantized_data: the quantized data which is used to forward
+        :param transfer_to_float: whether dequantize the output data, default=False
+        :param batch_size: forward batch_size, default=1
+        :param keep_tensors: whether reserve the intermediate data, default=False
+        :return: the forward result
+        """
 
-        return output_data
-
-    def forward(self, data, transfer_to_float=True, keep_tensors=False):
-        if self.forward_type == 'float':
-            out = self._float_forward(data, keep_tensors=keep_tensors)
-        else:
-            out = self._quantized_forward(data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
-        return out
-
-    def forward_with_quantized_data(self, quantized_data, transfer_to_float=True, batch_size=1, keep_tensors=False):
-        '''default this function is used in quantized graph forward'''
-
-        if self.optimizer.g.quantgraph is None:
-            OPT_ERROR(f"please use forward_type=quantized mode when calling forward_with_quantized_data function.")
         input_data = self.check_input_data(quantized_data)
-        input_tensors = self.optimizer.g.quantgraph.input_tensors
-        self.optimizer.g.quantgraph.current_batch_size = batch_size
-        self.optimizer.g.quantgraph.current_batch_idx = 0
+        input_tensors = self.optimizer.g.input_tensors
+        self.optimizer.g.current_batch_size = batch_size
+        self.optimizer.g.current_batch_idx = 0
         dequantized_data = []
         for data, inp_t in zip(input_data, input_tensors):
-            d = (data.astype('int64') + inp_t.zerop) / inp_t.scale
+            in_zp = inp_t.zerop
+            in_scale = inp_t.scale
+            if isinstance(inp_t.zerop, torch.Tensor):
+                in_zp = in_zp.cpu().numpy()
+            if isinstance(inp_t.scale, torch.Tensor):
+                in_scale = in_scale.cpu().numpy()
+
+            d = ((data.astype('int64') + in_zp) / in_scale)
             dequantized_data.append(d)
-        out = self._quantized_forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
+        out = self.forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
         return out

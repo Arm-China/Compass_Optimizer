@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -39,8 +39,13 @@ def groupnorm_quantize(self, *args):
 
     N = math.prod(scope_norm)//group
     sqrt_n = math.sqrt(N)
-    normalized.min = -sqrt_n
-    normalized.max = sqrt_n
+    alpha = 1
+    adj = 0
+    if q_bits_activation <= 8 and sqrt_n > 127:
+        adj = math.ceil(math.log2(127.5/sqrt_n/4))
+        alpha = 2**adj
+    normalized.min = -sqrt_n*alpha
+    normalized.max = sqrt_n*alpha
     normalized.scale, normalized.zerop, normalized.qmin, normalized.qmax, normalized.dtype = get_linear_quant_params_from_tensor(
         normalized, q_mode_activation, normalized.qbits, is_signed=True)
     normalized.qinvariant = False
@@ -51,11 +56,11 @@ def groupnorm_quantize(self, *args):
 
         var_shift = (30+ceil_exp-31-(complement >> 1))
         var_shift = var_shift + ((var_shift & 1) == 1)
-        self.params['var_shift_value'] = var_shift
+        self.params['var_shift_value'] = int(var_shift)
         self.params['var_shift_type'] = bits2dtype(8, is_signed=False)
         self.params['norm_scale_value'] = 1  # not used with 8bit quant
         self.params['norm_scale_type'] = bits2dtype(8, is_signed=False)
-        self.params['norm_shift_value'] = int(var_shift >> 1)
+        self.params['norm_shift_value'] = int((var_shift >> 1)+adj)
         self.params['norm_shift_type'] = bits2dtype(8, is_signed=False)
     else:
         norm_do_scale, norm_do_scale_type, norm_do_shift, norm_do_shift_type = \
@@ -108,8 +113,8 @@ def groupnorm_quantize(self, *args):
             get_scale_approximation_params(norm_do_scale*do_scale*(0.5**do_shift),
                                            mult_bits=q_bits_activation,
                                            force_shift_positive=self.force_shift_positive)
-        self.params['norm_scale_value'] = do_scale
-        self.params['norm_shift_value'] = do_shift + self.params['norm_shift_value']
+        self.params['norm_scale_value'] = int(do_scale)
+        self.params['norm_shift_value'] = int(do_shift + self.params['norm_shift_value'])
 
     self.constants["lut"] = PyTensor(
         self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
@@ -161,6 +166,8 @@ def groupnorm(self, *args):
             else:
                 t_mean = torch.mean(t.double(), dim=axis, keepdim=True).round().long()
                 t_var = torch.mean((t.double() - t_mean)**2, dim=axis, keepdim=True).long()
+                # if torch.sum((t.double() - t_mean)**2, dim=axis, keepdim=True).long().max().item() > 2**42-1:
+                #     OPT_ERROR(f"overflow when computing variance, layer_id={self.attrs['layer_id']}, layer_type={self.type}, layer_name={self.name}")
                 ngamma_qmin, ngamma_qmax = bits2range(16, is_signed=False)
                 t_ngamma = calculate_inverse_sqrt(t_var)
                 t_ngamma = (t_ngamma+32768) >> 16
@@ -198,17 +205,17 @@ def groupnorm(self, *args):
     if 'weights' in self.constants:
         w = self.constants["weights"]
         # must be positive axis
-        w.key_axis_c = len(w.shape)-1
+        w.key_axis = len(w.shape)-1
         w_zerop = w.zerop
         if isinstance(w.zerop, torch.Tensor):
-            zerop_shape = [w.shape[ax] if ax == w.key_axis_c else 1 for ax in range(len(w.shape))]
+            zerop_shape = [w.shape[ax] if ax == w.key_axis else 1 for ax in range(len(w.shape))]
             w_zerop = torch.reshape(w.zerop, zerop_shape)
         gamma = w.betensor + w_zerop
         gamma = torch.reshape(gamma, axis_reshape)
     beta = 0.0
     if 'biases' in self.constants:
         b = self.constants["biases"]
-        b.key_axis_c = len(b.shape)-1
+        b.key_axis = len(b.shape)-1
         beta = b.betensor + b.zerop
         beta = torch.reshape(beta, axis_reshape)
     out.betensor = gamma * normalized + beta

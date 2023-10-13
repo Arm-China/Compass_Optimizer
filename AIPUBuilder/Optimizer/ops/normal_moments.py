@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -16,6 +16,7 @@ def normalizedMoments_quantize(self, *args):
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
+    multiplier_bits = self.attrs['multiplier_bits']
     count = int(self.get_param("counts"))
 
     mean_t = self.inputs[0]
@@ -49,8 +50,13 @@ def normalizedMoments_quantize(self, *args):
     mean_placeholder.scale = mean_t.scale * count
     if (mean_t.zerop != 0) or (shift_t.zerop != 0):
         mean_clip_max //= 2
-    mean_scale0, mean_scale1, mean_do_scale, mean_do_shift, mean_do_scale_type, mean_do_shift_type, _ = calc_eltwise_add_like_scale_shift(mean_placeholder, shift_t, out0, mean_clip_max,
-                                                                                                                                          self.type, self.attrs['layer_id'])
+    mean_scale0, mean_scale1, mean_do_scale, mean_do_shift, mean_do_scale_type, mean_do_shift_type, _ = calc_eltwise_add_like_scale_shift(mean_placeholder,
+                                                                                                                                          shift_t,
+                                                                                                                                          out0,
+                                                                                                                                          mean_clip_max,
+                                                                                                                                          multiplier_bits,
+                                                                                                                                          self.type,
+                                                                                                                                          self.attrs['layer_id'])
 
     # generate lut for mean*mean
     lsteps = 2 ** min(mean_t.qbits, int(self.get_attrs('lut_items_in_bits')))
@@ -66,8 +72,13 @@ def normalizedMoments_quantize(self, *args):
     var_placeholder.scale = var_t.scale * count
     if var_t.zerop != 0:
         var_clip_max // 2
-    var_scale0, var_scale1, var_do_scale, var_do_shift, var_do_scale_type, var_do_shift_type, _ = calc_eltwise_add_like_scale_shift(var_placeholder, plh, out1, var_clip_max,
-                                                                                                                                    self.type, self.attrs['layer_id'])
+    var_scale0, var_scale1, var_do_scale, var_do_shift, var_do_scale_type, var_do_shift_type, _ = calc_eltwise_add_like_scale_shift(var_placeholder,
+                                                                                                                                    plh,
+                                                                                                                                    out1,
+                                                                                                                                    var_clip_max,
+                                                                                                                                    multiplier_bits,
+                                                                                                                                    self.type,
+                                                                                                                                    self.attrs['layer_id'])
 
     self.params["mean_shift_value"] = int(mean_do_shift)
     self.params["mean_shift_type"] = mean_do_shift_type

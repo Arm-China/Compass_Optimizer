@@ -1,5 +1,5 @@
-# Copyright © 2023 Arm Technology (China) Co. Ltd. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -27,12 +27,17 @@ class TensorShape(tuple):
         return copy.deepcopy(self)
 
 
-_tensor_default_property = {  # quantization property
+_tensor_default_property = {
+    # quantization property
     "scale": 1., "zerop": 0, "qbits": None, "qmin": None,
     "qmax": None, "qinvariant": False,
-    "dtype": None, "key_axis_c": 0,
+    "dtype": None,
+    # per-channel
+    "key_axis": 0, "key_axis_g": None, "key_axis_bs": None,
     # source IR info
     "ir_shape": None, "ir_dtype": None,
+    # producer node
+    'pnode': None,
     # statistic property
     "extrema_min_key_axis": None,
     "extrema_max_key_axis": None,
@@ -130,6 +135,8 @@ class PyTensor:
             v = self.__getattribute__(k)
             if isinstance(v, torch.Tensor):
                 t.__setattr__(k, v.clone().detach())
+            elif k in ['pnode']:
+                t.__setattr__(k, None)
             else:
                 t.__setattr__(k, copy.deepcopy(v))
         return t
@@ -166,24 +173,24 @@ class PyTensor:
         other_dims = [i for i in range(fbetensor.dim())]
         channels = 0
 
-        if key_axis != None and fbetensor.dim() > 0:
+        if key_axis is not None and fbetensor.dim() > 0:
             other_dims.remove(other_dims[key_axis])
             channels = fbetensor.shape[key_axis]
         momentum = running_statistic_momentum
         if reset:
             momentum = 0.0
-            if key_axis != None:
-                self.extrema_min_key_axis = torch.tensor([float("inf") for i in range(channels)], device=tdevice)
-                self.extrema_max_key_axis = torch.tensor([float("-inf") for i in range(channels)], device=tdevice)
-                self.running_min_key_axis = torch.tensor([0.0 for i in range(channels)], device=tdevice)
-                self.running_max_key_axis = torch.tensor([0.0 for i in range(channels)], device=tdevice)
+            if key_axis is not None:
+                self.extrema_min_key_axis = torch.full([channels], float("inf"), device=tdevice)
+                self.extrema_max_key_axis = torch.full([channels], float("-inf"), device=tdevice)
+                self.running_min_key_axis = torch.zeros([channels], device=tdevice)
+                self.running_max_key_axis = torch.zeros([channels], device=tdevice)
+
                 if statistic_std_mean:
-                    self.running_mean_key_axis = torch.tensor([0.0 for i in range(channels)], device=tdevice)
-                    self.running_std_key_axis = torch.tensor([0.0 for i in range(channels)], device=tdevice)
-                    self.running_mad_key_axis = torch.tensor([0.0 for i in range(channels)], device=tdevice)
+                    self.running_mean_key_axis = torch.zeros([channels], device=tdevice)
+                    self.running_std_key_axis = torch.zeros([channels], device=tdevice)
+                    self.running_mad_key_axis = torch.zeros([channels], device=tdevice)
                 if histc_bins != None:
-                    self.running_histc_key_axis = torch.tensor(
-                        [[0.0 for j in range(histc_bins)] for i in range(channels)], device=tdevice)
+                    self.running_histc_key_axis = torch.zeros([channels, histc_bins], device=tdevice)
             self.extrema_min = float("inf")
             self.extrema_max = float("-inf")
             self.running_min = 0.0
@@ -192,21 +199,24 @@ class PyTensor:
                 self.running_mean = 0.0
                 self.running_std = 0.0
                 self.running_mad = 0.0
-            if histc_bins != None:
-                self.running_histc = torch.tensor([0.0 for i in range(histc_bins)], device=tdevice)
+            if histc_bins is not None:
+                self.running_histc = torch.zeros([histc_bins], device=tdevice)
             # if key_axis != None :
             #     self.clip_min_key_axis = None #torch.tensor([0.0 for i in range(channels)], device=tdevice)
             #     self.clip_max_key_axis = None #torch.tensor([0.0 for i in range(channels)], device=tdevice)
             # self.clip_min = None
             # self.clip_max = None
 
-        if key_axis != None:
-            running_min_key_axis = torch.tensor(
-                [max(fbetensor.select(key_axis, i).min(), OPT_INT_MIN) for i in range(channels)], device=tdevice)
+        if key_axis is not None:
+            perm = [key_axis] + [axis for axis in range(fbetensor.dim()) if axis != key_axis]
+            torch_int_min = torch.tensor(OPT_INT_MIN, device=tdevice)
+            torch_int_max = torch.tensor(OPT_INT_MAX, device=tdevice)
+            running_min_key_axis = torch.maximum(fbetensor.permute(perm).reshape([channels, -1]).min(dim=-1).values,
+                                                 torch_int_min)
             self.extrema_min_key_axis = torch.min(self.extrema_min_key_axis, running_min_key_axis)
             self.running_min_key_axis = momentum * self.running_min_key_axis + (1.0-momentum) * running_min_key_axis
-            running_max_key_axis = torch.tensor(
-                [min(fbetensor.select(key_axis, i).max(), OPT_INT_MAX) for i in range(channels)], device=tdevice)
+            running_max_key_axis = torch.minimum(fbetensor.permute(perm).reshape([channels, -1]).max(dim=-1).values,
+                                                 torch_int_max)
             self.extrema_max_key_axis = torch.max(self.extrema_max_key_axis, running_max_key_axis)
             self.running_max_key_axis = momentum * self.running_max_key_axis + (1.0-momentum) * running_max_key_axis
             if statistic_std_mean:
@@ -270,6 +280,23 @@ class PyTensor:
             self.running_histc = momentum * self.running_histc + \
                 (1.0-momentum) * fbetensor.histc(bins=histc_bins,
                                                  min=kmin, max=kmax)  # running_histc_key_axis.sum(dim=0)
+
+    def __repr__(self):
+        import torch
+
+        def _format(sz):
+            _ret = None
+            if isinstance(sz, (float, int)):
+                _ret = sz
+            elif isinstance(sz, torch.Tensor) and sz.numel() > 1:
+                _ret = f"{sz[0]},...., {sz[-1]}"
+            elif isinstance(sz, torch.Tensor):
+                _ret = sz.item()
+            return _ret
+        scale = _format(self.scale)
+        zerop = _format(self.zerop)
+        return (f"tensor.name={self.name}, tensor.ir_shape={self.ir_shape}, "
+                f"tensor.scale={scale}, tensor.zerop={zerop}")
 
 
 PyTensor.shape = property(lambda self: self.betensor.shape, None)
