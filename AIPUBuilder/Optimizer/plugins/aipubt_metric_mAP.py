@@ -213,7 +213,6 @@ class BasemAPMetric(OptBaseMetric):
                 ap.append(np.nan)
             elif gt_per_class is not None:
                 ap.append(0)
-
         self.mAP = BasemAPMetric.cal_mAP(ap)
 
 
@@ -239,7 +238,7 @@ class mAPMetric(BasemAPMetric):
         for b in range(batch):
             targets = {}
             for k, v in target.items():
-                targets.update({k: v[b].numpy()})
+                targets.update({k: v[b].cpu().numpy()})
             targets_list.append(targets)
 
         for i in range(batch):
@@ -257,7 +256,7 @@ class mAPMetric(BasemAPMetric):
             all_box_idx = 0
             for cid in range(int(obj_class_num[0])):
                 box_num_cur_class = int(box_num_pre_class[cid])
-                label_id = label_pre_class[cid]
+                label_id = int(label_pre_class[cid])
 
                 if label_id < self.start_label:
                     all_box_idx += box_num_cur_class

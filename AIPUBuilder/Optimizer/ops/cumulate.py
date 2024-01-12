@@ -19,8 +19,8 @@ def convert_less_mbit(value, threshold_min, threshold_max):
     while (data.max() > threshold_max) or (data.min() < threshold_min):
         max_mask = data > threshold_max
         min_mask = data < threshold_min
-        data[max_mask] = data[max_mask] >> 1
-        data[min_mask] = data[min_mask] >> 1
+        data[max_mask] = (data[max_mask].long() >> 1).to(data.dtype)
+        data[min_mask] = (data[min_mask].long() >> 1).to(data.dtype)
         left_shift[max_mask] += 1
         left_shift[min_mask] += 1
     if data.dim() < 1:

@@ -75,11 +75,11 @@ def countop_quantize(self, *args):
     out = self.outputs[0]
     min_value = self.get_param('min')
     max_value = self.get_param('max')
-    self.params['min'] = round(min_value*inp.scale)
-    self.params['max'] = round(max_value*inp.scale)
+    self.params['min'] = (min_value * inp.scale).round().tolist()[0]
+    self.params['max'] = (max_value * inp.scale).round().tolist()[0]
     out.qbits = max(16, inp.qbits)
     out.dtype = bits2dtype(out.qbits, False or self.force_dtype_int)
-    out.scale = 1
+    out.scale = torch.ones_like(inp.scale)
     out.zerop = inp.zerop
     out.qmin, out.qmax = dtype2range(out.dtype)
     out.qinvariant = True

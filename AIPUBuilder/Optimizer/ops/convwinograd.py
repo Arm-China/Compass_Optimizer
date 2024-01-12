@@ -7,7 +7,6 @@ import torch
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_activation_out_is_signed, apply_with_activation_quantize
 from AIPUBuilder.Optimizer.logger import *
 
 
@@ -267,7 +266,7 @@ def WinogradAllocator(self, inp, weights, bias, DEBUG=False):
     if DEBUG:
         padding = (self.get_param('pad_left'), self.get_param('pad_right'),
                    self.get_param('pad_top'), self.get_param('pad_bottom'))
-        inp_pad = nn.functional.pad(inp, padding, value=self.inputs[0].zerop)
+        inp_pad = nn.functional.pad(inp, padding, value=self.inputs[0].zerop[0])
         if "OriginWeights" in self.attrs.keys():
             ori_w = self.attrs["OriginWeights"]
             ori_w = nhwc2nchw(ori_w)
@@ -417,7 +416,7 @@ def winograd_conv_1D_HP(self, inp, weights, bias, m=2, r=3, DEBUG=True):
 
     tmp = inp.clone()  # NCHW
     WinogradPaddingFunc = nn.ConstantPad2d((WinogradPadLeft, WinogradPadRight, WinogradPadTop,
-                                            winogradPadBottom), value=self.inputs[0].zerop)  # need NCHW, 2d: ( left,right,up, down,)
+                                            winogradPadBottom), value=self.inputs[0].zerop[0])  # need NCHW, 2d: ( left,right,up, down,)
     PaddingInp = WinogradPaddingFunc(tmp)
 
     if 'WinogradWeights' not in self.attrs.keys() and not self.get_param('with_winograd', optional=True, default_value=False):

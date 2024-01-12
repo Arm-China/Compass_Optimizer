@@ -143,12 +143,12 @@ def regionfuse_quantize(self, *args):
     box_scales = [inp2.scale, inp3.scale]
     min_box_scale = min(*box_scales)
     norm_box_scales = [min_box_scale / s * 4096 for s in box_scales]
-    reduce_sft = (inp2.qbits-is_signed(inp2.dtype)-torch.floor(torch.log2(torch.tensor(min_box_scale))).int().item())
-    norm_box_shifts = [12-reduce_sft, 12-reduce_sft]
+    reduce_sft = (inp2.qbits - is_signed(inp2.dtype) - torch.floor(torch.log2(min_box_scale)).int().item())
+    norm_box_shifts = [12 - reduce_sft, 12 - reduce_sft]
 
     self.params['score_scale_value'] = norm_score_scales
     self.params['score_shift_value'] = norm_score_shifts
-    self.params['box_scale_value'] = norm_box_scales
+    self.params['box_scale_value'] = [nbs.int().item() for nbs in norm_box_scales]
     self.params['box_shift_value'] = norm_box_shifts
     self.params['score_scale_type'] = [bits2dtype(inp0.qbits, is_signed=False)] * 2
     self.params['score_shift_type'] = [SHIFT_DTYPE] * 2

@@ -23,7 +23,9 @@ OPT的主要功能特性如下：
   - EasyQuant: 参见[EasyQuant: Post-training Quantization via Scale Optimization](https://arxiv.org/abs/2006.16669)
 
   - Adaround: 参见[Up or Down? Adaptive Rounding for Post-Training Quantization](https://arxiv.org/abs/2004.10568)
-- 支持常见算子的拆分拼贴（tiling）
+
+  - Adaquant: 参见[Improving Post Training Neural Quantization: Layer-wise Calibration and Integer Programming](https://arxiv.org/abs/2006.10518)
+
 - 适配周易全系列硬件平台，针对性改进各算子量化实现及优化调整计算图结构
 
 

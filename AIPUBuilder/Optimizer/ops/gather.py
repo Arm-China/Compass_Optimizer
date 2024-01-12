@@ -2,7 +2,6 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.utils import *
 
 
@@ -91,7 +90,8 @@ def gather(self, *args):
 
     indice_betensor = indice_betensor.reshape(newshape)
     padding = [0] * (inp0_betensors.dim() - axis) * 2
-    padding_value = -self.inputs[0].zerop
+    # TODO: support per-channel zerop and pad the per-channel zerop
+    padding_value = -self.inputs[0].zerop[0]
     for i in range(virtual_batch):
         # axis include dim, so need axis-1
         if torch.max(indice_betensor) <= inp0_betensors.shape[axis]:

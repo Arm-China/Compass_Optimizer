@@ -150,7 +150,7 @@ def op_register(optypes, version=1., *args):
                 if not isinstance(ret, torch.Tensor) and len(ret) == 1:
                     return ret[0]
             except Exception as e:
-                OPT_ERROR(f"{self}")
+                OPT_ERROR(f"{self}: error message: {e.__repr__()}")
                 raise e
             return ret
         is_plugin = is_plugin_op(get_file_name())
@@ -178,7 +178,7 @@ def quant_register(optypes, version=1.0, *args):
                 # self.readonly_keys_free()
                 self.quantized = True
             except Exception as e:
-                OPT_ERROR(f"{self}")
+                OPT_ERROR(f"{self}: error message: {e.__repr__()}")
                 raise e
             return ret
         is_plugin = is_plugin_op(get_file_name())

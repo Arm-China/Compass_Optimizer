@@ -2,6 +2,7 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
+from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import OPT_DEBUG, OPT_INFO, OPT_ERROR
 
@@ -81,9 +82,9 @@ def apply_box_deltas_q(self, boxes, deltas, boxes_dtype=None, deltas_dtype=None)
     clip_min, clip_max = bits2range(boxes_qbits, False)
 
     lut_dh_scale = (lookup_lut_powerof2(dh, th_lut, lut_in_bits, in_is_signed,
-                    lut_out_bits, out_is_signed) * scale_th_out).int() >> 16
+                                        lut_out_bits, out_is_signed) * scale_th_out).int() >> 16
     lut_dw_scale = (lookup_lut_powerof2(dw, tw_lut, lut_in_bits, in_is_signed,
-                    lut_out_bits, out_is_signed) * scale_tw_out).int() >> 16
+                                        lut_out_bits, out_is_signed) * scale_tw_out).int() >> 16
     h_half_q = torch.clip((h * lut_dh_scale).int() >> (shift_th_out - 16), clip_min, clip_max)
     w_half_q = torch.clip((w * lut_dw_scale).int() >> (shift_tw_out - 16), clip_min, clip_max)
 
@@ -252,8 +253,8 @@ def calculate_box_quantization(self, rois, delta, STD_DIV):
         th_tensor.max = self.params['max_exp_thtw']
         tw_tensor.max = self.params['max_exp_thtw']
     else:
-        th_tensor.max = torch.tensor(delta_qmax_add_zp/batch_inp_deltas_scales/STD_DIV[2]).exp()
-        tw_tensor.max = torch.tensor(delta_qmax_add_zp/batch_inp_deltas_scales/STD_DIV[3]).exp()
+        th_tensor.max = torch_tensor(delta_qmax_add_zp / batch_inp_deltas_scales / STD_DIV[2]).exp()
+        tw_tensor.max = torch_tensor(delta_qmax_add_zp / batch_inp_deltas_scales / STD_DIV[3]).exp()
     th_tensor.scale, th_tensor.zerop, th_tensor.qmin, th_tensor.qmax, th_tensor.dtype = \
         get_linear_quant_params_from_tensor(th_tensor, QuantMode.to_symmetric(q_mode_activation), 16, True)
     tw_tensor.scale, tw_tensor.zerop, tw_tensor.qmin, tw_tensor.qmax, tw_tensor.dtype = \
@@ -299,7 +300,7 @@ def multibox_transform_loc_quantize(self, *args):
     inp = self.inputs[:]
     out = self.outputs[:]
 
-    std = [1/x for x in self.params['variance']]
+    std = [1. / x for x in self.params['variance']]
     STD_DIV = [std[1], std[0], std[3], std[2]]  # [y,x,h,w]
 
     calculate_box_quantization(self, inp[2], inp[1], STD_DIV)
@@ -321,7 +322,7 @@ def multibox_transform_loc_quantize(self, *args):
         self.params.pop('std_div')
 
     # set dtpye and qbits
-    out[0].scale, out[0].zerop, out[0].dtype, out[0].qbits = 32767, 0, Dtype.INT16, 16
+    out[0].scale, out[0].zerop, out[0].dtype, out[0].qbits = 32767.0, 0, Dtype.INT16, 16
     out[0].qinvariant = inp[0].qinvariant
-    out[1].scale, out[1].zerop, out[1].dtype, out[1].qbits = 1, 0, Dtype.UINT16, 16
+    out[1].scale, out[1].zerop, out[1].dtype, out[1].qbits = 1.0, 0, Dtype.UINT16, 16
     out[1].qinvariant = True

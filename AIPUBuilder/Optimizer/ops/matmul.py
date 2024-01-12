@@ -14,6 +14,8 @@ def matmul_forward(self, *args):
     out = self.outputs[0]
     x = inp0.betensor.float()
     y = inp1.betensor.float()
+    aasrb = self.get_param('remain_shift',
+                           optional=True, default_value=None)
     if self.get_param('trans_a'):
         if x.dim() == 0:
             x = x.unsqueeze(0).unsqueeze(0)
@@ -33,7 +35,15 @@ def matmul_forward(self, *args):
     if self.quantized:
         do_scale = self.params["scale_value"]
         do_shift = self.params['shift_value']
+        if aasrb is not None:
+            z, do_shift = aiff_ahead_shift_bias(z, do_shift, None, int(aasrb))
         z = linear_requantize(z, do_scale, do_shift, out.zerop, out.qmin, out.qmax)
+    else:
+        if len(self.placeholders) < 1:
+            ph0 = PyTensor(self.name+"/matmul_result", z.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            self.placeholders.append(ph0)
+        self.placeholders[0].betensor = z
+        z *= self.get_param('fused_multiplier', optional=True, default_value=1)
     out.betensor = z
     return out.betensor
 
@@ -57,11 +67,22 @@ def matmul_quantize(self, *args):
         out.qbits = q_bits_activation
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
             out, q_mode_activation, out.qbits, is_signed=out_signed)
+    out_scale = out.scale
+    if 'fused_multiplier' in self.params:
+        fused_multiplier = self.params['fused_multiplier']
+        self.params.pop('fused_multiplier')
+        plh = self.placeholders[0]
+        plh.qbits = q_bits_activation
+        plh.scale, plh.zerop, plh.qmin, plh.qmax, plh.dtype = get_linear_quant_params_from_tensor(
+            plh, q_mode_activation, plh.qbits, is_signed=out_signed)
+        out_scale = (1.0 if out.qinvariant else plh.scale) * fused_multiplier
     do_scale, do_scale_type, do_shift, do_shift_type = \
-        get_scale_approximation_params(out.scale / (inp0.scale * inp1.scale),
+        get_scale_approximation_params(out_scale / (inp0.scale * inp1.scale),
                                        q_bits_activation,
                                        force_shift_positive=self.force_shift_positive)
     self.params["shift_value"] = int(do_shift)
     self.params["shift_type"] = do_shift_type
     self.params["scale_value"] = int(do_scale)
     self.params["scale_type"] = do_scale_type
+    if 'remain_shift' in self.attrs:
+        self.params['remain_shift'] = self.attrs['remain_shift']

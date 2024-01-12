@@ -29,7 +29,7 @@ def local_float_roi_align(fm, rois, params):
         if batch_idx < 0:
             OPT_WARN(f"RoiAlign layer: the batch_index of box_id={r} is {batch_idx} < 0.")
             continue
-        if batch_idx > fm.shape[0]-1:
+        if batch_idx > fm.shape[0] - 1:
             OPT_ERROR(f"RoiAlign layer: batch_index={batch_idx} should be < the featuremap batch_size={fm.shape[0]}")
             continue
 
@@ -77,9 +77,9 @@ def local_float_roi_align(fm, rois, params):
                             offset = [0, 0, 0, 0]
                         else:
                             y = torch.minimum(torch.maximum(y, torch.tensor(0., device=dev)),
-                                              torch.tensor(in_height-1, dtype=torch.float32, device=dev))
+                                              torch.tensor(in_height - 1, dtype=torch.float32, device=dev))
                             x = torch.minimum(torch.maximum(x, torch.tensor(0., device=dev)),
-                                              torch.tensor(in_width-1, dtype=torch.float32, device=dev))
+                                              torch.tensor(in_width - 1, dtype=torch.float32, device=dev))
                             x_low = torch.floor(x)
                             y_low = torch.floor(y)
                             x_high = torch.minimum((x_low + 1), torch.tensor(in_width - 1, device=dev))
@@ -118,8 +118,171 @@ def local_float_roi_align(fm, rois, params):
     return out.to(dev)
 
 
-def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spatial, spatial_shift, scale_shift_pairs, o_qmin, o_qmax):
+def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_shape, sample, spatial, spatial_shift,
+                                     scale_shift_pairs, o_qmin, o_qmax):
+    out_h, out_w = pooled_shape
+    h_sample, w_sample = sample
+    spatial_y, spatial_x = spatial
+    roi_num = rois.shape[0]
+    _, fm_height, fm_width, fm_channel = fm.shape[:]
+    out_data = []
+    do_scale, do_shift = scale_shift_pairs['total_scale_shift']
+    input1_scale, input1_shift = scale_shift_pairs['roi_scale_shift']
+    total_shift = do_shift + spatial_shift
+    half_pixel_offset = 2 ** (spatial_shift - 1) if is_half_pixel else 0  # 0.5 * 2 ** spatial_shift
+    dev = fm.device
 
+    out = torch.zeros(roi_num, out_h, out_w, fm_channel)
+    for box_idx in range(roi_num):
+        batch_idx = rois[box_idx, 0]
+        if batch_idx < 0:
+            OPT_WARN(f"RoiAlign layer: the batch_index of box_id={box_idx} is {batch_idx} < 0.")
+            continue
+
+        if batch_idx > fm.shape[0] - 1:
+            OPT_ERROR(f"RoiAlign layer: batch_index={batch_idx} should be < the featuremap batch_size={fm.shape[0]}")
+            continue
+
+        y_start = (rois[box_idx, 1] * spatial_y * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
+        x_start = (rois[box_idx, 2] * spatial_x * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
+        y_end = (rois[box_idx, 3] * spatial_y * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
+        x_end = (rois[box_idx, 4] * spatial_x * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
+        data = fm[batch_idx.long()].reshape(-1)
+        # 2. Region out of bound:   || x1|x2 > inWidth || y1|y2 > inHeight
+        if (x_end < x_start) | (y_end < y_start):
+            out_data.append(torch.zeros(1, out_w * out_h * fm_channel))
+            continue
+        if is_half_pixel:
+            roi_width = x_end - x_start
+            roi_height = y_end - y_start
+        else:
+            roi_width = torch.maximum(x_end - x_start, torch.tensor(2 ** spatial_shift, device=dev))
+            roi_height = torch.maximum(y_end - y_start, torch.tensor(2 ** spatial_shift, device=dev))
+        w_step_size = torch.div(roi_width, out_w * (2 ** spatial_shift), rounding_mode='trunc').int()
+        h_step_size = torch.div(roi_height, out_h * (2 ** spatial_shift), rounding_mode='trunc').int()
+        w_step_size_mod = roi_width - w_step_size * (out_w * 2 ** spatial_shift)
+        h_step_size_mod = roi_height - h_step_size * (out_h * 2 ** spatial_shift)
+        if w_sample > 0:
+            w_sample_ratio = w_sample
+        else:
+            if w_step_size_mod > 0:
+                w_sample_ratio = w_step_size + 1
+            else:
+                w_sample_ratio = w_step_size
+        if h_sample > 0:
+            h_sample_ratio = h_sample
+        else:
+            if h_step_size_mod > 0:
+                h_sample_ratio = h_step_size + 1
+            else:
+                h_sample_ratio = h_step_size
+        num_sample_points = w_sample_ratio * h_sample_ratio
+        w_bin_size = torch.div(w_step_size * out_w * (2 ** spatial_shift) + w_step_size_mod,
+                               w_sample_ratio * out_w * (2 ** spatial_shift), rounding_mode='trunc').int()
+        h_bin_size = torch.div(h_step_size * out_h * (2 ** spatial_shift) + h_step_size_mod,
+                               h_sample_ratio * out_h * (2 ** spatial_shift), rounding_mode='trunc').int()
+        w_bin_size_mod = w_step_size * out_w * (2 ** spatial_shift) + \
+            w_step_size_mod - w_bin_size * w_sample_ratio * out_w * (2 ** spatial_shift)
+        h_bin_size_mod = h_step_size * out_h * (2 ** spatial_shift) + \
+            h_step_size_mod - h_bin_size * h_sample_ratio * out_h * (2 ** spatial_shift)
+        for i in range(out_h):
+            for j in range(out_w):
+                w_start = w_step_size * j
+                w_start_mod = w_step_size_mod * j + x_start * out_w
+                h_start = h_step_size * i
+                h_start_mod = h_step_size_mod * i + y_start * out_h
+                if method == 'avg':
+                    outdata_batch = [0] * fm_channel
+                else:
+                    outdata_batch = [-2 ** 31] * fm_channel
+                xscale1 = out_w * w_sample_ratio * (2 ** (spatial_shift + 1))
+                xscale2 = 2 * w_sample_ratio
+                xscale3 = out_w * w_sample_ratio * (2 ** spatial_shift)
+                yscale1 = out_h * h_sample_ratio * (2 ** (spatial_shift + 1))
+                yscale2 = 2 * h_sample_ratio
+                yscale3 = out_h * h_sample_ratio * (2 ** spatial_shift)
+                for yInd in range(h_sample_ratio):
+                    for xInd in range(w_sample_ratio):
+                        x = w_start + w_bin_size * xInd
+                        x_tmp1 = xscale2 * w_start_mod + xscale3 * w_bin_size + w_bin_size_mod + 2 * w_bin_size_mod * xInd
+                        x_tmp2 = torch.div(x_tmp1, xscale1, rounding_mode='trunc')
+                        x1 = int(x + x_tmp2)
+                        x2 = x1 + 1
+                        dx1 = x_tmp1 - x_tmp2 * xscale1  # xscale1
+                        y = h_start + h_bin_size * yInd
+                        y_tmp1 = yscale2 * h_start_mod + yscale3 * h_bin_size + h_bin_size_mod + 2 * h_bin_size_mod * yInd
+                        y_tmp2 = torch.div(y_tmp1, yscale1, rounding_mode='trunc')
+                        y1 = int(y + y_tmp2)
+                        y2 = y1 + 1
+                        dy1 = y_tmp1 - y_tmp2 * yscale1  # yscale1
+
+                        if x1 >= fm_width - 1:
+                            x1 = x2 = fm_width - 1
+                            dx1 = 0
+                        dx2 = xscale1 - dx1
+
+                        if y1 >= fm_height - 1:
+                            y1 = y2 = fm_height - 1
+                            dy1 = 0
+                        dy2 = yscale1 - dy1
+
+                        if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
+                            ws = [0, 0, 0, 0]
+                            offsets = [0, 0, 0, 0]
+                        else:
+                            if x1 <= 0:
+                                x1, x2 = 0, 1
+                            if y1 <= 0:
+                                y1, y2 = 0, 1
+
+                            # y1 = min(max(y1, 0), fm_height - 1)
+                            # x1 = min(max(x1, 0), fm_width - 1)
+                            # if x1 >= fm_width - 1:
+                            #     x1 = x2 = fm_width - 1
+                            #     dx1 = 0
+                            # dx2 = xscale1 - dx1
+                            # if y1 >= fm_height - 1:
+                            #     y1 = y2 = fm_height - 1
+                            #     dy1 = 0
+                            # dy2 = yscale1 - dy1
+                            dx1 = torch.div(dx1, 2, rounding_mode='trunc')
+                            dx2 = torch.div(dx2, 2, rounding_mode='trunc')
+                            dy1 = torch.div(dy1, 2, rounding_mode='trunc')
+                            dy2 = torch.div(dy2, 2, rounding_mode='trunc')
+                            ws = (dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1)
+                            ws = [(wss * (0.5 ** spatial_shift)).round() for wss in ws]
+                            offsets = (y1 * fm_width * fm_channel + x1 * fm_channel,
+                                       y1 * fm_width * fm_channel + x2 * fm_channel,
+                                       y2 * fm_width * fm_channel + x1 * fm_channel,
+                                       y2 * fm_width * fm_channel + x2 * fm_channel)
+                        for kk in range(fm_channel):
+                            if method == 'avg':
+                                interpolation = 0
+                                for num in range(0, 4):
+                                    interpolation += ws[num] * data[offsets[num] + kk]
+                                outdata_batch[kk] += interpolation
+                            else:  # max
+                                max_4points = max([ws[0] * data[offsets[0] + kk],
+                                                   ws[1] * data[offsets[1] + kk],
+                                                   ws[2] * data[offsets[2] + kk],
+                                                   ws[3] * data[offsets[3] + kk],
+                                                   ])
+                                max_4points = (max_4points * do_scale * (0.5 ** total_shift) / (
+                                    num_sample_points * out_h * out_w)).round()
+                                outdata_batch[kk] = max([outdata_batch[kk], max_4points])
+                if method == 'avg':
+                    for kk in range(fm_channel):
+                        outdata_batch[kk] = (outdata_batch[kk] * do_scale * (0.5 ** total_shift) / (
+                            num_sample_points * num_sample_points * out_h * out_w)).round()
+                else:  # method == 'max'
+                    pass
+                # out_data.append(torch.clamp(torch.round(torch.tensor(outdata_batch)), o_qmin, o_qmax))
+                out[box_idx, i, j, :] = torch.round(torch.tensor(outdata_batch))
+    return out.to(fm.device)
+
+
+def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spatial, spatial_shift, scale_shift_pairs,
+                    o_qmin, o_qmax):
     do_scale, do_shift = scale_shift_pairs['total_scale_shift']
     out_h_scale, out_h_shift = scale_shift_pairs['out_h_scale_shift']
     out_w_scale, out_w_shift = scale_shift_pairs['out_w_scale_shift']
@@ -141,7 +304,7 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
         if batch_idx < 0:
             OPT_WARN(f"RoiAlign layer: the batch_index of box_id={box_idx} is {batch_idx} < 0.")
             continue
-        if batch_idx > fm.shape[0]-1:
+        if batch_idx > fm.shape[0] - 1:
             OPT_ERROR(f"RoiAlign layer: batch_index={batch_idx} should be < the featuremap batch_size={fm.shape[0]}")
             continue
         # opt impl
@@ -270,8 +433,7 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
 
 @op_register(OpType.RoiAlign)
 def roialign(self, *args):
-
-    sample_h,  sample_w = self.get_param('sample')
+    sample_h, sample_w = self.get_param('sample')
     pool_height, pool_width = self.get_param('pooled_shape')
     method = self.get_param('method').lower()
     spatial_y, spatial_x = self.get_param('spatial_scale_value')
@@ -295,34 +457,37 @@ def roialign(self, *args):
         spatial_shift = self.get_param('spatial_shift_value')
         do_scale, inp_do_scale = self.get_param("scale_value")
         do_shift, inp_do_shift = self.get_param("shift_value")
-        out_h_do_scale, out_w_do_scale = self.get_param('bin_scale_value')
-        out_h_do_shift, out_w_do_shift = self.get_param('bin_shift_value')
-        sample_h_scale, sample_w_scale = self.get_param('grid_scale_value')
-        sample_h_shift, sample_w_shift = self.get_param('grid_shift_value')
-
-        scale_shift_pairs = {}
-        scale_shift_pairs['total_scale_shift'] = (do_scale, do_shift)
-        scale_shift_pairs['out_h_scale_shift'] = (out_h_do_scale, out_h_do_shift)
-        scale_shift_pairs['out_w_scale_shift'] = (out_w_do_scale, out_w_do_shift)
-        scale_shift_pairs['roi_scale_shift'] = (inp_do_scale, inp_do_shift)
-
-        scale_shift_pairs['sample_h_scale_shift'] = (sample_h_scale, sample_h_shift)
-        scale_shift_pairs['sample_w_scale_shift'] = (sample_w_scale, sample_w_shift)
-
+        scale_shift_pairs = {'total_scale_shift': (do_scale, do_shift), 'roi_scale_shift': (inp_do_scale, inp_do_shift)}
         inp_d_zp = inp_d + self.inputs[0].zerop
         rois_zp = rois + self.inputs[1].zerop
-        out = quant_roi_align(inp_d_zp,
-                              rois_zp,
-                              method,
-                              is_half_pixel,
-                              [pool_height, pool_width],
-                              [sample_h, sample_w],
-                              [spatial_y, spatial_x],
-                              spatial_shift,
-                              scale_shift_pairs,
-                              o_qmin,
-                              o_qmax
-                              )
+        if sample_h <= 0 or sample_w <= 0:
+            out = quant_roi_align_with_zero_sample(inp_d_zp, rois_zp, method, is_half_pixel,
+                                                   [pool_height, pool_width],
+                                                   [sample_h, sample_w],
+                                                   [spatial_y, spatial_x],
+                                                   spatial_shift,
+                                                   scale_shift_pairs, o_qmin, o_qmax)
+        else:
+            out_h_do_scale, out_w_do_scale = self.get_param('bin_scale_value')
+            out_h_do_shift, out_w_do_shift = self.get_param('bin_shift_value')
+            sample_h_scale, sample_w_scale = self.get_param('grid_scale_value')
+            sample_h_shift, sample_w_shift = self.get_param('grid_shift_value')
+            scale_shift_pairs['out_h_scale_shift'] = (out_h_do_scale, out_h_do_shift)
+            scale_shift_pairs['out_w_scale_shift'] = (out_w_do_scale, out_w_do_shift)
+            scale_shift_pairs['sample_h_scale_shift'] = (sample_h_scale, sample_h_shift)
+            scale_shift_pairs['sample_w_scale_shift'] = (sample_w_scale, sample_w_shift)
+            out = quant_roi_align(inp_d_zp,
+                                  rois_zp,
+                                  method,
+                                  is_half_pixel,
+                                  [pool_height, pool_width],
+                                  [sample_h, sample_w],
+                                  [spatial_y, spatial_x],
+                                  spatial_shift,
+                                  scale_shift_pairs,
+                                  o_qmin,
+                                  o_qmax
+                                  )
         out = linear_quantize_clip(out, 1.0, self.outputs[0].zerop, o_qmin, o_qmax)
     else:
         if method == 'avg':
@@ -390,7 +555,7 @@ def roialign_quantize(self, *args):
                                        force_shift_positive=self.force_shift_positive)
 
     def handle_sample(sample, out_size, fm_size):
-        s_do_scale, s_do_shift = 1., 0
+        s_do_scale, s_do_shift, s_do_scale_type, s_do_shift_type = 1., 0, Dtype.UINT8, Dtype.INT8
         if sample > 0:
             s_do_scale, s_do_scale_type, s_do_shift, s_do_shift_type = \
                 get_scale_approximation_params(1. / (2 * sample), mult_bits=quant_bits,

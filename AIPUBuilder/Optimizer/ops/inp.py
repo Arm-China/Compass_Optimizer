@@ -10,9 +10,9 @@ from AIPUBuilder.Optimizer.utils import *
 def input_node(self, *args):
     if self.quantized:
         for o in self.outputs:
-            if not (o.scale == 1 and o.zerop == 0):
+            if not o.is_qinvariant():
                 o.betensor = linear_quantize_clip(
-                    o.betensor, o.scale, o.zerop, o.qmin, o.qmax)
+                    o.betensor, o.scale, o.zerop, o.qmin, o.qmax, o.key_axis)
     # Batch dimension does not exist in some speech models
     # The Batch dimension was expanded in dataset before and deleted here
     batch_size_in_IR = self.get_attrs("batch_size_in_IR", optional=True, default_value=1)
@@ -27,8 +27,6 @@ def input_node(self, *args):
 def inp_quantize(self, *args):
     out = self.outputs[0]
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Input currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
     out_signed = True
     if out.extrema_min >= 0.0 and not self.force_dtype_int:

@@ -263,8 +263,8 @@ def absorb_input_h_zp_to_bias(node, *args):
     cell_size = node.get_param('cell_size')
     x_w = w[:input_size, :]
     h_w = w[input_size:, :]
-    inp_zerop_mat = torch.full((1, input_size), inp_zerop).to(node.inputs[0].betensor.device)
-    h_zerop_mat = torch.full((1, cell_size), h_zerop).to(node.inputs[0].betensor.device)
+    inp_zerop_mat = torch.full((1, input_size), inp_zerop[0]).to(node.inputs[0].device).to(x_w.dtype)
+    h_zerop_mat = torch.full((1, cell_size), h_zerop[0]).to(node.inputs[0].device).to(h_w.dtype)
     x_weights_sum = torch.squeeze(torch.matmul(inp_zerop_mat, x_w))
     h_weights_sum = torch.squeeze(torch.matmul(h_zerop_mat, h_w))
     bias += (x_weights_sum + h_weights_sum)
@@ -346,6 +346,8 @@ def generate_activation_lut(node, activation, new_input, new_output, *args):
     q_mode_activation_bak = node.attrs["q_mode_activation"]
     force_dtype_int = node.force_dtype_int
     node.attrs["q_mode_activation"] = "per_tensor_symmetric_restricted_range"
+    # currently only support lut[256] for basiclstm/gru
+    node.attrs['lut_items_in_bits'] = 8
 
     # call activication op from AIPUBuilder/Optimizer/ops/...
     node.force_dtype_int = True
@@ -390,10 +392,10 @@ def generate_lut_with_placeholders(node, activation_idx, activation, q_mode_acti
         length = 1
         for s in ph_in.ir_shape:
             length *= s
-        lut_in = torch.linspace(ph_in.min, ph_in.max, steps=length)
+        lut_in = torch.linspace(ph_in.min.item(), ph_in.max.item(), steps=length)
         lut_out = g_rnn_activation_func[activation][1](lut_in)
-        ph_out.min = lut_out.min().item()
-        ph_out.max = lut_out.max().item()
+        ph_out.min = lut_out.min()
+        ph_out.max = lut_out.max()
 
     if with_lut:
         lut = generate_activation_lut(node, activation, ph_in, ph_out, *args)

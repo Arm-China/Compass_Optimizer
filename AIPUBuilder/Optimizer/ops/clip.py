@@ -48,8 +48,9 @@ def clip_quantize(self, *args):
     if clip_min > clip_max:
         OPT_ERROR('The "clip_min" must not greater than "clip_max" in layer_type=%s, layer_id=%s, layer_name=%s' % (
             str(self.type), str(self.attrs['layer_id']), str(self.name)))
-    out.min = min(max(out.min, clip_min), clip_max)
-    out.max = max(min(out.max, clip_max), clip_min)
+    dev = inp.device
+    out.min = min(max(out.min, torch_tensor(clip_min, device=dev)), torch_tensor(clip_max, device=dev))
+    out.max = max(min(out.max, torch_tensor(clip_max, device=dev)), torch_tensor(clip_min, device=dev))
     if None != out.min_key_axis:
         out.min_key_axis = torch.min(torch.max(out.min_key_axis, torch.ones_like(
             out.min_key_axis)*clip_min), torch.ones_like(out.min_key_axis)*clip_max)

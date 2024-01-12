@@ -13,21 +13,17 @@ def squareddifference_quantizes(self, *args):
     inp0, inp1 = self.inputs[0], self.inputs[1]
     out = self.outputs[0]
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Eltwise currently not support per-channel quantization")
+    if QuantMode.is_per_channel(q_mode_activation):
+        OPT_FATAL("SquaredDifference currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
 
     out_signed = False or self.force_dtype_int
     if inp0.qinvariant != inp1.qinvariant:
-        OPT_WARN(
-            'one input is quantize invariant and other one input is not, which may cause accuracy issue. layer_id=%s, %s' % (
-                self.attrs['layer_id'], self.name),
-            workflow_name='quantize', op_name=str(self.type))
+        OPT_WARN(f'{self}, one input is quantize invariant and other one input is not, which may cause accuracy issue.',
+                 workflow_name='quantize')
     if inp0.qbits != inp1.qbits:
-        OPT_WARN(
-            'qbits of two inputs are not equal , which may cause accuracy issue. better set cast_dtypes_for_lib=True in opt cfg. layer_id=%s, %s' % (
-                self.attrs['layer_id'], self.name),
-            workflow_name='quantize', op_name=str(self.type))
+        OPT_WARN(f"{self}, qbits of two inputs are not equal , which may cause accuracy issue. better set "
+                 f"cast_dtypes_for_lib=True in opt cfg", workflow_name='quantize')
 
     if inp0.qinvariant and inp1.qinvariant:
         out.scale = 1.0
@@ -78,8 +74,8 @@ def squareddifference(self, *args):
     inp1 = self.inputs[1]
     out = self.outputs[0]
 
-    x0 = inp0.betensor + (torch.tensor(0) if not self.quantized else torch.tensor(self.inputs[0].zerop))
-    x1 = inp1.betensor + (torch.tensor(0) if not self.quantized else torch.tensor(self.inputs[1].zerop))
+    x0 = inp0.betensor + (0 if not self.quantized else self.inputs[0].broadcast_zerop)
+    x1 = inp1.betensor + (0 if not self.quantized else self.inputs[1].broadcast_zerop)
 
     if self.quantized:
         out_scale, input0_scale, input1_scale = self.params["scale_value"]

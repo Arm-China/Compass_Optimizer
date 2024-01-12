@@ -20,7 +20,7 @@ def main():
     opt.prepare(argv)
     # test quantized graph
     # opt.optimize()
-    # opt.serialize(f'{argv.output_dir}/{argv.quant_ir_name}')
+    # opt.serialize(f'{argv.output_dir}/{argv.out_ir_name}')
     # g = g.quantgraph
     # with_float = False
     with_float = True

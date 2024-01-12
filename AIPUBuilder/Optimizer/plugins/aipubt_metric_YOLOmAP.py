@@ -27,7 +27,7 @@ class YOLOVOCmAPMetric(BasemAPMetric):
         predict_dict.update({'confidence': score_list})
         predict_dict.update({'image_name': target['image_name'][batch_idx]})
         for k, v in target.items():
-            targets_dict.update({k: v[batch_idx].numpy()})
+            targets_dict.update({k: v[batch_idx].cpu().numpy()})
         BasemAPMetric.extract_obj_all_class(predict_dict, self.predicts)
         BasemAPMetric.extract_obj_all_class(targets_dict, self.targets)
 
@@ -95,7 +95,7 @@ class YOLOV1tinyVOCmAPMetric(YOLOVOCmAPMetric):
 
         for i in range(batch):
             label_id_list, boxes_list, score_list = self.v1_decode_output(
-                pred_list[i][0])
+                pred_list[0][i])
             self.combine_predict_label_and_extract_obj_all_class(i, label_id_list, boxes_list, score_list, target)
 
     def v1_decode_output(self, output, threshold=0.2, iou_threshold=0.5, feature_length=7, class_num=20):
@@ -149,7 +149,7 @@ class YOLOV1tinyVOCmAPMetric(YOLOVOCmAPMetric):
             y = box[1]
             w = box[2]/2
             h = box[3]/2
-            boxes_list.append([x-w, y-h, x+w, y+h])
+            boxes_list.append([y-h, x-w, y+h, x+w])
 
         return classes_num_filtered, boxes_list, probs_filtered
 
@@ -233,6 +233,27 @@ class YOLOV5onnxmAPMetric(YOLOVOCmAPMetric):
 
 
 @register_plugin(PluginType.Metric, '1.0')
+class YOLOV5tflitemAPMetric(YOLOV5onnxmAPMetric):
+    def __call__(self, pred, target):
+        batch = pred[0].shape[0]
+
+        def xywh2yxyx(x):
+            # Convert boxes from [x, y, w, h] to [xmin, ymin, xmax, ymax]
+            y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+            y[..., 1] = x[..., 0] - x[..., 2] / 2
+            y[..., 0] = x[..., 1] - x[..., 3] / 2
+            y[..., 3] = x[..., 0] + x[..., 2] / 2
+            y[..., 2] = x[..., 1] + x[..., 3] / 2
+            return y
+
+        for i in range(batch):
+            label_id_list, boxes_list, score_list = self.decode_output(
+                pred[i], coordinate_convert_func=xywh2yxyx)
+            boxes_list = boxes_list * 640
+            self.combine_predict_label_and_extract_obj_all_class(i, label_id_list, boxes_list, score_list, target)
+
+
+@register_plugin(PluginType.Metric, '1.0')
 class YOLOV5cocomAPMetric(YOLOV5onnxmAPMetric):
     """
     This YOLOV5cocomAPMetric is used for the metric of yolov5_onnx model in Optimizer.
@@ -259,6 +280,54 @@ class YOLOV5cocomAPMetric(YOLOV5onnxmAPMetric):
 
 
 @register_plugin(PluginType.Metric, '1.0')
+class YOLOXcocomAPMetric(YOLOV5onnxmAPMetric):
+    def __call__(self, pred, target):
+        def meshgrid(*tensors):
+            _TORCH_VER = [int(x) for x in torch.__version__.split(".")[:2]]
+            if _TORCH_VER >= [1, 10]:
+                return torch.meshgrid(*tensors, indexing="ij")
+            else:
+                return torch.meshgrid(*tensors)
+
+        def _decode(outputs):
+            grids = []
+            strides = []
+            hw = [[80, 80], [40, 40], [20, 20]]
+            strides_list = [8, 16, 32]
+            for (hsize, wsize), stride in zip(hw, strides_list):
+                yv, xv = meshgrid([torch.arange(hsize), torch.arange(wsize)])
+                grid = torch.stack((xv, yv), 2).view(1, -1, 2)
+                grids.append(grid)
+                shape = grid.shape[:2]
+                strides.append(torch.full((*shape, 1), stride))
+
+            grids = torch.cat(grids, dim=1).type(torch.FloatTensor)
+            strides = torch.cat(strides, dim=1).type(torch.FloatTensor)
+
+            outputs = torch.cat([
+                (outputs[..., 0:2] + grids) * strides,
+                torch.exp(outputs[..., 2:4]) * strides,
+                outputs[..., 4:]
+            ], dim=-1)
+            return outputs
+
+        def xywh2xyxy(x):
+            # Convert nx4 boxes from [x, y, w, h] to [xmin, ymin, xmax, ymax]
+            y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+            y[..., 1] = x[..., 0] - x[..., 2] / 2
+            y[..., 0] = x[..., 1] - x[..., 3] / 2
+            y[..., 3] = x[..., 0] + x[..., 2] / 2
+            y[..., 2] = x[..., 1] + x[..., 3] / 2
+            return y
+        batch = pred[0].shape[0]
+        for i in range(batch):
+            _pred = _decode(pred[0][i:i+1])
+            label_id_list, boxes_list, score_list = self.decode_output(
+                _pred, coordinate_convert_func=xywh2xyxy)
+            self.combine_predict_label_and_extract_obj_all_class(i, label_id_list, boxes_list, score_list, target)
+
+
+@register_plugin(PluginType.Metric, '1.0')
 class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
     """
     This YOLOV4OnnxmAPMetric is used for the metric of yolov4_onnx model in Optimizer.
@@ -267,7 +336,7 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
     score_threshold=0.25, iou_threshold=0.45
     """
 
-    def __init__(self, input_size=416, score_threshold=0.25, iou_threshold=0.45):
+    def __init__(self, input_size=416, score_threshold=0.25, iou_threshold=0.45, layout='nhwc'):
         super().__init__()
         self.anchors = np.array([[[12., 16.], [19., 36.], [40., 28.]],
                                  [[36., 75.], [76., 55.], [72., 146.]],
@@ -279,6 +348,7 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
         self.iou_threshold = float(iou_threshold)  # 0.45
         self.method = 'nms'
         self.sigma = 0.3
+        self.layout = layout
 
     def __call__(self, pred, target):
         """
@@ -287,6 +357,17 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
         """
         assert len(pred) == 3, OPT_FATAL(
             'please check the outputs number(should be 3) in Yolov4_onnx model')
+        try:
+            _pred = []
+            featuremap_size_list = [52, 26, 13]
+            for idx, pd in enumerate(sorted(pred, key=lambda x: x.size(), reverse=True)):
+                if self.layout == 'nchw':
+                    if pd.dim == 4:
+                        pd = pd.transpose(0, 2, 3, 1)
+                _pred.append(pd.reshape(-1, featuremap_size_list[idx], featuremap_size_list[idx], 3, 85))
+            pred = _pred
+        except:
+            OPT_FATAL('output tensor can not be reshape into certain shape')
         batch = pred[0].shape[0]
         output_num = len(pred)
 

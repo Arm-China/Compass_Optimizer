@@ -4,6 +4,7 @@
 from AIPUBuilder.Optimizer.framework import *
 
 from AIPUBuilder.Optimizer.utils import *
+from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.logger import *
 
 
@@ -222,8 +223,8 @@ def single_nms(self, box, score, max_nms_box_num):
 def Nms(self, *args):
     out = self.outputs[:]
     # get bottom node
-    batch_proposal_boxes = self.inputs[0].betensor + (torch.tensor(
-        0) if not self.quantized else torch.tensor(self.inputs[0].zerop))
+    batch_proposal_boxes = self.inputs[0].betensor + (torch_tensor(
+        0, device=self.inputs[0].device) if not self.quantized else self.inputs[0].zerop)
     # batch_boxNum_perClass and batch_total_class_num are not quantized, so their zerop is 0
     batch_boxNum_perClass = self.inputs[1].betensor
     batch_total_class_num = self.inputs[2].betensor

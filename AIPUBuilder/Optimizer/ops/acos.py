@@ -20,8 +20,7 @@ def acos_quantize(self, *args):
     out = self.outputs[0]
 
     if inp.extrema_min < -1 or inp.extrema_max > 1:
-        OPT_WARN("layer_id=%s input of Acos must be range[-1,1], otherwise the output is nan, please check!"
-                 % (self.attrs['layer_id']))
+        OPT_WARN(f"{self} input of Acos must be range[-1,1], otherwise the output is nan, please check!")
     out.qbits = q_bits_activation
     out_sign = False or self.force_dtype_int
     dev = inp.betensor.device
@@ -51,7 +50,6 @@ def acos(self, *args):
         out.betensor = torch.acos(inp.betensor)
         if torch.any(torch.isnan(out.betensor)):
             out.betensor = torch.where(torch.isnan(out.betensor), torch.zeros_like(inp.betensor), out.betensor)
-            OPT_WARN('layer_id=%s, type=%s, the output has nan, please confirm whether input is range[-1,1], now set nan to zero'
-                     % (self.attrs['layer_id'], str(self.type)))
+            OPT_WARN(f"{self}: the output has nan, please confirm whether input is range[-1,1], now set nan to zero")
 
     return out.betensor

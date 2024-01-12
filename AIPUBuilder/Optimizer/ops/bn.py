@@ -30,11 +30,8 @@ def batch_norm(self, *args):
     if self.quantized:
         # input's zerop has been absorbed to bias.
         # inp += self.inputs[0].zerop
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
-        bias += self.constants['biases'].zerop
+        weights += self.constants["weights"].broadcast_zerop
+        bias += self.constants['biases'].broadcast_zerop
 
     inp_dim = inp.dim()
     perm = []
@@ -44,29 +41,10 @@ def batch_norm(self, *args):
         inp = torch.permute(inp, perm)
 
     x = torch.add(torch.multiply(inp, weights), bias)
-
-    requant_scale = 1
-    requant_shift = 0
-    if self.quantized:
-        if 'scale_value' in self.params:
-            requant_scale = self.params['scale_value']
-        elif "scale" in self.constants:
-            requant_scale = self.constants["scale"].betensor
-
-        if 'shift_value' in self.params:
-            requant_shift = self.params['shift_value']
-        elif "shift" in self.constants:
-            requant_shift = self.constants["shift"].betensor
-
-    x = apply_with_activation(self, x,
-                              self.inputs[0].scale * self.constants["weights"].scale, 0,
-                              requant_scale,
-                              requant_shift,
-                              *args)
+    x = apply_with_activation(self, x, *args)
     if len(perm):
         orig_perm = [p for p in range(inp_dim)]
         n_perm = orig_perm[:axis] + [orig_perm[-1]] + orig_perm[axis:-1]
         x = torch.permute(x, n_perm)
-
     self.outputs[0].betensor = x
-    return x
+    return self.outputs[0].betensor

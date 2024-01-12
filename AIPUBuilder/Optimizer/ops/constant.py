@@ -30,13 +30,12 @@ def constant_quantize(self, *args):
     inp_quantize(self, *args)
     w = self.constants["weights"]
     out = self.outputs[0]
+    out.set_qinvariant()
     w.scale = out.scale
     w.zerop = out.zerop
     w.qbits = out.qbits
     w.dtype = out.dtype
     w.qmin = out.qmin
     w.qmax = out.qmax
-    if out.scale == 1 and out.zerop == 0:
-        out.qinvariant = True
     w.qinvariant = out.qinvariant
-    w.betensor = linear_quantize_clip(w.betensor, w.scale, w.zerop, w.qmin, w.qmax)
+    w.betensor = linear_quantize_clip(w.betensor, w.scale, w.zerop, w.qmin, w.qmax, w.key_axis)

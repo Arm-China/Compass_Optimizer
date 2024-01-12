@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
 from . import quantize
 from . import dequantize
 from . import conv
@@ -173,3 +170,8 @@ from . import sufficientStatistics
 from . import heatmapMaxkeypoint
 from . import rms_norm
 from . import div_mod
+from . import atan
+from . import col2im
+from . import batchtospaceNd
+from . import adativepool
+from . import filterbox

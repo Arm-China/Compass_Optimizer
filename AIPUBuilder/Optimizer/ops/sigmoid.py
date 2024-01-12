@@ -29,9 +29,11 @@ def sigmoid_quantize(self, *args):
     iqmin, iqmax = dtype2range(inp.dtype)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     # offset is set so that the lut of the gru/lstm is symmetric
-    offset = torch.sigmoid(torch.tensor(0)) if self.type in [OpType.BasicLSTM, OpType.GRUv3, OpType.GRUv1] else \
-        torch.tensor(0)
-    lut = linear_dequantize(torch.linspace(iqmin, iqmax, steps=lsteps), inp.scale, inp.zerop)
+    offset = torch.sigmoid(torch.tensor(0, device=inp.betensor.device)) if self.type in [OpType.BasicLSTM, OpType.GRUv3, OpType.GRUv1] else \
+        torch.tensor(0, device=inp.betensor.device)
+    lut = linear_dequantize(torch.linspace(iqmin, iqmax, steps=lsteps,
+                                           device=inp.betensor.device), inp.scale, inp.zerop)
+
     lut = torch.sigmoid(lut) - offset
     lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax) + torch.round(offset * out.scale)
     self.constants["lut"] = PyTensor(self.name+"/sigmoid_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))

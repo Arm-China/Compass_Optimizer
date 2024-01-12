@@ -151,7 +151,8 @@ def pooling(self, *args):
 
     elif pmethod in ["L1", "L2"]:
         p = 1 if pmethod == "L1" else 2
-        padding_value = -self.inputs[0].zerop if self.quantized else 0
+        # TODO: support per-channel zerop and pad the per-channel zerop
+        padding_value = -self.inputs[0].zerop[0] if self.quantized else 0
         zerop = self.inputs[0].zerop if self.quantized else 0
         inp = torch.nn.functional.pad(inp, padding, value=padding_value)
         inp += zerop

@@ -65,8 +65,8 @@ def meshgrid(self, *args):
             self.attrs['layer_id'], str(self.type), indexing))
         indexing = 'xy'
 
-    input_x = inp0.betensor
-    input_y = inp1.betensor
+    input_x = inp0.betensor.float()
+    input_y = inp1.betensor.float()
 
     output0, output1 = torch.meshgrid(input_x, input_y, indexing=indexing)
 

@@ -18,14 +18,14 @@ def softmax_quantize(self, *args):
     # so we allow to accumulate less than 2**12 items with a 32bit accumulator
     axis = self.get_param('axis')
     shape_value_in_axis = inp.ir_shape[axis]
-    ibits = torch.ceil(torch.log2(torch.tensor(shape_value_in_axis))).long()
+    ibits = torch.ceil(torch.log2(torch.tensor(shape_value_in_axis))).long().item()
     scaling_bits = self.attrs['scaling_bits']
     mbits = max(8, 32-ibits) if scaling_bits[0] < 1 else scaling_bits[0]
     max_val = torch.tensor((1 << mbits)-1, device=dev)
     max_inp = torch.log(max_val)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     quant_range_linspace = torch.linspace(0, 2 ** inp.qbits - 1, steps=lsteps, device=dev)
-    max_inp -= inp.zerop / inp.scale
+    max_inp -= inp.zerop[0] / inp.scale[0]
     lut = linear_dequantize(quant_range_linspace - (2 ** inp.qbits - 1), inp.scale, inp.zerop) + max_inp
     lut = torch.exp(lut).round().clamp(0, max_val)
     self.constants["lut"] = PyTensor(
@@ -45,6 +45,7 @@ def softmax_quantize(self, *args):
     self.params["shift_type"] = do_shift_type
     self.params["scale_value"] = int(do_scale)
     self.params["scale_type"] = do_scale_type
+    self.params["quantize_method"] = 'LUT'
 
 
 @op_register(OpType.Softmax)

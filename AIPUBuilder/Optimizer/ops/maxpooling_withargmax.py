@@ -31,8 +31,16 @@ def maxpoolingwithArgmax(self, *args):
     func = torch.nn.MaxPool2d(kernel_size=(kh, kw), stride=(sh, sw), padding=0,
                               dilation=(dh, dw), return_indices=True, ceil_mode=ceil_mode)
     value, indics = func(input_data)
+    current_outh, current_outw = value.shape[2:4]
     pad_h = h + pt + pb
     pad_w = w + pl + pr
+    if current_outh < out_h or current_outw < out_w:
+        auto_pad_h = out_h - current_outh
+        auto_pad_w = out_w - current_outw
+        padding = (0, auto_pad_w, 0, auto_pad_h)  # padding_left,padding_right,padding_top,padding_bottom)
+        pad_val = -self.inputs[0].zerop[0]
+        value = torch.nn.functional.pad(value, padding, value=pad_val)
+        indics = torch.nn.functional.pad(indics, padding, value=-(pad_h*pad_w*c*n+2)).long()
     H = indics // pad_w
     W = indics % pad_w
     H = H - pt
@@ -41,7 +49,8 @@ def maxpoolingwithArgmax(self, *args):
     W = nchw2nhwc(W)
     indics = H * w + W
     if storage_order:
-        indics = h * W + H
+        # invalid indics will make H negative
+        indics[H >= 0] = h * W[H >= 0] + H[H >= 0]
     value = nchw2nhwc(value)
 
     if flatten_dim == 'HW':
@@ -59,7 +68,7 @@ def maxpoolingwithArgmax(self, *args):
                 indics[batch, :, :, channel] = h * w * c * batch + h * w * channel + indics[batch, :, :, channel]
     else:
         OPT_FATAL("unsupported method: %s for MaxPoolingWithArgMax(type) in node:%s" % (flatten_dim, self.name))
-
+    indics[indics < 0] = 0
     self.outputs[0].betensor = value
     self.outputs[1].betensor = indics
 

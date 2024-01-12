@@ -28,6 +28,7 @@ from . import aipubt_dataset_NumpyZipped
 from . import aipubt_dataset_tusimple
 from . import aipubt_dataset_numpymultiinputNCHW
 from . import aipubt_dataset_tensorfromnumpymultiinput
+from . import aipubt_dataset_stable_diffusion_unet
 # for built in metric
 from . import aipubt_metric_CosDistance
 from . import aipubt_metric_MaskRcnnCOCOmAP

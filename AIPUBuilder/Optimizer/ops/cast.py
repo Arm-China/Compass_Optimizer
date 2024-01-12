@@ -29,16 +29,16 @@ def cast(self, *args):
     clip_mode = self.get_param('clip_mode', optional=True, default_value='saturation').upper()
     ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=False)
     if self.quantized:
-        if 'scale_value' in self.params:
-            do_scale = self.get_param('scale_value')
-            do_shift = self.get_param('shift_value')
+        if self.get_ir_field(['scale_value', 'scale']):
+            do_scale = self.get_ir_field(['scale_value', 'scale'])
+            do_shift = self.get_ir_field(['shift_value', 'shift'])
             out.betensor = linear_requantize(inp.betensor + inp.zerop, do_scale,
                                              do_shift, out.zerop, out.qmin, out.qmax)
         else:
             input_zerop = 0 if ignore_scale_zp else inp.zerop
             output_zerop = 0 if ignore_scale_zp else out.zerop
-            out.betensor = forward_with_clip(
-                inp.betensor, self.params['to_dtype'], clip_mode, input_zerop, output_zerop)
+            out.betensor = forward_with_clip(inp.betensor, self.params['to_dtype'],
+                                             clip_mode, input_zerop, output_zerop)
     else:
         if 'only_for_quantized' in self.params:
             out.betensor = inp.betensor
@@ -50,8 +50,6 @@ def cast(self, *args):
 @quant_register(OpType.Cast)
 def cast_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
     ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=False)
     inp = self.inputs[0]
     out = self.outputs[0]
@@ -80,10 +78,14 @@ def cast_quantize(self, *args):
                 out, q_mode_activation, out.qbits, is_signed(out.dtype))
             do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
                 out.scale / inp.scale, mult_bits=out.qbits, force_shift_positive=self.force_shift_positive)
-            self.params['scale_value'] = int(do_scale)
-            self.params['scale_type'] = do_scale_type
-            self.params['shift_value'] = int(do_shift)
-            self.params['shift_type'] = do_shift_type
+
+            scale_name = "scale" if is_torch_tensor_with_multi_data(do_scale) else "scale_value"
+            shift_name = "shift" if is_torch_tensor_with_multi_data(do_shift) else "shift_value"
+            self.set_ir_field(scale_name, do_scale, do_scale_type)
+            self.set_ir_field(shift_name, do_shift, do_shift_type)
+            if not is_torch_tensor_with_multi_data(do_scale):
+                self.params["shift_type"] = do_shift_type
+                self.params["scale_type"] = do_scale_type
             self.params['ignore_scale_zp'] = False
             out.qinvariant = False
         self.params['clip_mode'] = 'saturation'
@@ -93,7 +95,7 @@ def cast_quantize(self, *args):
         out.scale = inp.scale
         out.zerop = inp.zerop
         out.qinvariant = inp.qinvariant
-        if is_float(self.params['to_dtype']) and not is_float(inp.dtype):
+        if not is_float(inp.dtype):
             out.dtype = inp.dtype
             out.qbits = inp.qbits
             self.params['to_dtype'] = inp.dtype

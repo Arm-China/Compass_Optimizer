@@ -3,7 +3,6 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.logger import *
 import torch
 import numpy as np
@@ -51,7 +50,7 @@ def bitwise_quantize(self, *args):
     else:  # inp0.qinvariant is true and inp1.qinvariant is true
         qbits = dtype2bits(out_dtype)
         out.qbits = qbits
-        out.scale = 1
+        out.scale = 1.
         out.zerop = 0
         qmin, qmax = dtype2range(out_dtype)
         out.qmin = qmin

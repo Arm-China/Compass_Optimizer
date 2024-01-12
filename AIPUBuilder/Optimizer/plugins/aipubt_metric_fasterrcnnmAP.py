@@ -41,6 +41,7 @@ class FasterRcnnTFmAPMetric(mAPMetric):
         super().__init__()
 
     def __call__(self, pred, target):
+        #total_class, class_label,box,boxnumperclass
         pred_post = [pred[6], pred[5], pred[7], pred[8], pred[9], pred[10]]
         super().__call__(pred_post, target)
 
@@ -53,3 +54,27 @@ class FasterRcnnTFmAPMetric(mAPMetric):
 
     def report(self):
         return "fasterrcnn tensorflow mAP accuracy is %f" % (self.compute())
+
+
+@register_plugin(PluginType.Metric, '1.0')
+class FasterRcnnTorchmAPMetric(mAPMetric):
+    """
+    This FasterRcnnTFmAPMetric is used for the metric of fasterrcnn_torch model in Optimizer.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, pred, target):
+        pred_post = [pred[4], pred[3], pred[5], pred[6], pred[7], pred[8]]
+        super().__call__(pred_post, target)
+
+    def reset(self):
+        super().reset()
+
+    def compute(self):
+        result = super().compute()
+        return result
+
+    def report(self):
+        return "fasterrcnn torch mAP accuracy is %f" % (self.compute())

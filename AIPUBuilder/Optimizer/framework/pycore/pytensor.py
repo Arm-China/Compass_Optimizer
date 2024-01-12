@@ -5,6 +5,7 @@
 # -*- coding: UTF-8 -*-
 # cython: language_level=3
 
+import torch
 __all__ = [
     "PyTensor",
     "TensorShape",
@@ -12,10 +13,14 @@ __all__ = [
     "opt_use_cuda",
 ]
 
+# import os
+# cuda_device = os.environ['CUDA_VISIBLE_DEVICES']
+
 
 def opt_use_cuda():
     import torch
     _USE_CUDA = False
+    # if torch.cuda.is_available() and cuda_device != "":
     if torch.cuda.is_available():
         _USE_CUDA = True
     return _USE_CUDA
@@ -26,14 +31,27 @@ class TensorShape(tuple):
         import copy
         return copy.deepcopy(self)
 
+    def dim(self):
+        return len(self)
+
+    def size(self):
+        s = 1
+        for ts in self:
+            s *= ts
+        return s
+
 
 _tensor_default_property = {
     # quantization property
-    "scale": 1., "zerop": 0, "qbits": None, "qmin": None,
+    "_scale": 1.0,
+    "_zerop": 0,
+    "qbits": None, "qmin": None,
     "qmax": None, "qinvariant": False,
     "dtype": None,
     # per-channel
-    "key_axis": 0, "key_axis_g": None, "key_axis_bs": None,
+    "key_axis": 0,
+    "key_axis_g": 1,
+    "key_axis_bs": None,
     # source IR info
     "ir_shape": None, "ir_dtype": None,
     # producer node
@@ -55,14 +73,16 @@ _tensor_default_property = {
     "running_std": 0.0,
     "running_mad": 0.0,
     "running_histc": None,
-    "min": 0.0,
-    "max": 0.0,
+    "_min": 0.0,
+    "_max": 0.0,
     "min_key_axis": None,
     "max_key_axis": None,
     # records for dev
     "similarity": None,
+    "mse": None,
     "debug_flag": 0,
     "need_deleted": False,
+    "assigned_device": "cpu",
 }
 
 
@@ -75,7 +95,7 @@ class PyTensor:
     import numpy as np
     from typing import Union
     from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
-    __slots__ = tuple(_tensor_default_property.keys()) + ('name', 'betensor')
+    __slots__ = tuple(_tensor_default_property.keys()) + ('name', 'betensor', 'attrs')
 
     def __init__(self, name: str, shape_or_arr: Union[TensorShape, np.ndarray, torch.Tensor] = TensorShape(), dtype: Union[Dtype, None] = None):
         import torch
@@ -124,12 +144,30 @@ class PyTensor:
         if opt_use_cuda():
             self.betensor = self.betensor.cuda()
         self.ir_shape = TensorShape(self.betensor.shape)
+        self.attrs = dict()
+
+    def __repr__(self):
+        import torch
+
+        def _scale_zp(sz):
+            _ret = None
+            if isinstance(sz, (float, int)):
+                _ret = sz
+            elif isinstance(sz, torch.Tensor) and sz.numel() > 1:
+                _ret = f"{sz[0]},...., {sz[-1]}"
+            elif isinstance(sz, torch.Tensor):
+                _ret = sz.item()
+            return _ret
+        scale = _scale_zp(self.scale)
+        zerop = _scale_zp(self.zerop)
+        return (f"tensor.name={self.name}, tensor.ir_shape={self.ir_shape}, tensor.dtype={self.dtype}, "
+                f"tensor.qinfo[scale, zerop] = [{scale}, {zerop}]")
 
     def clone(self, name=None):
         import copy
         import torch
         if name is None:
-            name = self.name + '_clone'
+            name = self.name + '_clone' if not self.name.endswith("_clone") else self.name
         t = self.__class__(name, self.betensor)
         for k in _tensor_default_property.keys():
             v = self.__getattribute__(k)
@@ -144,15 +182,19 @@ class PyTensor:
     def statistic(self,
                   running_statistic_momentum,
                   key_axis=None,  # None means not statistic per-channel info
+                  key_axis_g=1,
                   histc_bins=None,  # None means not statistic histogram
                   statistic_std_mean=True,
                   # How to deal with infinite or equivalent very large/small values
                   trim_infinity=((float('-inf'), float('inf')), ''),
                   reset=False):
         import torch
-        from AIPUBuilder.Optimizer.utils import OPT_INT_MAX, OPT_INT_MIN
-        tdevice = self.betensor.device
+        from AIPUBuilder.Optimizer.utils import OPT_INT_MAX, OPT_INT_MIN, OPT_EPSILON
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        tdevice = self.device
         fbetensor = self.betensor.float()
+        OPT_INT_MIN_t = torch_tensor(OPT_INT_MIN, device=tdevice)
+        OPT_INT_MAX_t = torch_tensor(OPT_INT_MAX, device=tdevice)
 
         if trim_infinity[-1] == 'clip':
             fbetensor = torch.clamp(fbetensor.clone().detach(), trim_infinity[0][0], trim_infinity[0][1])
@@ -160,16 +202,16 @@ class PyTensor:
             trim_min, trim_max = min(trim_infinity[0][0], 0.0), max(trim_infinity[0][1], 0.0)
             sfbetensor = torch.where(fbetensor <= trim_min, torch.zeros_like(fbetensor), fbetensor)
             sfbetensor = torch.where(sfbetensor >= trim_max, torch.zeros_like(sfbetensor), sfbetensor)
-            second_min = sfbetensor.min().item()
-            second_max = sfbetensor.max().item()
+            second_min = sfbetensor.min()
+            second_max = sfbetensor.max()
             fbetensor = torch.clamp(fbetensor.clone().detach(), second_min, second_max)
         else:
             pass
 
-        bmin = fbetensor.min().item()
-        bmax = fbetensor.max().item()
-        bmin = max(bmin, OPT_INT_MIN)
-        bmax = min(bmax, OPT_INT_MAX)
+        bmin = fbetensor.min()
+        bmax = fbetensor.max()
+        bmin = max(bmin, OPT_INT_MIN_t)
+        bmax = min(bmax, OPT_INT_MAX_t)
         other_dims = [i for i in range(fbetensor.dim())]
         channels = 0
 
@@ -191,10 +233,10 @@ class PyTensor:
                     self.running_mad_key_axis = torch.zeros([channels], device=tdevice)
                 if histc_bins != None:
                     self.running_histc_key_axis = torch.zeros([channels, histc_bins], device=tdevice)
-            self.extrema_min = float("inf")
-            self.extrema_max = float("-inf")
-            self.running_min = 0.0
-            self.running_max = 0.0
+            self.extrema_min = torch_tensor(float("inf"), device=tdevice)
+            self.extrema_max = torch_tensor(float("-inf"), device=tdevice)
+            self.running_min = torch.tensor(0.0, device=tdevice)
+            self.running_max = torch.tensor(0.0, device=tdevice)
             if statistic_std_mean:
                 self.running_mean = 0.0
                 self.running_std = 0.0
@@ -209,14 +251,26 @@ class PyTensor:
 
         if key_axis is not None:
             perm = [key_axis] + [axis for axis in range(fbetensor.dim()) if axis != key_axis]
+            g, gn = channels, 1
+            if key_axis_g > 1:
+                gn = key_axis_g
+                # TODO: if no divide exactly, should be padded the extrema value in min or max value
+                g = int(self.betensor.shape[key_axis] / gn)
             torch_int_min = torch.tensor(OPT_INT_MIN, device=tdevice)
             torch_int_max = torch.tensor(OPT_INT_MAX, device=tdevice)
-            running_min_key_axis = torch.maximum(fbetensor.permute(perm).reshape([channels, -1]).min(dim=-1).values,
-                                                 torch_int_min)
+            _min_key_axis = fbetensor.permute(perm).reshape([channels, -1]).min(dim=-1).values
+            _min_key_axis = _min_key_axis.reshape([gn, g]).min(dim=0).values
+            _min_key_axis = torch.repeat_interleave(_min_key_axis, gn)
+            running_min_key_axis = torch.maximum(_min_key_axis, torch_int_min)
+
             self.extrema_min_key_axis = torch.min(self.extrema_min_key_axis, running_min_key_axis)
             self.running_min_key_axis = momentum * self.running_min_key_axis + (1.0-momentum) * running_min_key_axis
-            running_max_key_axis = torch.minimum(fbetensor.permute(perm).reshape([channels, -1]).max(dim=-1).values,
-                                                 torch_int_max)
+
+            _max_key_axis = fbetensor.permute(perm).reshape([channels, -1]).max(dim=-1).values
+            _max_key_axis = _max_key_axis.reshape([gn, g]).max(dim=0).values
+            _max_key_axis = torch.repeat_interleave(_max_key_axis, gn)
+            running_max_key_axis = torch.minimum(_max_key_axis, torch_int_max)
+
             self.extrema_max_key_axis = torch.max(self.extrema_max_key_axis, running_max_key_axis)
             self.running_max_key_axis = momentum * self.running_max_key_axis + (1.0-momentum) * running_max_key_axis
             if statistic_std_mean:
@@ -250,25 +304,25 @@ class PyTensor:
                         key_axis, i).float().histc(bins=histc_bins, min=kmin, max=kmax)
                 self.running_histc_key_axis = momentum * self.running_histc_key_axis + \
                     (1.0-momentum) * running_histc_key_axis
-        self.extrema_min = min(float(self.extrema_min), bmin)
-        self.extrema_max = max(float(self.extrema_max), bmax)
-        self.running_min = momentum * self.running_min + (1.0-momentum) * bmin
-        self.running_max = momentum * self.running_max + (1.0-momentum) * bmax
+        self.extrema_min = min(self.extrema_min.to(torch.float32), bmin)
+        self.extrema_max = max(self.extrema_max.to(torch.float32), bmax)
+        self.running_min = momentum * self.running_min + (1.0 - momentum) * bmin
+        self.running_max = momentum * self.running_max + (1.0 - momentum) * bmax
         if statistic_std_mean:
             running_std, running_mean = torch.std_mean(fbetensor)
             running_mad = torch.mean(torch.abs(fbetensor - running_mean))
-            running_std = torch.clamp(running_std, OPT_INT_MIN, OPT_INT_MAX)
-            running_mean = torch.clamp(running_mean, OPT_INT_MIN, OPT_INT_MAX)
-            running_mad = torch.clamp(running_mad, OPT_INT_MIN, OPT_INT_MAX)
+            running_std = torch.clamp(running_std, OPT_INT_MIN_t, OPT_INT_MAX_t)
+            running_mean = torch.clamp(running_mean, OPT_INT_MIN_t, OPT_INT_MAX_t)
+            running_mad = torch.clamp(running_mad, OPT_INT_MIN_t, OPT_INT_MAX_t)
             running_std[torch.isnan(running_std)] = 1.0
             running_mean[torch.isnan(running_mean)] = 0.0
             running_mad[torch.isnan(running_mad)] = 0.0
-            self.running_mean = momentum * self.running_mean + (1.0-momentum) * running_mean.item()
-            self.running_std = momentum * self.running_std + (1.0-momentum) * running_std.item()
-            self.running_mad = momentum * self.running_mad + (1.0-momentum) * running_mad.item()
-        if histc_bins != None:
-            kmin = max(min(bmin, OPT_INT_MAX), OPT_INT_MIN)
-            kmax = min(max(bmax, OPT_INT_MIN), OPT_INT_MAX)
+            self.running_mean = momentum * self.running_mean + (1.0 - momentum) * running_mean
+            self.running_std = momentum * self.running_std + (1.0 - momentum) * running_std
+            self.running_mad = momentum * self.running_mad + (1.0 - momentum) * running_mad
+        if histc_bins is not None:
+            kmin = max(min(bmin, OPT_INT_MAX_t), OPT_INT_MIN_t)
+            kmax = min(max(bmax, OPT_INT_MIN_t), OPT_INT_MAX_t)
             if kmin != kmin:
                 # nan
                 kmin = 0
@@ -278,25 +332,150 @@ class PyTensor:
             if kmax <= kmin:
                 kmax = kmin + abs(kmin / 2.) + 1.
             self.running_histc = momentum * self.running_histc + \
-                (1.0-momentum) * fbetensor.histc(bins=histc_bins,
-                                                 min=kmin, max=kmax)  # running_histc_key_axis.sum(dim=0)
+                (1.0 - momentum) * fbetensor.histc(bins=histc_bins, min=kmin, max=kmax)
 
-    def __repr__(self):
+    def key_axis_broadcast_shape(self):
+        """
+        generate one shape, like [1, 1, -1, 1] when tensor.key_axis = 2, this shape can use for
+        reshape the scale or zerop tensor.
+        """
+        # key_axis_shape = [] # per-tensor, scale=torch.tensor(2.0)
+        key_axis_shape = [-1]  # per-tensor, scale=torch.tensor([2.0])
+        if self.key_axis is not None:  # pylint: disable=no-member
+            key_axis_shape = [1] * self.ir_shape.dim()
+            key_axis_shape[self.key_axis] = -1  # pylint: disable=no-member
+        return key_axis_shape
+
+    def set_qinvariant(self, qinvariant=None):
+        """
+        when meets scale=1.0, zp=0, can use this interface to set tensor.qinvariant=True
+        """
         import torch
+        if qinvariant is not None:
+            self.qinvariant = qinvariant
+            return
+        one_t = torch.ones_like(self.scale)
+        zero_t = torch.zeros_like(self.zerop)
+        if torch.equal(self.scale, one_t) and torch.equal(self.zerop, zero_t):
+            self.qinvariant = True
 
-        def _format(sz):
-            _ret = None
-            if isinstance(sz, (float, int)):
-                _ret = sz
-            elif isinstance(sz, torch.Tensor) and sz.numel() > 1:
-                _ret = f"{sz[0]},...., {sz[-1]}"
-            elif isinstance(sz, torch.Tensor):
-                _ret = sz.item()
-            return _ret
-        scale = _format(self.scale)
-        zerop = _format(self.zerop)
-        return (f"tensor.name={self.name}, tensor.ir_shape={self.ir_shape}, "
-                f"tensor.scale={scale}, tensor.zerop={zerop}")
+    def is_qinvariant(self):
+        """
+        return tensor whether qinvariant
+        """
+        import torch
+        ret = self.qinvariant
+        one_t = torch.ones_like(self.scale)
+        zero_t = torch.zeros_like(self.zerop)
+        ret = ret and torch.equal(self.scale, one_t) and torch.equal(self.zerop, zero_t)
+        return ret
+
+    def is_perchannel_scales(self):
+        import torch
+        return True if isinstance(self.scale, torch.Tensor) and self.scale.numel() > 1 else False
+
+    def is_perchannel_zerops(self):
+        import torch
+        return True if isinstance(self.zerop, torch.Tensor) and self.zerop.numel() > 1 else False
+
+    def is_perchannel_quantization(self):
+        return True if self.key_axis is not None else False  # pylint: disable=no-member
+
+    @property
+    def scale(self):
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if self._scale is not None:
+            self._scale = torch_tensor(self._scale, device=self.betensor.device)
+            self._scale = self._scale.reshape([-1]).float()
+        return self._scale  # pylint: disable=no-member
+
+    @scale.setter
+    def scale(self, scale):
+        import torch
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if isinstance(scale, torch.Tensor):
+            self._scale = scale.reshape([-1]).float()
+        elif scale is None:
+            self._scale = None
+        else:
+            self.scale = torch_tensor(scale, device=self.betensor.device)
+
+    @property
+    def zerop(self):
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if self._zerop is not None:
+            self._zerop = torch_tensor(self._zerop, device=self.betensor.device)
+            self._zerop = self._zerop.reshape([-1])
+        return self._zerop  # pylint: disable=no-member
+
+    @zerop.setter
+    def zerop(self, zerop):
+        import torch
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if isinstance(zerop, torch.Tensor):
+            self._zerop = zerop.reshape([-1]).int()
+        elif zerop is None:
+            self._zerop = zerop
+        else:
+            self.zerop = torch_tensor(zerop, device=self.betensor.device)
+
+    @property
+    def broadcast_scale(self):
+        return self.scale.reshape(self.key_axis_broadcast_shape()) if self.scale is not None else self.scale  # pylint: disable=no-member
+
+    @broadcast_scale.setter
+    def broadcast_scale(self, broadcast_scale):
+        self.scale = broadcast_scale
+
+    @property
+    def broadcast_zerop(self):
+        return self.zerop.reshape(self.key_axis_broadcast_shape()) if self.zerop is not None else self.zerop  # pylint: disable=no-member
+
+    @broadcast_zerop.setter
+    def broadcast_zerop(self, broadcast_zerop):  # same as self.zerop = zp
+        self.zerop = broadcast_zerop
+
+    @property
+    def max(self):
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if self._max is not None:
+            self._max = torch_tensor(self._max, device=self.device)
+            self._max = self._max.reshape([-1])
+        return self._max  # pylint: disable=no-member
+
+    @max.setter
+    def max(self, max_v):
+        import torch
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if isinstance(max_v, torch.Tensor):
+            self._max = max_v.reshape([-1])
+        elif max is None:
+            self._max = None
+        else:
+            self.max = torch_tensor(max_v, device=self.device)
+
+    @property
+    def min(self):
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if self._min is not None:
+            self._min = torch_tensor(self._min, device=self.device)
+            self._min = self._min.reshape([-1])
+        return self._min  # pylint: disable=no-member
+
+    @min.setter
+    def min(self, min_v):
+        import torch
+        from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+        if isinstance(min_v, torch.Tensor):
+            self._min = min_v.reshape([-1])
+        elif min is None:
+            self._min = None
+        else:
+            self.min = torch_tensor(min_v, device=self.device)
+
+    @property
+    def device(self):
+        return self.betensor.device
 
 
 PyTensor.shape = property(lambda self: self.betensor.shape, None)

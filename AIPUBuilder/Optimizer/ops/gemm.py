@@ -30,7 +30,7 @@ def gemm(self, *args):
     if self.quantized:
         x = x + inp0.zerop
         y = y + inp1.zerop
-    z = torch.matmul(x, y)
+    z = torch.matmul(x.float(), y.float())
     alpha = self.get_param('alpha')
     if self.quantized:
         do_scale = self.params["scale_value"]
@@ -41,10 +41,10 @@ def gemm(self, *args):
             beta = self.get_param('beta')
             beta_sign = -1 if beta < 0 else 1
             bias = self.inputs[2].betensor + self.inputs[2].zerop
-            req_z = torch.round(z * do_scale[1]) * alph_sign
-            req_bias = torch.round(bias * do_scale[2]) * beta_sign
-            sum = req_z + req_bias
-            z = linear_requantize(sum, do_scale[0], do_shift, out.zerop, out.qmin, out.qmax)
+            req_z = z * do_scale[1] * alph_sign
+            req_bias = bias * do_scale[2] * beta_sign
+            zsum = req_z + req_bias
+            z = linear_requantize(zsum, do_scale[0], do_shift, out.zerop, out.qmin, out.qmax)
         else:  # len(self.inputs) == 2
             z = linear_requantize(z, do_scale, do_shift, out.zerop, out.qmin, out.qmax)
             z = z * alph_sign

@@ -112,23 +112,5 @@ def deconv2d(self, *args):
     crop_x = x[..., top_start:h-bottom_end, left_start:w-right_end]
     x = nchw2nhwc(crop_x)
 
-    requant_scale = 1
-    requant_shift = 0
-    if self.quantized:
-        if 'scale_value' in self.params:
-            requant_scale = self.params['scale_value']
-        elif "scale" in self.constants:
-            requant_scale = self.constants["scale"].betensor
-
-        if 'shift_value' in self.params:
-            requant_shift = self.params['shift_value']
-        elif "shift" in self.constants:
-            requant_shift = self.constants["shift"].betensor
-
-    x = apply_with_activation(self, x,
-                              self.inputs[0].scale * self.constants["weights"].scale, 0,
-                              requant_scale,
-                              requant_shift,
-                              *args)
-    self.outputs[0].betensor = x
-    return x
+    self.outputs[0].betensor = apply_with_activation(self, x, *args)
+    return self.outputs[0].betensor

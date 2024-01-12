@@ -6,11 +6,11 @@ from AIPUBuilder.Optimizer.framework import *
 
 import torch
 
-# y = arcsin x， x∈[–1，1]， y∈[–π/2，π/2]
+# y = arctan(x)， x∈(-∞，+∞)， y∈[–π/2，π/2]
 
 
-@quant_register(OpType.Asin)
-def asin_quantize(self, *args):
+@quant_register(OpType.Atan)
+def atan_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Currently not support per-channel quantization")
@@ -18,23 +18,21 @@ def asin_quantize(self, *args):
 
     inp = self.inputs[0]
     out = self.outputs[0]
-    if inp.extrema_min < -1 or inp.extrema_max > 1:
-        OPT_WARN(f"{self}: input of Asin must be range[-1,1], otherwise the output is nan, please check!")
     out.qbits = q_bits_activation
-    out_sign = True
+    out_sign = is_signed(inp.dtype) or self.force_dtype_int
     dev = inp.betensor.device
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
         out, q_mode_activation, out.qbits, out_sign)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
-    lut = torch.asin(lut)
+    lut = torch.atan(lut)
     lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/asin_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+    self.constants["lut"] = PyTensor(self.name+"/atan_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
     out.qinvariant = False
 
 
-@op_register(OpType.Asin)
-def asin(self, *args):
+@op_register(OpType.Atan)
+def atan_forward(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
     if self.quantized:
@@ -46,9 +44,6 @@ def asin(self, *args):
             self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
         out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        out.betensor = torch.asin(inp.betensor)
-        if torch.any(torch.isnan(out.betensor)):
-            out.betensor = torch.where(torch.isnan(out.betensor), torch.zeros_like(inp.betensor), out.betensor)
-            OPT_WARN(f"{self}: the output has nan, please confirm whether input is range[-1,1], now set nan to zero")
+        out.betensor = torch.atan(inp.betensor)
 
     return out.betensor

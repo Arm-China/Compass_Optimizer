@@ -3,7 +3,7 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+from AIPUBuilder.Optimizer.utils.dtype_utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.ops.conv import linear_op_quantize, clear_lower_bits_for_bias
 import torch
 import math
@@ -44,8 +44,8 @@ def groupnorm_quantize(self, *args):
     if q_bits_activation <= 8 and sqrt_n > 127:
         adj = math.ceil(math.log2(127.5/sqrt_n/4))
         alpha = 2**adj
-    normalized.min = -sqrt_n*alpha
-    normalized.max = sqrt_n*alpha
+    normalized.min = -sqrt_n * alpha
+    normalized.max = sqrt_n * alpha
     normalized.scale, normalized.zerop, normalized.qmin, normalized.qmax, normalized.dtype = get_linear_quant_params_from_tensor(
         normalized, q_mode_activation, normalized.qbits, is_signed=True)
     normalized.qinvariant = False
@@ -63,8 +63,9 @@ def groupnorm_quantize(self, *args):
         self.params['norm_shift_value'] = int((var_shift >> 1)+adj)
         self.params['norm_shift_type'] = bits2dtype(8, is_signed=False)
     else:
+        norm_local_scale = normalized.scale / 127
         norm_do_scale, norm_do_scale_type, norm_do_shift, norm_do_shift_type = \
-            get_scale_approximation_params(normalized.scale / 127,
+            get_scale_approximation_params(norm_local_scale,
                                            mult_bits=q_bits_activation,
                                            force_shift_positive=self.force_shift_positive)
         self.params['var_shift_value'] = 0   # not used with 16bit quant
@@ -119,6 +120,26 @@ def groupnorm_quantize(self, *args):
     self.constants["lut"] = PyTensor(
         self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
     self.constants["lut"].dtype = Dtype.INT16
+
+    if self.type == OpType.LayerNorm:
+        if len(self.outputs) == 3:
+            # mean
+            self.outputs[1].dtype = inp.dtype
+            self.outputs[1].scale = inp.scale
+            self.outputs[1].zerop = inp.zerop
+            self.outputs[1].qbits = inp.qbits
+            self.outputs[1].qmin, self.outputs[1].qmax = dtype2range(inp.dtype)
+            self.outputs[1].qinvariant = inp.qinvariant
+
+            self.outputs[2].dtype = bits2dtype(16, False)
+            if q_bits_activation <= 8:  # At present, the scale of some cases is not accurate and needs to be optimized in the future
+                self.outputs[2].scale = 32767 / self.inputs[0].scale
+            else:
+                self.outputs[2].scale = 32767 * norm_local_scale / self.inputs[0].scale
+            self.outputs[2].zerop = 0
+            self.outputs[2].qbits = dtype2bits(self.outputs[2].dtype)
+            self.outputs[2].qmin, self.outputs[2].qmax = dtype2range(self.outputs[2].dtype)
+            self.outputs[2].qinvariant = False
 
 
 @op_register(OpType.GroupNorm)
@@ -191,12 +212,14 @@ def groupnorm(self, *args):
         ngamma = torch.repeat_interleave(ngamma, inp_betensor.shape[channel_axis]//group, dim=channel_axis)
     if self.quantized:
         qmin, qmax = bits2range(out.qbits, is_signed=is_signed(out.dtype))
-        normalized = (inp_betensor - mean) * ngamma
-        shift = 8
-        multiplier = 1
         if q_bits_activation <= 8:
-            shift = shift+self.params['norm_shift_value']
+            normalized = (inp_betensor - mean) * ngamma
             multiplier = self.params['norm_scale_value']
+            shift = 8 + self.params['norm_shift_value']
+        else:
+            normalized = ((inp_betensor - mean) >> 1) * ngamma
+            multiplier = 1
+            shift = 7
         normalized = linear_requantize(normalized, multiplier, shift, 0, qmin, qmax)
     else:
         normalized = (inp_betensor - mean) * ngamma
@@ -205,12 +228,8 @@ def groupnorm(self, *args):
     if 'weights' in self.constants:
         w = self.constants["weights"]
         # must be positive axis
-        w.key_axis = len(w.shape)-1
-        w_zerop = w.zerop
-        if isinstance(w.zerop, torch.Tensor):
-            zerop_shape = [w.shape[ax] if ax == w.key_axis else 1 for ax in range(len(w.shape))]
-            w_zerop = torch.reshape(w.zerop, zerop_shape)
-        gamma = w.betensor + w_zerop
+        w.key_axis = len(w.shape) - 1
+        gamma = w.betensor + w.broadcast_zerop
         gamma = torch.reshape(gamma, axis_reshape)
     beta = 0.0
     if 'biases' in self.constants:
@@ -219,6 +238,7 @@ def groupnorm(self, *args):
         beta = b.betensor + b.zerop
         beta = torch.reshape(beta, axis_reshape)
     out.betensor = gamma * normalized + beta
+
     if self.quantized:
         if "shift" not in self.constants:
             do_shift = self.params["shift_value"]
@@ -232,6 +252,17 @@ def groupnorm(self, *args):
         out.betensor = linear_requantize(out.betensor,
                                          do_scale, do_shift, o_zp,
                                          out.qmin, out.qmax)
+
+    if self.type == OpType.LayerNorm:
+        if len(self.outputs) == 3:
+            self.outputs[1].betensor = mean
+            self.outputs[2].betensor = ngamma
+            if self.quantized:
+                self.outputs[1].betensor = torch.clamp(
+                    self.outputs[1].betensor - self.outputs[1].zerop, self.outputs[1].qmin, self.outputs[1].qmax)
+                self.outputs[2].betensor = torch.clamp(
+                    self.outputs[2].betensor - self.outputs[2].zerop, self.outputs[2].qmin, self.outputs[2].qmax)
+            return out.betensor, self.outputs[1].betensor, self.outputs[2].betensor
     # if not self.quantized:
     #     if len(self.placeholders) < 1:
     #         plh = PyTensor(self.name+"/normalized", normalized.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))

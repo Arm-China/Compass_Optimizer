@@ -3,10 +3,14 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
-from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_activation_out_is_signed, apply_with_activation_quantize, with_activation_allow_merge_out_zerop_to_bias
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.ops.convwinograd import *
+from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+from AIPUBuilder.Optimizer.features import apply_calibration_strategy
+from AIPUBuilder.Optimizer.ops.activation import (apply_with_activation,
+                                                  with_activation_out_is_signed,
+                                                  apply_with_activation_quantize,
+                                                  with_activation_allow_merge_out_zerop_to_bias)
 import torch
 import math
 import importlib
@@ -25,19 +29,17 @@ def _conv2d_torch_impl(self, *args):
     if self.quantized:
         # input's zerop has been absorbed to bias.
         # inp += self.inputs[0].zerop
-        inp_zp = self.inputs[0].zerop if isinstance(self.inputs[0].zerop, (float, int)) else self.inputs[0].zerop[0]
-        pad_val = -inp_zp
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
-        bias += self.constants['biases'].zerop
+        pad_val = -self.inputs[0].zerop[0]
+        weights += self.constants["weights"].broadcast_zerop
+        bias += self.constants['biases'].broadcast_zerop
 
     inp = nhwc2nchw(inp)
     weights = nhwc2nchw(weights)
     if WinogradChecker.run(self) or self.get_param('with_winograd', optional=True, default_value=False):
         x = WinogradAllocator(self, inp, weights, bias)
     else:
+        if self.aasrb is not None:
+            bias = None
         inp = torch.nn.functional.pad(inp, padding, value=pad_val)
         x = torch.nn.functional.conv2d(inp,
                                        weights,
@@ -57,6 +59,9 @@ def conv2d(self, *args):
     ky = self.get_param('kernel_y')
     kx = self.get_param('kernel_x')
 
+    self.aasrb = self.get_param('remain_shift',
+                                optional=True, default_value=None)
+
     if not torch.cuda.is_available() and (ih >= 2048 and iw >= 2048) and (ky == 1 and kx == 1):
         OPT_DEBUG(f"when ih>=2048, iw>=2048 and ky==1, kw==1 with cpu device forward, we will use tf.nn.conv2d to execute.")
         conv2d_tf = importlib.import_module('AIPUBuilder.Optimizer.ops.tf_ops.conv2d')
@@ -64,28 +69,14 @@ def conv2d(self, *args):
     else:
         x = _conv2d_torch_impl(self, *args)
 
-    requant_scale = 1
-    requant_shift = 0
-    if self.quantized:
-        if 'scale_value' in self.params:
-            requant_scale = self.params['scale_value']
-        elif "scale" in self.constants:
-            requant_scale = self.constants["scale"].betensor
-
-        if 'shift_value' in self.params:
-            requant_shift = self.params['shift_value']
-        elif "shift" in self.constants:
-            requant_shift = self.constants["shift"].betensor
-
-    x = apply_with_activation(self,
-                              x,
-                              self.inputs[0].scale * self.constants["weights"].scale,
-                              0,
-                              requant_scale,
-                              requant_shift,
-                              *args)
-
-    self.outputs[0].betensor = x
+    shift_bk = None
+    if self.quantized and self.aasrb is not None:
+        bias = self.constants['biases'].betensor.clone().float() + self.constants['biases'].broadcast_zerop
+        bias = aiff_clear_lower_bits_for_bias(bias, self)
+        self.outputs[0].betensor = apply_with_activation(self, x,
+                                                         *args, aasrb=(self.aasrb, bias))
+        return self.outputs[0].betensor
+    self.outputs[0].betensor = apply_with_activation(self, x, *args)
     return self.outputs[0].betensor
 
 
@@ -101,6 +92,8 @@ def conv2d_quantize(self, *args):
         linear_op_quantize(self, *args)
 
     absorb_input_zp_to_bias_and_compress_bias_for_aiff(self, *args)
+    if 'remain_shift' in self.attrs:
+        self.params['remain_shift'] = self.attrs['remain_shift']
 
 
 def linear_op_quantize(self, *args):
@@ -109,20 +102,16 @@ def linear_op_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
     if q_mode_weight != q_mode_bias:
         OPT_FATAL("Currently quantization mode of weight (q_mode_weight) and bias (q_mode_bias) must be the same!")
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization of activations")
     q_bits_weight = self.attrs["q_bits_weight"]
     q_bits_bias = self.attrs["q_bits_bias"]
     q_bits_activation = self.attrs["q_bits_activation"]
-    multiplier_bits = self.attrs['multiplier_bits']
+    multiplier_bits = self.get_attrs('multiplier_bits', optional=True, default_value=q_bits_activation)
 
     inp = self.inputs[0]
 
     w = self.constants["weights"]
     key_axis = w.key_axis
     w_out_cnum = w.shape[key_axis]
-    w_scale_expand = []
-    w_zerop_expand = []
     group = self.get_param('group', optional=True, default_value=1)
 
     out = self.outputs[0]
@@ -133,6 +122,15 @@ def linear_op_quantize(self, *args):
         out, q_mode_activation, q_bits_activation, is_signed=out_signed)
     out.qinvariant = False
 
+    inp_scale = inp.scale
+    '''it is not convenient to import whitelist of act perchannel, so we put its to quant_tool_utils, as ABSORB_INPUT_SCALE_OP.'''
+    if self.type in ABSORB_INPUT_SCALE_OP and inp.is_perchannel_scales():
+        OPT_INFO(f"{self} will absorbs input scale to weight in linear_op_quantize.", log_once=True)
+        w.betensor /= inp_scale
+        w.statistic(1.0, w.key_axis, reset=True)
+        inp_scale = 1.0
+        apply_calibration_strategy(w, self.attrs['q_strategy_weight'], q_mode_weight)
+
     if group > 1 or QuantMode.is_per_channel(q_mode_weight):
         if QuantMode.is_per_channel(q_mode_weight):
             mgroup = w_out_cnum
@@ -140,39 +138,26 @@ def linear_op_quantize(self, *args):
             mgroup = group
 
         do_scale, do_scale_type, do_shift, do_shift_type = unify_shifts_for_aiff_with_per_n_channel_quant(
-            self, w, q_mode_weight, q_bits_weight, True, lambda xt: out.scale / (inp.scale * xt.scale), initial_group=mgroup)
-
-        w_scale_expand = w.scale
-        w_zerop_expand = w.zerop
-        self.constants["scale"] = PyTensor(self.name+"/scale",
-                                           do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
-        self.constants["scale"].dtype = do_scale_type
-        self.constants["shift"] = PyTensor(self.name+"/shift",
-                                           do_shift.cpu().numpy().astype(dtype2nptype(do_shift_type)))
-        self.constants["shift"].dtype = do_shift_type
+            self, w, q_mode_weight, q_bits_weight, True, lambda xt: out.scale / (inp_scale * xt.scale), initial_group=mgroup)
 
     else:
         w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(w, q_mode_weight, q_bits_weight,
                                                                                         is_signed=True)
-        local_rescale = out.scale / (inp.scale * w.scale)
+        local_rescale = out.scale / (inp_scale * w.scale)
         do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(local_rescale,
                                                                                           mult_bits=multiplier_bits,
                                                                                           force_shift_positive=self.force_shift_positive)
-        w_scale_expand.extend([w.scale] * w_out_cnum)
-        w_zerop_expand.extend([w.zerop] * w_out_cnum)
-        _, do_scale_type = range2dtype(0, do_scale)
-        self.params["shift_value"] = int(do_shift)
+
+    doscale_name = 'scale' if is_torch_tensor_with_multi_data(do_scale) else 'scale_value'
+    doshift_name = 'shift' if is_torch_tensor_with_multi_data(do_shift) else 'shift_value'
+    self.set_ir_field(doscale_name, do_scale, do_scale_type)
+    self.set_ir_field(doshift_name, do_shift, do_shift_type)
+    if not is_torch_tensor_with_multi_data(do_scale):
         self.params["shift_type"] = do_shift_type
-        self.params["scale_value"] = int(do_scale)
         self.params["scale_type"] = do_scale_type
 
     # quantize weights
-    if not isinstance(w_scale_expand, torch.Tensor):
-        w_scale_expand = torch.tensor(w_scale_expand, device=inp.betensor.device)
-        w_zerop_expand = torch.tensor(w_zerop_expand, device=inp.betensor.device)
-    scale_zp_shape = [w.shape[ax] if ax == key_axis else 1 for ax in range(len(w.shape))]
-    w.betensor = linear_quantize_clip(w.betensor, w_scale_expand.reshape(scale_zp_shape),
-                                      w_zerop_expand.reshape(scale_zp_shape), w.qmin, w.qmax)
+    w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax)
     w.qbits = q_bits_weight
     w.qinvariant = False
 
@@ -182,11 +167,8 @@ def linear_op_quantize(self, *args):
         #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_q + zp_b)s_ws_x/s_b) s_y/s_ws_x - zp_y
         #     #y_q = ((w_q + zp_w) (x_q + zp_x) + (b_f - zp_y/s_y)s_ws_x) s_y/s_ws_x
         #     b.betensor = b.betensor - linear_dequantize(0, out.scale, out.zerop)
-        b.scale = inp.scale * w.scale
+        b.scale = inp_scale * w.scale
         b.zerop = 0
-        if isinstance(b.scale, torch.Tensor):
-            b_scale_shape = [b.shape[ax] if ax == b.key_axis else 1 for ax in range(len(b.shape))]
-            b.scale = torch.reshape(b.scale, b_scale_shape)
 
         if self.attrs['bias_effective_bits'] != q_bits_bias:
             search_bias_bit_and_quantize(self, *args)
@@ -194,7 +176,7 @@ def linear_op_quantize(self, *args):
             b.qmin = -2 ** (q_bits_bias - 1)
             b.qmax = 2 ** (q_bits_bias - 1) - 1
             b.qbits = q_bits_bias
-            b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
+            b.betensor = linear_quantize_clip(b.betensor, b.broadcast_scale, b.broadcast_zerop, b.qmin, b.qmax)
 
         b.dtype = bits2dtype(b.qbits, is_signed=True)
         b.qinvariant = False
@@ -220,7 +202,7 @@ def clear_lower_bits_for_bias(self, *args, grouped=False, dim=-1):
 
 
 def compute_input_zp_mul_reduce_weight(zp, w):
-    return w.reshape(w.shape[0], -1).sum(dim=1) * zp
+    return (w * zp).reshape(w.shape[0], -1).sum(dim=1)
 
 
 def absorb_input_zp_to_bias(self, *args):
@@ -232,9 +214,9 @@ def absorb_input_zp_to_bias(self, *args):
         BT, _, AT = ArcReactor.run(2, 3)
         BT = torch.from_numpy(BT).to(device)
         AT = torch.from_numpy(AT).to(device)
-        input_zp = construct_torch_tensor(self.inputs[0].zerop, device)
+        input_zp = torch_tensor(self.inputs[0].zerop, device)
         weight = w.betensor.permute(0, 3, 1, 2)
-        repeated_input_zp = input_zp.repeat([1, BT.shape[0]])
+        repeated_input_zp = input_zp.repeat([1, BT.shape[0]])  # pylint: disable=no-member
         data_tmp = torch.matmul(repeated_input_zp.float(), BT.permute(1, 0))
         data_repeat_shape = [*weight.shape[0:3]] + [1]
         BT_out = data_tmp.repeat(data_repeat_shape)
@@ -270,6 +252,7 @@ def search_bias_bit_and_quantize(self, *args):
     b.qmax = 2 ** (q_bits_bias - 1) - 1
     b.qbits = q_bits_bias
     b.betensor = linear_quantize_clip(b.betensor, b.scale, b.zerop, b.qmin, b.qmax)
+    dev = b.device
 
     q_bias_data = b.betensor.clone()
     clear_lower_bits_for_bias(self)
@@ -282,12 +265,16 @@ def search_bias_bit_and_quantize(self, *args):
     if (float_quant_kld - float_compress_kld).abs() > 0.05:
         begin_bits = min(max(bias_effective_bits, 19), q_bits_bias - 1)
         end_bits = q_bits_bias
-        bits = torch.arange(begin_bits, end_bits, device=b.betensor.device)
+        bits = torch.arange(begin_bits, end_bits, device=dev)
         repeated_bias = torch.tile(bias_float_data, tuple([end_bits - begin_bits] + [1 for _ in range(len(b.shape))]))
         clamp_min = -2 ** (bits - 1)
         clamp_max = 2 ** (bits - 1) - 1
-        q_biases = linear_quantize_clip(repeated_bias, construct_torch_tensor(b.scale, device=b.betensor.device).unsqueeze(0), b.zerop,
-                                        clamp_min.unsqueeze(-1), clamp_max.unsqueeze(-1))
+        q_biases = linear_quantize_clip(repeated_bias,
+                                        torch_tensor(
+                                            b.scale, device=dev).unsqueeze(0),  # pylint: disable=no-member
+                                        b.zerop,
+                                        clamp_min.unsqueeze(-1),
+                                        clamp_max.unsqueeze(-1))
         b.betensor = q_biases.clone()
         clear_lower_bits_for_bias(self, grouped=True)
         compress_biases = b.betensor
@@ -301,7 +288,7 @@ def search_bias_bit_and_quantize(self, *args):
         searched_bias_bits = klds.index(min(klds)) + begin_bits
         b.qmin = -2 ** (searched_bias_bits - 1)
         b.qmax = 2 ** (searched_bias_bits - 1) - 1
-        b.qbits = searched_bias_bits
+        b.qbits = max(searched_bias_bits, q_bits_bias)
         b.betensor = linear_quantize_clip(bias_float_data, b.scale, b.zerop, b.qmin, b.qmax)
         OPT_DEBUG((f"layer_id = {self.attrs['layer_id']}, layer_type = {self.type}, layer_name = {self.name} "
                    f"searched bias bits = {searched_bias_bits} for better quantize bias "

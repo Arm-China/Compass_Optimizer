@@ -160,11 +160,11 @@ def detectionoutput(self, *args):
     inp = self.inputs[0].betensor
 
     class_conf, box_encodings, crop_proposals = get_bottom_nodes(self)
+    if class_conf.shape[2] > 1:
+        class_conf = class_conf[:, :, 1:]
+    if class_conf.shape[2] != box_encodings.shape[2]:
+        box_encodings = box_encodings[:, :, 1:, :]
     batch_size = box_encodings.shape[0]
-    crop_box_num = box_encodings.shape[1]
-    max_class_num = box_encodings.shape[2]
-
-    max_detection_num = crop_box_num * max_class_num
 
     special_anchor_mode = self.get_param('anchor_mode') if 'anchor_mode' in self.params else 'default_detect'
     if special_anchor_mode == 'caffe_detection':
@@ -181,10 +181,10 @@ def detectionoutput(self, *args):
         height = self.get_param('image_height')
         width = self.get_param('image_width')
         score_thresh = self.get_param('score_threshold')
-
-        class_conf = class_conf[:, :, 1:]
+        bbox_xform_clip = self.get_param('bbox_xform_clip', optional=True, default_value=float('inf'))
+        th = torch.clamp(th, max=bbox_xform_clip)
+        tw = torch.clamp(tw, max=bbox_xform_clip)
         crop_box_num = class_conf.shape[1]
-
         w = torch.exp(tw) * res_box[6]
         h = torch.exp(th) * res_box[7]
         ycenter = ty * res_box[7] + res_box[5]
@@ -201,9 +201,10 @@ def detectionoutput(self, *args):
         xmin = torch.clamp(xmin, 0, width)
         xmax = torch.clamp(xmax, 0, width)
 
-        coords_stats = res_box[4:] + [ymin, ymax, xmin, xmax, ycenter, xcenter, h, w, ty * res_box[7], tx * res_box[6]]
-        box_stats = res_box[:4] + [torch.exp(th), torch.exp(tw)]
-        placeholders = [coords_stats, box_stats]
+        coords_stats = [ymin, ymax, xmin, xmax, ycenter, xcenter, w, h]
+        box_stats = [torch.exp(th), torch.exp(tw)]
+        txty_stats = [ty, tx]
+        placeholders = [coords_stats, box_stats, txty_stats]
         placeholders_output = []
 
         for placeholder in placeholders:
@@ -216,10 +217,13 @@ def detectionoutput(self, *args):
         if len(self.placeholders) < 1:
             ph0 = PyTensor(self.name+"/coords", placeholders_output[0].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
             ph1 = PyTensor(self.name+"/box", placeholders_output[1].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph2 = PyTensor(self.name + "/txty", placeholders_output[2].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
+            self.placeholders.append(ph2)
         self.placeholders[0].betensor = placeholders_output[0]
         self.placeholders[1].betensor = placeholders_output[1]
+        self.placeholders[2].betensor = placeholders_output[2]
     else:
         dev = box_encodings.device
         tw_lut = self.constants['tw_lut'].betensor
@@ -230,13 +234,6 @@ def detectionoutput(self, *args):
         height = self.get_param('height')
         width = self.get_param('width')
         score_thresh = self.params["score_threshold_value"]
-        shift = self.params["box_shift_value"]
-        # scale1 = self.params['proposal_scale_value']
-        # shift1 = self.params['proposal_shift_value']
-        # scale2 = self.params['rois_scale_value']
-        # shift2 = self.params['rois_shift_value']
-
-        class_conf = class_conf[:, :, 1:]
         if special_anchor_mode == 'caffe_detection':
             xcenter_a_q, ycenter_a_q, wa_q, ha_q = get_proposals_box(crop_proposals, self.quantized)
         else:
@@ -253,20 +250,23 @@ def detectionoutput(self, *args):
         lut_w = lookup_lut_powerof2(tw, tw_lut, lut_in_bits, in_is_signed, hlut_out_bits, hout_is_signed)
         lut_y = lookup_lut_powerof2(ty, ty_lut, lut_in_bits, in_is_signed, xlut_out_bits, xout_is_signed)
         lut_x = lookup_lut_powerof2(tx, tx_lut, lut_in_bits, in_is_signed, xlut_out_bits, xout_is_signed)
-        # currently only consider symmetric quantization
-        # input2_zerop = self.inputs[2].zerop
-        # act_qmin, act_qmax = bits2range(32, True)
-        # h = linear_requantize((lut_h.to(dev).int() * (ha_q).to(dev).int()), scale1, shift1, 0, act_qmin, act_qmax)
-        # w = linear_requantize((lut_w.to(dev).int() * (wa_q).to(dev).int()), scale1, shift1, 0, act_qmin, act_qmax)
-        # cy = linear_requantize((lut_y.to(dev).int() * (ha_q).to(dev).int()), scale1, shift1, 0, act_qmin, act_qmax) + \
-        #          linear_requantize((ycenter_a_q+input2_zerop).to(dev).int(), scale2, shift2, 0, act_qmin, act_qmax)
-        # cx = linear_requantize((lut_x.to(dev).int() * (wa_q).to(dev).int()), scale1, shift1, 0, act_qmin, act_qmax) + \
-        #          linear_requantize((xcenter_a_q+input2_zerop).to(dev).int(), scale2, shift2, 0, act_qmin, act_qmax)
-        h = (lut_h.to(dev).int() * ha_q.to(dev).int()) >> shift
-        w = (lut_w.to(dev).int() * wa_q.to(dev).int()) >> shift
-        cy = ((lut_y.to(dev).int() * ha_q.to(dev).int()) >> shift).int() + ycenter_a_q.to(dev).int()
-        cx = ((lut_x.to(dev).int() * wa_q.to(dev).int()) >> shift).int() + xcenter_a_q.to(dev).int()
 
+        do_shift1, do_shift2, do_shift3 = self.params["box_shift_value"]
+        do_scale1, do_scale2, do_scale3 = self.params["box_scale_value"]
+        pre_shift1, pre_shift2 = self.get_param('delta_shift')
+
+        round_shift1 = 1 << (do_shift1 - pre_shift1 - 1)
+        round_shift2 = 1 << (do_shift2 - pre_shift2 - 1)
+        h = torch.clamp((lut_h.to(dev).int() * do_scale1) >> pre_shift1, -2 ** 15, 2 ** 15 - 1).int()
+        w = torch.clamp((lut_w.to(dev).int() * do_scale1) >> pre_shift1, -2 ** 15, 2 ** 15 - 1).int()
+        h = ((h * ha_q) + round_shift1) >> (do_shift1 - pre_shift1)
+        w = ((w * wa_q) + round_shift1) >> (do_shift1 - pre_shift1)
+        cy = torch.clamp((lut_y.to(dev).int() * do_scale2) >> pre_shift2, -2 ** 15, 2 ** 15 - 1).int()
+        cy = (((cy * ha_q) + round_shift2) >> (do_shift2 - pre_shift2)) + \
+            linear_requantize(ycenter_a_q, do_scale3, do_shift3, 0, -2 ** 15, 2 ** 15 - 1)
+        cx = torch.clamp((lut_x.to(dev).int() * do_scale2) >> pre_shift2, -2 ** 15, 2 ** 15 - 1).int()
+        cx = (((cx * wa_q) + round_shift2) >> (do_shift2 - pre_shift2)) + \
+            linear_requantize(xcenter_a_q, do_scale3, do_shift3, 0, -2 ** 15, 2 ** 15 - 1)
         ymin = cy - (h >> 1)
         xmin = cx - (w >> 1)
         ymax = cy + (h >> 1)
@@ -279,6 +279,7 @@ def detectionoutput(self, *args):
 
     proposal_box = torch.stack((ymin, xmin, ymax, xmax)).permute(
         1, 3, 2, 0).reshape([batch_size, xmax.shape[1] * xmax.shape[2], 4])
+
     detection_boxes, detection_scores, box_num_perClass, class_label, total_class_num = get_box_score(class_conf,
                                                                                                       proposal_box,
                                                                                                       score_thresh,
@@ -336,12 +337,13 @@ def detectionoutput_quantize(self, *args):
 
     coords = self.placeholders[0]
     box = self.placeholders[1]
+    tytx = self.placeholders[2]
     coords.qbits = max(16, q_bits_activation)
     coords.scale, coords.zerop, coords.qmin, coords.qmax, coords.dtype = get_linear_quant_params_from_tensor(
         coords, QuantMode.to_symmetric(q_mode_activation), coords.qbits, is_signed=True)
     coords.qinvariant = False
     stat_coords_scale, stat_coords_zp = coords.scale, coords.zerop
-    stat_coords_scale = 2 ** torch.floor(torch.log2(torch.tensor(stat_coords_scale))).item()
+    # stat_coords_scale = 2 ** torch.floor(torch.log2(torch.tensor(stat_coords_scale))).item()
 
     self.params['height'] = int(height * stat_coords_scale)
     self.params['width'] = int(width * stat_coords_scale)
@@ -354,22 +356,36 @@ def detectionoutput_quantize(self, *args):
     coord_zerop = box.zerop
     coord_scale = box.scale
     coord_shift = torch.floor(torch.log2(torch.tensor(coord_scale))).item()
-    coord_scale = 2 ** coord_shift
+    # coord_scale = 2 ** coord_shift
 
-    # scale1 = stat_coords_scale/(coord_scale * proposal_box_scale)
-    # scale2 = stat_coords_scale / proposal_box_scale
-    # scale1, shift1 = get_scale_approximation_params(scale1, mult_bits=16)
-    # scale2, shift2 = get_scale_approximation_params(scale2, mult_bits=16)
-    # self.params['proposal_scale_value'] = int(scale1)
-    # self.params['proposal_scale_type'] = Dtype.UINT16
-    # self.params['proposal_shift_value'] = int(shift1)
-    # self.params["proposal_shift_type"] = SHIFT_DTYPE
-    # self.params['rois_scale_value'] = int(scale2)
-    # self.params['rois_scale_type'] = Dtype.UINT16
-    # self.params['rois_shift_value'] = int(shift2)
-    # self.params['rois_shift_type'] = SHIFT_DTYPE
+    tytx.qbits = max(16, q_bits_activation)
+    tytx.scale, tytx.zerop, tytx.qmin, tytx.qmax, tytx.dtype = get_linear_quant_params_from_tensor(
+        tytx, QuantMode.to_symmetric(q_mode_activation), tytx.qbits, is_signed=True)
+    tytx.qinvariant = False
 
-    def get_lut(in_scale, in_zerop, var, box_scale, box_zerop, lut_in_dtype, lut_size_bits, lut_range_dtype, flag):
+    do_scale1, do_scale_type1, do_shift1, do_shift_type1 = get_scale_approximation_params(stat_coords_scale/(coord_scale * inp2.scale),
+                                                                                          mult_bits=16,
+                                                                                          force_shift_positive=self.force_shift_positive)
+    do_scale2, do_scale_type2, do_shift2, do_shift_type2 = get_scale_approximation_params(stat_coords_scale/(tytx.scale * inp2.scale),
+                                                                                          mult_bits=16,
+                                                                                          force_shift_positive=self.force_shift_positive)
+    do_scale3, do_scale_type3, do_shift3, do_shift_type3 = get_scale_approximation_params(stat_coords_scale/(inp2.scale),
+                                                                                          mult_bits=16,
+                                                                                          force_shift_positive=self.force_shift_positive)
+
+    self.params["box_shift_type"] = [do_shift_type1, do_shift_type2, do_shift_type3]
+    self.params["box_shift_value"] = [int(do_shift1), int(do_shift2), int(do_shift3)]
+    self.params["box_scale_value"] = [int(do_scale1), int(do_scale2), int(do_scale3)]
+    self.params["box_scale_type"] = [do_scale_type1, do_scale_type2, do_scale_type3]
+
+    import math
+    scale1_bits = int(math.ceil(math.log2(do_scale1)))
+    scale2_bits = int(math.ceil(math.log2(do_scale2)))
+    pre_shift1 = scale1_bits
+    pre_shift2 = scale2_bits
+    self.params["delta_shift"] = [pre_shift1, pre_shift2]
+
+    def get_lut(in_scale, in_zerop, var, box_scale, box_zerop, lut_in_dtype, lut_size_bits, lut_range_dtype, flag, bbox_xform_clip):
         lsteps = 2 ** lut_size_bits
         in_qmin, in_qmax = dtype2range(lut_in_dtype)
         lut_o_qmin, lut_o_qmax = dtype2range(lut_range_dtype)
@@ -377,25 +393,28 @@ def detectionoutput_quantize(self, *args):
 
         lut = lut / var
         if flag:
+            lut = torch.clamp(lut, max=bbox_xform_clip)
             lut = torch.exp(lut)
         lut = linear_quantize_clip(lut, box_scale, box_zerop, lut_o_qmin, lut_o_qmax)
         return lut
 
-    var_list = [1.0, 1.0, 1.0, 1.0] if special_anchor_mode == 'caffe_detection' else [10.0, 10.0, 5.0, 5.0]
-    # var = self.get_param('variance', optional=True, default_value=_param_default_value['variance'])
+    var_list = self.params['variance']
     lut_in_dtype = inp1.dtype
     lut_size_bits = min(inp1.qbits, int(self.get_attrs('lut_items_in_bits')))
     lut_range_bits = max(q_bits_activation, 16)
     lut_out_dtype = bits2dtype(lut_range_bits, True)
 
+    bbox_xform_clip = self.get_param('bbox_xform_clip', optional=True, default_value=float('inf'))
     ty_lut = get_lut(box_encoding_scale, box_encoding_zp,
-                     var_list[0], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, False)
+                     var_list[0], tytx.scale, tytx.zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, False, bbox_xform_clip)
     tx_lut = get_lut(box_encoding_scale, box_encoding_zp,
-                     var_list[1], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, False)
+                     var_list[1], tytx.scale, tytx.zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, False, bbox_xform_clip)
     th_lut = get_lut(box_encoding_scale, box_encoding_zp,
-                     var_list[2], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, True)
+                     var_list[2], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, True, bbox_xform_clip)
     tw_lut = get_lut(box_encoding_scale, box_encoding_zp,
-                     var_list[3], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, True)
+                     var_list[3], coord_scale, coord_zerop, lut_in_dtype, lut_size_bits, lut_out_dtype, True, bbox_xform_clip)
+    if 'bbox_xform_clip' in self.params:
+        self.params.pop('bbox_xform_clip')
 
     lut_list = [ty_lut, tx_lut, th_lut, tw_lut]
     lut_object_name = {ty_lut: 'ty_lut',
@@ -408,10 +427,11 @@ def detectionoutput_quantize(self, *args):
         self.constants[name] = PyTensor(self.name+name, lut.cpu().numpy().astype(dtype2nptype(lut_out_dtype)))
 
     score_q_min, score_q_max = bits2range(inp0.qbits, False)
-    self.params["box_shift_value"] = int(coord_shift)
-    self.params["box_shift_type"] = SHIFT_DTYPE
+    # self.params["box_shift_value"] = int(coord_shift)
+    # self.params["box_shift_type"] = SHIFT_DTYPE
     self.params["score_threshold_value"] = linear_quantize_clip(score_thresh,
                                                                 class_score_scale, class_score_zp, score_q_min, score_q_max).int().item()
+    self.params['variance'] = [1, 1, 1, 1]
     out_type = [dtype2str(inp0.dtype), 'int16', 'uint16', 'uint16', 'uint16']
     out_scale = [class_score_scale, stat_coords_scale, 1, 1, 1]
     out_zerop = [class_score_zp, stat_coords_zp, 0, 0, 0]

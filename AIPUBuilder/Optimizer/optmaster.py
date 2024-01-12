@@ -155,7 +155,7 @@ class OptMaster(object):
                 self.q_metrics.append(copy.deepcopy(metric))
 
         # check dataset has the same data items with the input tensors.
-        if checker_dataloader != None:
+        if checker_dataloader is not None:
             inp_tensor_num = len(self.g.input_tensors)
             dataset_sample_len = 0
             for i, sample in enumerate(checker_dataloader):
@@ -182,9 +182,7 @@ class OptMaster(object):
                             config_info[lname].update({k: v})
             except:
                 OPT_FATAL("Invalid opt_config file! please refer to opt_template.json")
-        # process trigger float op attr
-        from AIPUBuilder.Optimizer.config.cfg_fields import TriggerFloatOpField as tfof
-        tf_name, tf_ops, tf_alt = tfof._parse(self.hparams.trigger_float_op)[1][0]
+
         for node in self.g.nodes:
             properties = config_info[node.name]
 
@@ -193,41 +191,43 @@ class OptMaster(object):
 
             init_attrs('layer_id')
             init_attrs('layer_top_type_original')
-            init_attrs('q_mode_activation', self.hparams.quantize_method_for_activation)
-            init_attrs('q_mode_weight', self.hparams.quantize_method_for_weight)
+            init_attrs('q_mode_activation', self.hparams.quantize_method_for_activation.get(node))
+            init_attrs('q_mode_weight', self.hparams.quantize_method_for_weight.get(node))
             if node.type in [OpType.DepthwiseConv] and 'q_mode_weight' not in properties:
-                node.attrs['q_mode_weight'] = 'per_channel_symmetric_restricted_range'
+                node.attrs['q_mode_weight'] = QuantMode.to_per_channel(node.attrs['q_mode_weight'])
             # bias and weight better to have the same quantize_method
             init_attrs('q_mode_bias', node.attrs['q_mode_weight'])
-            init_attrs('q_bits_activation', self.hparams.activation_bits)
-            init_attrs('q_bits_weight', self.hparams.weight_bits)
+            init_attrs('q_bits_activation', self.hparams.activation_bits.get(node))
+            init_attrs('q_bits_weight', self.hparams.weight_bits.get(node))
             if node.type == OpType.BatchNorm and 'q_bits_weight' not in properties:
                 node.attrs['q_bits_weight'] = 16
-            init_attrs('q_bits_bias', self.hparams.bias_bits)
-            init_attrs('q_strategy_activation', self.hparams.calibration_strategy_for_activation)
-            init_attrs('q_strategy_weight', self.hparams.calibration_strategy_for_weight)
-            init_attrs('q_strategy_bias', self.hparams.calibration_strategy_for_weight)
-            init_attrs('running_statistic_momentum', self.hparams.running_statistic_momentum)
-            init_attrs('histc_bins', self.hparams.histc_bins)
+            init_attrs('q_bits_bias', self.hparams.bias_bits.get(node))
+            init_attrs('q_strategy_activation', self.hparams.calibration_strategy_for_activation.get(node))
+            init_attrs('q_strategy_weight', self.hparams.calibration_strategy_for_weight.get(node))
+            init_attrs('q_strategy_bias', self.hparams.calibration_strategy_for_weight.get(node))
+            init_attrs('running_statistic_momentum', self.hparams.running_statistic_momentum.get(node))
+            init_attrs('histc_bins', self.hparams.histc_bins.get(node))
             init_attrs('debug_fake_quantize', False)
+            init_attrs('activation_perchannel_min_elements', self.hparams.activation_perchannel_min_elements)
             if node.type in [OpType.Resize, OpType.Interp, ]:
-                init_attrs('resize_degrade_to_nearest', self.hparams.resize_degrade_to_nearest)
+                init_attrs('resize_degrade_to_nearest', self.hparams.resize_degrade_to_nearest.get(node))
             if node.type in [OpType.Convolution, OpType.DepthwiseConv, OpType.ConvTranspose, OpType.Convolution3D,
                              OpType.ConvTranspose3D]:
-                init_attrs('with_winograd', self.hparams.with_winograd),
-            init_attrs('lut_items_in_bits', self.hparams.lut_items_in_bits)
+                init_attrs('with_winograd', self.hparams.with_winograd.get(node)),
+            init_attrs('lut_items_in_bits', self.hparams.lut_items_in_bits.get(node))
             init_attrs('multiplier_bits', node.attrs['q_bits_activation'] if self.hparams.multiplier_bits == ''
-                       else self.hparams.multiplier_bits)
-            init_attrs('force_dtype_int', self.hparams.force_dtype_int)
-            init_attrs('force_shift_positive', self.hparams.force_shift_positive)
+                       else self.hparams.multiplier_bits.get(node))
+            init_attrs('force_dtype_int', self.hparams.force_dtype_int.get(node))
+            init_attrs('force_shift_positive', self.hparams.force_shift_positive.get(node))
             init_attrs('min_compatible_zhouyi_target', self.hparams.min_compatible_zhouyi_target)
             # init_attrs('force_dtype_int', False)
             init_attrs('bias_effective_bits', node.attrs['q_bits_bias'] if self.hparams.bias_effective_bits == ''
-                       else self.hparams.bias_effective_bits)
-            init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff)
-            init_attrs('trigger_float_op', tf_name)
-            if len(tf_ops) > 0 and not (node.type.name.lower() in tf_ops or int(node.attrs['layer_id']) in tf_ops):
-                init_attrs('trigger_float_op', tf_alt)
+                       else self.hparams.bias_effective_bits.get(node))
+            init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff.get(node))
+            init_attrs('trim_infinity_before_statistic', self.hparams.trim_infinity_before_statistic.get(node))
+            init_attrs('trigger_float_op', self.hparams.trigger_float_op.get(node))
+            if node.type in AIFF_AHEAD_SHIFT_OP and self.hparams.remain_shift != '':
+                init_attrs('remain_shift', self.hparams.remain_shift.get(node))
             if node.type == OpType.Concat:
                 init_attrs('unify_scales_for_multi_inputs_operator_threshold',
                            self.hparams.unify_scales_for_concat_threshold)
@@ -349,7 +349,7 @@ class OptMaster(object):
                     pbar.update(1)
                 pbar.refresh()
 
-        if self.hparams.global_calibration.lower().strip() != 'none':
+        if len(self.hparams.global_calibration) > 0:
             # get the intial calibration's results (each tensor's scale, zp, dtype, qbits)
             self.g.set_tensor_quantization_attrs()
             # apply global quantization optimization (scales, rounding, etc) here
@@ -446,6 +446,8 @@ class OptMaster(object):
         for node in deleted_nodes:
             self.g.quantgraph.remove_node(node)
 
+        optimization_stage3(self.g, self.hparams)
+
         self.graph_optimize_stage3_flag = True
 
     # optimizer quantize has two step: collect statistic data and quantize each op
@@ -465,7 +467,7 @@ class OptMaster(object):
                 dataloader = self.calibration_dataloader
                 self.g.current_batch_size = dataloader.batch_size
                 current_batch_idx = 0
-                with tqdm(dataloader, desc='statistic batch', file=sys.stdout) as pbar:
+                with tqdm(dataloader, desc='statistic batch', file=sys.stdout, consumer=self.g) as pbar:
                     for i, sample in enumerate(pbar):
                         inp, _ = sample
                         self.g.current_batch_idx = current_batch_idx
@@ -528,7 +530,7 @@ class OptMaster(object):
     def quantize(self):
         """OptMaster::quantize() will use the QuantizeGraph::quantize() to quantize each op"""
 
-        abatches = self.hparams.mixed_precision_auto_search_batches
+        abatches, _, _ = self.hparams.mixed_precision_auto_search
         if abatches > 0:
             autosearch_enginer = NaiveAutoSearchMixedPrecision(self.g,
                                                                self.validation_dataloader,
@@ -596,6 +598,16 @@ class OptMaster(object):
         if opt_use_cuda():
             torch.cuda.empty_cache()
         OPT_INFO('Begin to serialzie IR')
+        if self.hparams.write_similarity_to_ir:
+            for n in qg.nodes:
+                cstr = ""
+                mstr = ""
+                for t in n.outputs:
+                    cstr += f"{t.similarity}, "
+                    mstr += f"{t.mse}, "
+                n.params['_cos'] = cstr
+                n.params['_mse'] = mstr
+
         qg.serialize(name + ".txt", name + ".bin")
 
         # currently no need, because it's better to be hanled by GUI.
@@ -619,11 +631,14 @@ class OptMaster(object):
         for node in qg.nodes:
             node_attrs[node.name] = {}
             similarity_str = ''
+            mse_str = ''
             if node.type in [OpType.Convolution, ]:
                 node_attrs[node.name]['with_winograd'] = node.attrs['with_winograd']
             for t in node.outputs:
                 node.attrs['quantization_info'][t.name]['similarity'] = t.similarity
+                node.attrs['quantization_info'][t.name]['MSE'] = t.mse
                 similarity_str += str(t.similarity) + ', '
+                mse_str += str(t.mse) + ', '
             for k, v in node.attrs.items():
                 if k in user_interactive_properties:
                     node_attrs[node.name][k] = v
@@ -631,8 +646,8 @@ class OptMaster(object):
             node_attrs[node.name]['just_for_display']['quantization_info'] = str(node.attrs['quantization_info'])
             node_attrs[node.name]['just_for_display']['optimization_info'] = str(node.attrs['optimization_info'])
             node_attrs[node.name]['just_for_display'][
-                'brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s' % (
-                node.attrs['layer_id'], str(node.type), similarity_str)
+                'brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s, MSE=%s' % (
+                node.attrs['layer_id'], str(node.type), similarity_str, mse_str)
         opt_config_file = os.path.join(self.hparams.output_dir, "%s_%s" %
                                        (self.hparams.model_name, DEFAULT_CONFIG_FILE))
         make_path(opt_config_file)
@@ -674,9 +689,12 @@ class OptMaster(object):
 
         elif self.dataloader4debug is not None:
             coses = []
+            mse = []
             for ot in self.g.quantgraph.output_tensors:
                 coses.append(ot.similarity)
+                mse.append(ot.mse)
             report_dict.update({'output tensors cosine': coses})
+            report_dict.update({'output tensors MSE': mse})
 
         if self.hparams.record_debug_acc_info:
             # just for debug
@@ -913,11 +931,23 @@ class OptMaster(object):
             if node.get_param('unquantifiable', optional=True, default_value=False):
                 node.quantized = False
             else:
-                dtypes = [t.dtype for t in (list(node.outputs) + list(node.constants.values())) + list(node.inputs)]
-                for dt in dtypes:
-                    if is_float(dt):
-                        node.quantized = False
+                dtypes = [t.dtype for t in (list(node.outputs) + list(node.inputs))]
+                with_lut = False
+                constants_name = node.constants.keys()
+                for name in constants_name:
+                    if 'lut' in name:
+                        with_lut = True
+                        if is_float(node.constants[name].dtype):
+                            OPT_WARN(
+                                f"{node},constant[{name}] dtype is float, currently set node.quantized = True.")
                         break
+                    else:
+                        dtypes.append(node.constants[name].dtype)
+                if not with_lut:
+                    for dt in dtypes:
+                        if is_float(dt):
+                            node.quantized = False
+                            break
             if node.quantized:
                 _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
         return graph
@@ -941,7 +971,7 @@ class OptMaster(object):
     def run_default(self):
         # self.prepare(self.hparams)
         self.optimize()
-        self.serialize(os.path.join(self.hparams.output_dir, self.hparams.quant_ir_name))
+        self.serialize(os.path.join(self.hparams.output_dir, self.hparams.out_ir_name))
         if self.validation_dataloader is not None:
             self.metric(self.hparams.eval_original_model)
 
@@ -965,12 +995,13 @@ class OptMaster(object):
             # pre-pass
             convert_resize_to_convolution(self.g)
             for n in self.g.nodes:
+                # n.attrs['simplify_dequantize_quantize'] = self.hparams.simplify_dequantize_quantize
                 n.attrs['unify_shifts_mode'] = self.hparams.compat_quantized_model_unify_shifts_mode
                 # now qat model fixed to 13bits, TODO: set by cfg fields and distinguish with opt flow.
                 n.attrs['multiplier_bits'] = 13
                 if 'conv_from_resize_opt' not in n.attrs:
-                    n.attrs['trigger_float_op'] = 'float16_preferred' if self.hparams.trigger_float_op.lower(
-                    ) == 'disable' else self.hparams.trigger_float_op.lower()
+                    n.attrs['trigger_float_op'] = 'float16_preferred' if self.hparams.trigger_float_op.get(
+                        n) == 'disable' else self.hparams.trigger_float_op.get(n)
                 if self.hparams.compat_quantized_model_int8_to_uint8:
                     n.attrs["int8_to_uint8"] = True
                 if n.type == OpType.Constant:
@@ -991,7 +1022,7 @@ class OptMaster(object):
 
             cg = convert_opt_graph_to_aipu_graph(self.g)
             qtlib_quantize_transform(cg, run_mode=self.hparams.compat_quantized_model_strategy)
-            name = os.path.join(self.hparams.output_dir, self.hparams.quant_ir_name)
+            name = os.path.join(self.hparams.output_dir, self.hparams.out_ir_name)
             if not os.path.exists(self.hparams.output_dir):
                 os.makedirs(self.hparams.output_dir)
             if self.hparams.run_mode not in ['quant_ir_forward', ]:

@@ -36,37 +36,33 @@ def apply_calibration_strategy(t, strategy, quantize_method):
             if None != t.running_min_key_axis:
                 t.min_key_axis = t.running_min_key_axis
                 t.max_key_axis = t.running_max_key_axis
-    t.min = min(t.min, 0.0)
-    t.max = max(t.max, 0.0)
+    t.min = min(t.min, torch.tensor(0.0, device=t.device))
+    t.max = max(t.max, torch.tensor(0.0, device=t.device))
     if None != t.min_key_axis:
         t.min_key_axis = torch.min(t.min_key_axis, torch.zeros_like(t.min_key_axis))
         t.max_key_axis = torch.max(t.max_key_axis, torch.zeros_like(t.max_key_axis))
 
 
 def apply_global_calibration(g, cdataloader, strategy):
-    cstrategy = strategy.lower().strip()
-    from AIPUBuilder.Optimizer.config import GlobalCalibrationParamField
-    valid, methods = GlobalCalibrationParamField._parse(cstrategy)
-    if valid:
-        OPT_INFO('applying global calibration strategy: ' + str(strategy))
-        for method in methods:
-            mname = method[0]
-            mparams = method[1]
-            mscopes = method[2]
-            if 'easy_quant' == mname:
-                easy_quant_global_calibration(g, cdataloader, mparams, mscopes)
-            elif 'adaround' == mname:
-                adaround_global_calibration(g, cdataloader, mparams, mscopes)
-            elif 'adaquant_zy' == mname:
-                adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes)
-            elif 'svd_quant' == mname:
-                svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
-            elif 'mvn_correction' == mname:
-                try:
-                    from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
-                    mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
-                except:
-                    OPT_ERROR('no global calibration strategy named "mvn_correction" found')
-                    pass
-            else:
-                pass
+    methods = strategy
+    OPT_INFO('applying global calibration strategy: ')
+    for method in methods:
+        mname = method[0]
+        mparams = method[1]
+        mscopes = method[2]
+        if 'easy_quant' == mname:
+            easy_quant_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'adaround' == mname:
+            adaround_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'adaquant_zy' == mname:
+            adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'svd_quant' == mname:
+            svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'mvn_correction' == mname:
+            try:
+                from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
+                mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
+            except Exception as e:
+                OPT_ERROR(f"call mvn_correction_global_calibration failed: {e}")
+        else:
+            pass

@@ -11,6 +11,13 @@ __all__ = [
 ]
 
 
+class PyGraphView:
+    def __init__(self):
+        self.nodes = []
+        self.inflow_tensors = ()
+        self.outflow_tensors = ()
+
+
 class PyGraph:
     def __init__(self, name="unamed"):
         self.name = str(name)
@@ -19,6 +26,25 @@ class PyGraph:
         self.input_tensors = ()
         self.output_tensors = ()
         self.ref_count_tensors = {}
+
+    def subgraph_view(self, nodes):
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
+        gview = PyGraphView()
+        ilist = []
+        olist = []
+        for n in self.nodes:
+            if n in nodes:
+                gview.nodes.append(n)
+                for it in n.inputs:
+                    if it.pnode not in nodes:
+                        ilist.append(it)
+            else:
+                for it in n.inputs:
+                    if it.pnode in nodes:
+                        olist.append(it)
+        gview.inflow_tensors = tuple(ilist)
+        gview.outflow_tensors = tuple(olist)
+        return gview
 
     def clone(self):
         import copy
@@ -215,12 +241,18 @@ class PyGraph:
                             break
             n.children = tuple(children)
 
+        pre_idx_map = {}
+        for k, n in enumerate(self.nodes):
+            pre_idx_map[n] = k
+        topological_nodes = []
         for i, g in enumerate(topological_generations(net)):
-            for n in g:
+            for n in sorted(g, key=lambda xn: pre_idx_map[xn]):
                 n.attrs['tgid'] = i
                 n.graph = self
                 for ot in n.outputs:
                     ot.pnode = n
+                topological_nodes.append(n)
+        self.nodes = topological_nodes
 
         self.net_ = net
         return self.net_
@@ -239,12 +271,6 @@ class PyGraph:
         if node not in self.nodes:
             self.nodes.append(node)
             self.init_networkx()
-            idx = -1
-            for i, n in enumerate(self.nodes):
-                if n.attrs['tgid'] > node.attrs['tgid']:
-                    idx = i
-                    break
-            self.nodes = self.nodes[:idx] + [node, ] + self.nodes[idx:-1]
 
     def remove_node(self, node):
         if node in self.nodes:
@@ -285,6 +311,62 @@ class PyGraph:
             for i, t in enumerate(new.outputs):
                 old.outputs = old.outputs + (t.clone(),)
 
+    def cut_subgraph(self, nodes):
+        sg = self.subgraph_view(nodes)
+        clone_t_inp = {}
+        clone_t_out = {}
+        for n in sg.nodes:
+            n.graph = None
+            for idx, it in enumerate(n.inputs):
+                if it in sg.inflow_tensors:
+                    it.pnode = None
+                    info = (n, idx)
+                    if it in clone_t_inp.keys():
+                        clone_t_inp[it].append(info)
+                    else:
+                        clone_t_inp[it] = [info, ]
+            nplist = []
+            for np in n.parents:
+                if np in sg.nodes:
+                    nplist.append(np)
+            n.parents = tuple(nplist)
+            for idx, ot in enumerate(n.outputs):
+                if ot in sg.outflow_tensors:
+                    ot.pnode = None
+                    info = (n, idx)
+                    if ot in clone_t_out.keys():
+                        clone_t_out[ot].append(info)
+                    else:
+                        clone_t_out[ot] = [info, ]
+            nclist = []
+            for nc in n.children:
+                if nc in sg.nodes:
+                    nclist.append(nc)
+            n.children = tuple(nclist)
+        ilist = []
+        olist = []
+        for t, nlist in clone_t_inp.items():
+            # with the same name for matching in the future
+            tt = t.clone(t.name)
+            ilist.append(tt)
+            for n, idx in nlist:
+                n.replace_input_temporarily(idx, tt)
+        for t, nlist in clone_t_out.items():
+            # with the same name for matching in the future
+            tt = t.clone(t.name)
+            olist.append(tt)
+            for n, idx in nlist:
+                n.replace_output_temporarily(idx, tt)
+        sg.inflow_tensors = tuple(ilist)
+        sg.outflow_tensors = tuple(olist)
+
+        left_nodes = []
+        for n in self.nodes:
+            if n not in sg.nodes:
+                left_nodes.append(n)
+        self.nodes = left_nodes
+        return sg
+
     def forward(self, feed_data, disable_pbar=True, keep_tensors=False):
         return self.forward_to(None, feed_data, disable_pbar, keep_tensors)
 
@@ -298,12 +380,21 @@ class PyGraph:
         if len(self.input_tensors) == 1 and not isinstance(feed_data, list):
             data = [feed_data, ]
         for inp, d in zip(self.input_tensors, data):
-            inp.betensor = PyTensor('tmp', d).betensor
+            inp.betensor = PyTensor('tmp', d).betensor.to(inp.assigned_device)
 
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm
         with tqdm(total=len(self.nodes), desc='forward_to', file=sys.stdout, leave=True, disable=disable_pbar) as pbar:
             for n in self.nodes:
+                if len(n.inputs) > 0:
+                    device = n.outputs[0].assigned_device
+                    for inp in n.inputs:
+                        if not inp.assigned_device == device:
+                            inp.betensor = inp.betensor.to(device)
+                            for attrname in dir(inp):
+                                attr = getattr(inp, attrname)
+                                if isinstance(attr, torch.Tensor):
+                                    setattr(inp, attrname, attr.to(device))
                 n.forward()
                 if dest_node is not None and n == dest_node:
                     break
@@ -423,6 +514,11 @@ class PyGraph:
         from AIPUBuilder.Optimizer.framework.pycore.pyir import parse_graph_from_ir
         g = parse_graph_from_ir(ir_txt, ir_bin)
         return g
+
+    def __repr__(self):
+        msg = (f"{self.__class__.__name__}({self.name}) has {len(self.nodes)} nodes, "
+               f"and has {len(self.input_tensors)} inputs and {len(self.output_tensors)} outputs")
+        return msg
 
 
 def _get_current_batch_size_(self):

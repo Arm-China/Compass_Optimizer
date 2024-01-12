@@ -11,15 +11,36 @@ import AIPUBuilder
 __all__ = ['OPT_DEBUG', 'OPT_INFO', 'OPT_WARN', 'OPT_ERROR', 'OPT_FATAL', 'tqdm']
 
 
-def tqdm(*args, **kwargs):
-    file = sys.stdout
-    if "file" in kwargs:
-        file = kwargs["file"]
+from tqdm import tqdm as _tqdm
 
-    disbale = not file.isatty()
-    kwargs["disable"] = disbale or kwargs.get("disable", False)
-    from tqdm import tqdm as f
-    return f(*args, **kwargs)
+
+class tqdm(_tqdm):
+    def __init__(self, *args, **kwargs):
+        from torch.utils.data import DataLoader
+        file = sys.stdout
+        if "file" in kwargs:
+            file = kwargs["file"]
+
+        disable = not file.isatty()
+        kwargs["disable"] = disable or kwargs.get("disable", False)
+
+        consumer = kwargs.get('consumer', False)
+        self.dataset = None
+        if consumer and len(args) >= 1 and isinstance(args[0], DataLoader) and hasattr(args[0], 'dataset'):
+            args[0].dataset.__setattr__('consumer', kwargs['consumer'])
+            self.dataset = args[0].dataset
+
+        if 'consumer' in kwargs:
+            kwargs.pop('consumer')
+
+        super(tqdm, self).__init__(*args, **kwargs)
+        self.args = args
+        self.kwargs = kwargs
+
+    def __exit__(self, *exc):
+        if self.dataset is not None and hasattr(self.dataset, 'consumer'):
+            self.dataset.__dict__.pop('consumer')
+        super(tqdm, self).__exit__(*exc)
 
 
 def get_time():

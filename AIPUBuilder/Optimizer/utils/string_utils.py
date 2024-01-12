@@ -22,3 +22,17 @@ def timestamp_string():
     from datetime import datetime
     import random
     return '_' + str(datetime.timestamp(datetime.now())).replace('.', '_') + '_' + str(random.random()).replace('.', '_') + '_'
+
+
+def string_to_base_type(s: str):
+    import re
+    opt_v = s.strip()
+    if opt_v.upper() == "FALSE":
+        opt_v = False
+    elif opt_v.upper() == "TRUE":
+        opt_v = True
+    elif re.findall('^[-+]?\d+$', opt_v):
+        opt_v = int(opt_v)
+    elif re.findall('^[-+]?[0-9]+\.?[0-9]*$', opt_v):
+        opt_v = float(opt_v)
+    return opt_v

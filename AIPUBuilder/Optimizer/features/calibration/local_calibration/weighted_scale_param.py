@@ -2,6 +2,7 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import cosine_distance
+from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.logger import *
 import torch
 import torch.fft
@@ -90,8 +91,9 @@ def get_min_max_params_from_tensor(x, bits, weight_scale_optimize, is_signed):
         q_min = -1 * q_max-1
     q_range = q_max - q_min
 
-    f_ranges_pos = torch.tensor(abs(max(0.0, x.running_max)), dtype=torch.float32, device=x.betensor.device)
-    f_ranges_neg = torch.tensor(abs(min(0.0, x.running_min)), dtype=torch.float32, device=x.betensor.device)
+    zero_t = torch.zeros_like(x.running_max)
+    f_ranges_pos = torch_tensor(abs(max(zero_t, x.running_max)), device=x.device).to(torch.float32)
+    f_ranges_neg = torch_tensor(abs(min(zero_t, x.running_min)), device=x.device).to(torch.float32)
     f_ranges = [f_ranges_pos, f_ranges_neg]
 
     q_ranges = q_range * torch.ones_like(f_ranges_pos)
@@ -172,7 +174,5 @@ def get_min_max_params_from_tensor(x, bits, weight_scale_optimize, is_signed):
     else:
         fmax = q_ranges/scale
         fmin = fmax - fmax
-    if fmax.dim() < 1:
-        return fmin.item(), fmax.item()
-    else:
-        return fmin, fmax
+
+    return fmin, fmax

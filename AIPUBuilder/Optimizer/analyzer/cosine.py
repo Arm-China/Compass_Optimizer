@@ -8,8 +8,11 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
     check each node's similarity between float graph and quant graph
     '''
     from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_DEBUG, OPT_ERROR
-    from AIPUBuilder.Optimizer.utils.quant_tool_utils import cosine_distance
+    from AIPUBuilder.Optimizer.utils.quant_tool_utils import cosine_distance, linear_dequantize
     from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor
+    from torch.nn import MSELoss as mseloss
+
+    MSE = mseloss()
 
     float_graph.feed_inputs_data(inputs)
     quant_graph.feed_inputs_data(inputs)
@@ -31,8 +34,9 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
                 OPT_ERROR(
                     f"check_nodes_similarity: failed to match tensor in '{n.type} {n.name}': '{float_t.name}' vs '{t.name}'. ")
             float_output = float_t.betensor
-            quant_output = t.betensor + (0 if t.debug_flag else t.zerop)
-            sim = cosine_distance(float_output, quant_output)
+            de_quant_output = linear_dequantize(t.betensor, t.scale, t.zerop, t.key_axis)
+            sim = cosine_distance(float_output, de_quant_output)
+            mse = MSE(float_output, de_quant_output).item()
             if sim < 0.9:
                 OPT_DEBUG(t.name, ' accuracy too low : %f' % sim)
                 # ref = float_t.betensor+float_t.zerop
@@ -50,8 +54,10 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
                 # plt.show()
             if t.similarity is None:
                 t.similarity = [sim]
+                t.mse = [mse]
             else:
                 t.similarity.append(sim)
+                t.mse.append(mse)
     if keep_tensors:
         pass
     else:
@@ -74,10 +80,13 @@ def show_similarity(quant_graph):
         msg = f"layer_type={str(node.type): <{type_max_len+4}} layer_id={node.attrs['layer_id']: <5}"
         sims = []
         for t in node.outputs:
+            t_scale = t.scale[:10] if t.is_perchannel_scales() else t.scale
+            t_zerop = t.zerop[:10] if t.is_perchannel_scales() else t.zerop
             t.similarity = sum(t.similarity) / len(t.similarity)
             sims.append(str(t.similarity))
-            msg += '  cos_dist={: <8.6f}    '.format(t.similarity)
-            msg += 'out.scale={: <12.6f}    out.zerop={: <6.1f}    '.format(t.scale, t.zerop)
+            msg += '  cos_dist={: <8.6f} '.format(t.similarity)
+            msg += f" mse={t.mse}    "
+            msg += 'out.scale={}    out.zerop={}    '.format(t_scale, t_zerop)
             msg += 'out.qbits={: <}    out.qmin={: <}    out.qmax={: <}    '.format(
                 str(t.qbits), str(t.qmin), str(t.qmax))
             msg += 'tensor_name={: <}'.format(t.name)
@@ -103,3 +112,6 @@ def show_similarity(quant_graph):
     out_sims = [t.similarity for t in quant_graph.output_tensors]
     OPT_DEBUG(
         f"graph output_tensors similarity (align with the order of 'output_tensors' in IR header):{str(out_sims)}")
+    out_mse = [t.mse for t in quant_graph.output_tensors]
+    OPT_DEBUG(
+        f"graph output_tensors MSE (align with the order of 'output_tensors' in IR header):{str(out_mse)}")

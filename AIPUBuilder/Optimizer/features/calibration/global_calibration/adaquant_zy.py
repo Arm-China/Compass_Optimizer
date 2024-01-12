@@ -36,17 +36,18 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
             self.n = n.clone(n.name + "_clone_")
 
             def parameterize(t, optim_d, optim_s):
-                it = PyTensor('tmp')
+                class QTensor:
+                    pass
+                it = QTensor()
+                # it = PyTensor('tmp')
                 s = 1.0
                 z = 0
                 if isinstance(t.scale, torch.Tensor):
-                    kshape = [t.shape[ax] if ax == t.key_axis else 1 for ax in range(len(t.shape))]
-                    s = t.scale.float().clone().detach().reshape(kshape)
+                    s = t.broadcast_scale.float().clone().detach()
                 else:
                     s = torch.tensor(t.scale, dtype=torch.float, device=dev)
                 if isinstance(t.zerop, torch.Tensor):
-                    kshape = [t.shape[ax] if ax == t.key_axis else 1 for ax in range(len(t.shape))]
-                    z = t.zerop.float().clone().detach().reshape(kshape)
+                    z = t.broadcast_zerop.float().clone().detach()
                 else:
                     z = torch.tensor(t.zerop, dtype=torch.float, device=dev)
                 it.scale = torch.nn.Parameter(s, requires_grad=True) if optim_s else s

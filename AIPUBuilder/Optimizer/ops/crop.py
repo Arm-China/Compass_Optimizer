@@ -52,3 +52,7 @@ def crop_quantize(self, *args):
     out.zerop = inp.zerop
     out.qbits = inp.qbits
     out.qinvariant = inp.qinvariant
+    if out.key_axis is not None:
+        crops = self.get_param('crops')[out.key_axis]
+        out.scale = out.scale[crops[0]:crops[1]]
+        out.zerop = out.zerop[crops[0]:crops[1]]

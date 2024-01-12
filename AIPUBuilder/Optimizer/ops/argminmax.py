@@ -2,7 +2,6 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.utils import *
 
 
@@ -12,7 +11,7 @@ def argminmax(self, *args):
     method_ = self.get_param("method").upper()
     select_last_index_ = self.get_param("select_last_index")
     if method_ not in ['MAX', 'MIN']:
-        OPT_FATAL("please check method in argminmax op, which supports [MAX, MIN]")
+        OPT_FATAL(f"please check method(now={method_}) in argminmax op, which only supports [MAX, MIN]")
     inp = self.inputs[0].betensor
     out = self.outputs[0]
     if select_last_index_:

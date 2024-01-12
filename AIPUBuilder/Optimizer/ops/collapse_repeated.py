@@ -52,7 +52,7 @@ def collapse_forward(self, *args):
     for b in range(batch):
         idx_mask[b, :new_seq_len[b]] = True
 
-    padding_value = -self.inputs[0].zerop if self.quantized else 0
+    padding_value = -self.inputs[0].zerop[0] if self.quantized else 0
     padding_diff = (0, out_newlen - new_maxlen)
 
     flat_labels = torch.flatten(labels)

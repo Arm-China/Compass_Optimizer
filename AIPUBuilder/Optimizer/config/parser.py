@@ -5,8 +5,9 @@ import os
 import re
 import argparse
 import configparser
-from AIPUBuilder.Optimizer.logger import opt_workflow_register, OPT_ERROR, OPT_INFO, OPT_WARN
+from AIPUBuilder.Optimizer.logger import opt_workflow_register, OPT_ERROR, OPT_INFO, OPT_WARN, OPT_FATAL
 from AIPUBuilder.Optimizer.framework import ALL_OPT_OP_DICT, ALL_OPT_QUANT_OP_DICT
+from AIPUBuilder.Optimizer.utils import *
 from . cfg_fields import ALL_FIELDS, DEFAULT_FIELDS
 
 
@@ -65,47 +66,34 @@ class CfgParser(object):
                         OPT_WARN(f"Optimizer uses the {opt}={ALL_FIELDS[opt].default()}(default value), "
                                  f"which only has the left value in cfg file.")
                     opt_v = defaults[opt]
-                if opt_v.upper() == "FALSE":
-                    opt_v = False
-                elif opt_v.upper() == "TRUE":
-                    opt_v = True
-                elif re.findall('^[-+]?\d+$', opt_v):
-                    opt_v = int(opt_v)
-                elif re.findall('^[-+]?[0-9]+\.?[0-9]*$', opt_v):
-                    opt_v = float(opt_v)
+                opt_v = string_to_base_type(opt_v)
 
-                self.argv.update({opt: opt_v})
+                if opt in ALL_FIELDS.keys():
+                    try:
+                        field_obj = ALL_FIELDS[opt]
+                        opt_flag, parsed_v = field_obj.parse(opt_v)
+                        if not opt_flag:
+                            OPT_FATAL(field_obj.error(opt_v))
+                    except Exception as e:
+                        OPT_ERROR(f"when checking the '{opt}' field in cfg file meets error.")
+                        raise e
+                # special field represtented by (flag, value, original_text)
+                self.argv.update({opt: parsed_v})
 
-            for k in ['model_name', 'output_dir', 'dump_dir', 'quant_ir_name']:
+            for k in ['model_name', 'output_dir', 'dump_dir', 'out_ir_name']:
                 if isinstance(self.argv[k], (bool, int, float)):
                     self.argv[k] = str(self.argv[k])
-
-            if ('quant_ir_name' in self.argv and self.argv['quant_ir_name'] == '') or \
-               'quant_ir_name'not in self.argv:
-                ir_name = self.argv['model_name'] + '_quant'
-                self.argv.update({'quant_ir_name': ir_name})
-
-            auto_search_fields = re.split(r',', self.argv['mixed_precision_auto_search'])
-            self.argv.update({'mixed_precision_auto_search_batches': int(auto_search_fields[0])})
-            self.argv.update({'mixed_precision_auto_search_thres': float(auto_search_fields[1])})
-            self.argv.update({'mixed_precision_auto_search_less': auto_search_fields[2].strip().lower() == 'l'})
+            if ('quant_ir_name' in self.argv and self.argv['quant_ir_name'] != ''):
+                self.argv['out_ir_name'] = str(self.argv['quant_ir_name'])
+            if ('out_ir_name' in self.argv and self.argv['out_ir_name'] == '') or \
+               'out_ir_name'not in self.argv:
+                ir_name = self.argv['model_name'] + '_o'
+                self.argv.update({'out_ir_name': ir_name})
 
         return self.argv
 
     def checker(self, argv):
         ret = True
-        for key, val in argv.items():
-            try:
-                if key not in ALL_FIELDS.keys():
-                    continue
-                field_obj = ALL_FIELDS[key]
-                if field_obj.check(val):
-                    OPT_ERROR(field_obj.error(val))
-                    ret = ret and False
-            except Exception as e:
-                OPT_ERROR(f"when checking the '{key}' field in cfg file meets error.")
-                ret = ret and False
-                raise e
 
         # dataset strategy
         '''
@@ -116,7 +104,7 @@ class CfgParser(object):
             3. [data] [calibration_data] [label] fields in cfg file can not set, and then optimizer will transfer
                 default value('') to dataset plugin, so custom will handle it by themselves.
         '''
-        if argv['mixed_precision_auto_search_batches'] > 0 and argv['metric'] == '':
+        if argv['mixed_precision_auto_search'][0] > 0 and argv['metric'] == '':
             OPT_ERROR("please set 'metric' field in cfg file if want to enable mixed_precision_auto_search.")
             ret = ret and False
 
@@ -131,7 +119,7 @@ class CfgParser(object):
                 OPT_ERROR("please set 'label' field in cfg file if want to metric the model.")
                 ret = ret and False
 
-        if argv['statistic_file'] == '' and argv['calibration_strategy_for_activation'].lower() != 'in_ir':
+        if argv['statistic_file'] == '' and str(argv['calibration_strategy_for_activation']).lower() != 'in_ir':
             if argv['calibration_data'] == '':
                 OPT_WARN(f"please set 'calibration_data' field in cfg file if want to statistic quantization values."
                          f" And Optimizer will use all zeros dataset for statistic tensors information.")
@@ -141,7 +129,7 @@ class CfgParser(object):
             OPT_ERROR("please set 'dataset' field in cfg file if want to statistic quantization values")
             ret = ret and False
 
-        if str(argv['global_calibration']).lower() not in ['none', ''] and argv['calibration_data'] == '':
+        if len(argv['global_calibration']) > 0 and argv['calibration_data'] == '':
             OPT_ERROR("please set 'calibration_data' field in cfg file if want to enable 'global_calibration' field")
             ret = ret and False
 

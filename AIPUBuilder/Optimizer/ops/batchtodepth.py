@@ -2,7 +2,6 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.logger import OPT_ERROR
 
@@ -15,8 +14,8 @@ def batchtodepth(self, *args):
     n, h, w, c = inp.shape
     if self.inputs[0].ir_shape[0] != self.current_batch_size:
         OPT_ERROR("batch size in calibratoin or metric dataset should be equal to batch size in IR")
-    y = inp.view(n//block_size_, block_size_, h, w, c).permute(0, 2, 3, 1, 4).contiguous()
-    out = y.view(n//block_size_, h, w, c*block_size_)
+    y = inp.view(n // block_size_, block_size_, h, w, c).permute(0, 2, 3, 1, 4).contiguous()
+    out = y.view(n // block_size_, h, w, c*block_size_)
     self.outputs[0].betensor = out
     return out
 

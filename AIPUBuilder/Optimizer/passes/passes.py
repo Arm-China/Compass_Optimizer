@@ -4,6 +4,7 @@
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
 from . shrink_pow_exponent_s1 import shrink_pow_exponent_s1
+from . merge_matmul_mul_s1 import merge_matmul_mul_s1
 from . set_unquantifiable import set_unquantifiable
 from . unify_scales_for_multi_inputs_operator import opt_unify_scales_for_multi_inputs_operators
 from . insert_op import (InsertCastOp,
@@ -11,12 +12,17 @@ from . insert_op import (InsertCastOp,
                          InsertDeQuantizeOp,
                          InsertPadOp)
 from .convert_resize_to_convolution import convert_resize_to_convolution
+
 # =========================optimization stage 1 passes============================================
 
 
 def optimization_stage1(graph, config):
     shrink_pow_exponent_s1(graph, config)
-    # update_unquantifiable(graph)
+    if config.enable_pass_merge_matmul_mul:
+        merge_matmul_mul_s1(graph, config)
+    for node in graph.nodes:
+        for ot in node.outputs:
+            ot.key_axis = None
 # =========================optimization stage 1 end   ============================================
 
 
@@ -34,7 +40,30 @@ def optimization_stage3(graph, config):
     for _obj in _insert_obj:
         handler = _obj(graph, config)
         handler.run()
-    pass
+    # revert Matmul (with additional param: fused_multiplier) into Matmul+Mul if Matmul is unquantifiable
+    if config.enable_pass_merge_matmul_mul:
+        def condition_func(node, parent_node, edge_tensor): return (
+            (OpType.MatMul == parent_node.type) and parent_node.params['unquantifiable'] and (
+                'fused_multiplier' in parent_node.attrs)
+        )
+        inserted_nodes = graph.insert_dummy_node_ahead(OpType.Mul, condition_func)
+        for n in inserted_nodes:
+            n.params['unquantifiable'] = True
+            parent_node = n.parents[0]
+            n.attrs.update(parent_node.attrs.clone())
+            fused_multiplier = parent_node.attrs['fused_multiplier']
+            if 'fused_multiplier' in parent_node.params:
+                parent_node.params.pop('fused_multiplier')
+            ft = PyTensor(graph.get_valid_tensor_name(n.inputs[0].name + '_scale'), fused_multiplier)
+            ft.additional = True
+            fn = PyNode(graph.get_valid_node_name(parent_node.name + '_scale'), OpType.Constant)
+            fn.attrs.update(n.attrs.clone())
+            fn.constants['weights'] = ft.clone(graph.get_valid_tensor_name(ft.name + '_w'))
+            fn.params['unquantifiable'] = True
+            fn.additional = True
+            fn.add_output(ft)
+            n.add_input(ft)
+            graph.add_node(fn)
 # =========================optimization stage 3 end   ============================================
 
 
@@ -62,18 +91,24 @@ def adapt_float_subgraph_pass(graph, config):
     # graph is a quantized graph
     # if config.trigger_float_op.lower() != 'disable':
     for qn in graph.nodes:
+        if qn.type in [OpType.Quantize, OpType.DeQuantize] and hasattr(qn, 'additional') and qn.additional:
+            ot = qn.outputs[0]
+            if 'quantize_scale' in qn.attrs and 'quantize_zp' in qn.attrs:
+                # dequantize op ot.scale/ot.zerop is 1.0 and 0
+                if qn.type == OpType.Quantize:
+                    ot.scale = qn.attrs['quantize_scale']
+                    ot.zerop = qn.attrs['quantize_zp']
+                qn.set_ir_field('quantize_scale', qn.attrs['quantize_scale'], Dtype.FP32)
+                qn.set_ir_field('quantize_zp', qn.attrs['quantize_zp'], Dtype.INT32)
+            else:
+                OPT_WARN(f"{qn} needs quantize_scale and quantize_zp in node attrs, please check it.")
+
         if qn.type == OpType.Quantize and hasattr(qn, 'additional') and qn.additional:
             ot = qn.outputs[0]
             qinfo = qn.attrs['qinfo']
             for qk, qv in qinfo.items():
                 ot.__setattr__(qk, qv)
 
-            if 'quantize_scale' in qn.params:
-                ot.scale = qn.params['quantize_scale']
-                ot.zerop = qn.params['quantize_zp']
-            else:
-                ot.scale = qn.constants['quantize_scale'].betensor
-                ot.zerop = qn.constants['quantize_zp'].betensor
             if len(qn.children) == 1 and qn.children[0].type == OpType.Cast:
                 cn = qn.children[0].clone()
                 cn.quantize()
@@ -86,17 +121,27 @@ def adapt_float_subgraph_pass(graph, config):
                 ot.qmax = ct.qmax
                 ot.qbits = ct.qbits
                 if 'quantize_scale' in qn.params:
-                    qn.params['quantize_scale'] = ct.scale
-                    qn.params['quantize_zp'] = ct.zerop
+                    qn.params['quantize_scale'] = ct.scale[0]
+                    qn.params['quantize_zp'] = ct.zerop[0]
                 else:
                     qn.constants['quantize_scale'].betensor = ct.scale
                     qn.constants['quantize_zp'].betensor = ct.zerop
 
-        fd = qn.attrs['trigger_float_op'].name if Dtype == type(
-            qn.attrs['trigger_float_op']) else str(qn.attrs['trigger_float_op']).lower().strip()
+        fd = qn.attrs['trigger_float_op'].name if isinstance(qn.attrs['trigger_float_op'], Dtype) \
+            else str(qn.attrs['trigger_float_op']).lower().strip()
         if fd != 'disable' and qn.params['unquantifiable']:
             # because graph.clear_tensor_quantization_attrs will change the dtype to tensor.betensor.dtype, so we will
             # explicit to change the output tensor to trigger_float_op (has changed to one of [float16, bfloat16, float32])
+            # for SILU float op for TVM tpc,Need add lut to float ir, currently table size is fixed 512
+            # mixed precision search will affect lut_items_in_bits cfg value so fixed to 512 for silu
+            if qn.type == OpType.Activation and qn.params['method'] == 'SILU':
+                lsteps = 2 ** 9
+                lut = linear_dequantize(torch.linspace(-10, 10, steps=lsteps+1,
+                                                       device=qn.inputs[0].betensor.device), 1.0, 0)
+                lut = torch.nn.functional.silu(lut[:lsteps])
+                qn.constants["lut"] = PyTensor(qn.name+"/_silu_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP16)))
+                qn.constants["lut"].dtype = Dtype.FP16
+
             o_dtype = str2dtype(fd)
             for ot in qn.outputs:
                 if is_float(ot.dtype):
@@ -151,8 +196,7 @@ def unify_scales_for_multi_inputs_op_pass(graph, config):
             f"trying to unify scales for concat's branches based on statistic info, now the config is: {optype_cfg_dt}")
         opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt)
     if config.unify_scales_for_multi_inputs_operators:
-        from AIPUBuilder.Optimizer.config.cfg_fields import UnifyScales4MultiInputsOP
-        optype_cfg_dt = UnifyScales4MultiInputsOP.parse(config.unify_scales_for_multi_inputs_operators)
+        optype_cfg_dt = config.unify_scales_for_multi_inputs_operators
         OPT_INFO(
             f"trying to unify input branches' scales for assigned operators based on statistic info, now the config is: {optype_cfg_dt}")
         opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt)

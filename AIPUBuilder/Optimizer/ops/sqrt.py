@@ -42,5 +42,5 @@ def sqrt(self, *args):
             self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
         out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        out.betensor = torch.sqrt(inp.betensor)
+        out.betensor = torch.sqrt(inp.betensor.float())
     return out.betensor

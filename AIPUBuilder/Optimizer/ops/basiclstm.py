@@ -39,39 +39,36 @@ def lstm(self, *args):
         c_initial = torch.cat((c_initial, c_cell[current_c_initial_idx: current_c_initial_idx + 1]), dim=0)
 
     w = self.constants["weights"].betensor.clone()
-    weights = w.permute(1, 0).float()
     bias = self.constants['biases'].betensor.clone().float()
-
+    dev = inp0.device
     if self.quantized:
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[-1] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
-        bias += self.constants['biases'].zerop
+        w += self.constants["weights"].broadcast_zerop
+        bias += self.constants['biases'].broadcast_zerop
+    weights = w.permute(1, 0).float()
     out_sequence = self.get_param('out_sequence')
     activations_list = self.get_param('activations') \
         if 'activations' in self.params else ['SIGMOID', 'TANH', 'TANH']
 
-    h_batch = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
-    h_last = torch.zeros([batch_size, cell_size], device=inp0.betensor.device)
-    c_batch = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
-    c_last = torch.zeros([batch_size, cell_size], device=inp0.betensor.device)
+    h_batch = torch.zeros([batch_size, time_step, cell_size], device=dev)
+    h_last = torch.zeros([batch_size, cell_size], device=dev)
+    c_batch = torch.zeros([batch_size, time_step, cell_size], device=dev)
+    c_last = torch.zeros([batch_size, cell_size], device=dev)
 
     if not self.quantized:
         threshold = self.get_param('threshold', optional=True, default_value=float('inf'))
         cell_clip = self.get_param('cell_clip', optional=True, default_value=float('inf'))
         forget_bias = self.get_param('forget_bias', optional=True, default_value=0.0)
 
-        f_lut_in = torch.zeros([batch_size, time_step, 3*cell_size], device=inp0.betensor.device)
-        f_lut_out = torch.zeros([batch_size, time_step, 3*cell_size], device=inp0.betensor.device)
-        g_lut_in = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
-        g_lut_out = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
-        h_lut_in = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
-        h_lut_out = torch.zeros([batch_size, time_step, cell_size], device=inp0.betensor.device)
+        f_lut_in = torch.zeros([batch_size, time_step, 3*cell_size], device=dev)
+        f_lut_out = torch.zeros([batch_size, time_step, 3*cell_size], device=dev)
+        g_lut_in = torch.zeros([batch_size, time_step, cell_size], device=dev)
+        g_lut_out = torch.zeros([batch_size, time_step, cell_size], device=dev)
+        h_lut_in = torch.zeros([batch_size, time_step, cell_size], device=dev)
+        h_lut_out = torch.zeros([batch_size, time_step, cell_size], device=dev)
 
         for b in range(batch_size):
-            h_all = torch.zeros([1, cell_size], device=inp0.betensor.device, dtype=torch.float)
-            c_all = torch.zeros([1, cell_size], device=inp0.betensor.device, dtype=torch.float)
+            h_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
+            c_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
             h_prev = torch.unsqueeze(h_initial[b], dim=0)
             c_prev = torch.unsqueeze(c_initial[b], dim=0)
             for ts in range(time_step):
@@ -168,15 +165,15 @@ def lstm(self, *args):
         lut_out_bits = self.outputs[0].qbits
 
         # Temporarily set it to zero because C quantization method is symmetric
-        c_zerop = torch.zeros(2 * time_step, device=inp0.betensor.device)
+        c_zerop = torch.zeros(2 * time_step, device=dev)
 
         scale_ = self.constants["scale"].betensor
         shift_ = self.constants["shift"].betensor
         diff_shifts_ = self.constants["diff_shifts"].betensor
 
-        if isinstance(self.constants["weights"].scale, torch.Tensor):
-            scale = scale_.to(inp0.betensor.device)
-            shift = shift_.to(inp0.betensor.device)
+        if is_torch_tensor_with_multi_data(self.constants["weights"].scale):
+            scale = scale_.to(dev)
+            shift = shift_.to(dev)
             scale_ = []
             shift_ = []
             step_length = [1, cell_size * 4, cell_size, 1, 1]
@@ -204,8 +201,8 @@ def lstm(self, *args):
         act_qmax = 2 ** 31 - 1
         act_qmin = -2 ** 31
         for b in range(batch_size):
-            h_all = torch.zeros([1, cell_size], device=inp0.betensor.device, dtype=torch.float)
-            c_all = torch.zeros([1, cell_size], device=inp0.betensor.device, dtype=torch.float)
+            h_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
+            c_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
             h_prev = torch.unsqueeze(h_initial[b], dim=0)
             c_prev = torch.unsqueeze(c_initial[b], dim=0)
             for ts in range(time_step):
@@ -325,6 +322,7 @@ def lstm_quantize(self, *args):
     forget_bias = self.get_param('forget_bias', optional=True, default_value=0.0)
     activations_list = self.get_param('activations') if 'activations' in self.params else ['SIGMOID', 'TANH', 'TANH']
     cell_size = self.get_param('cell_size')
+    dev = inp.device
 
     w = self.constants["weights"]
     b = self.constants["biases"]
@@ -378,8 +376,8 @@ def lstm_quantize(self, *args):
         w_scale_expand.extend([w.scale] * w_out_cnum)
         w_zerop_expand.extend([w.zerop] * w_out_cnum)
         scale_zp_shape = [w.betensor.shape[0]] + [1 for i in range(len(w.betensor.shape) - 1)]
-    w_scale_expand = torch.tensor(w_scale_expand, device=inp.betensor.device)
-    w_zerop_expand = torch.tensor(w_zerop_expand, device=inp.betensor.device)
+    w_scale_expand = torch.tensor(w_scale_expand, device=dev)
+    w_zerop_expand = torch.tensor(w_zerop_expand, device=dev)
     w.betensor = linear_quantize_clip(w.betensor, w_scale_expand.reshape(scale_zp_shape),
                                       w_zerop_expand.reshape(scale_zp_shape), w.qmin, w.qmax)
     w.qbits = q_bits_weight
@@ -432,10 +430,10 @@ def lstm_quantize(self, *args):
         sum_to_tanh_do_shift += 8
         c_tanh_do_shift += 8
     elif dtype == 'int16':
-        shift0 = torch.tensor([hw_do_shift], device=inp.betensor.device)
+        shift0 = torch.tensor([hw_do_shift], device=dev)
         shift1 = sum_to_sigm_do_shift if isinstance(sum_to_sigm_do_shift, torch.Tensor) else \
-            torch.tensor([sum_to_sigm_do_shift], device=inp.betensor.device)
-        shift2 = torch.tensor([15], device=inp.betensor.device)
+            torch.tensor([sum_to_sigm_do_shift], device=dev)
+        shift2 = torch.tensor([15], device=dev)
         lut_shift = torch.cat((shift0, shift1, shift2)).min().item()
 
     hout_do_scale, hout_do_scale_type, hout_do_shift, hout_do_shift_type = \
@@ -444,25 +442,25 @@ def lstm_quantize(self, *args):
                                        force_shift_positive=self.force_shift_positive)
 
     if QuantMode.is_per_channel(q_mode_weight):
-        scales = torch.cat((torch.tensor([hw_do_scale], device=inp.betensor.device),
+        scales = torch.cat((torch.tensor([hw_do_scale], device=dev),
                             sum_to_sigm_do_scale,
                             sum_to_tanh_do_scale[cell_size: 2 * cell_size],
-                            torch.tensor([c_tanh_do_scale], device=inp.betensor.device),
-                            torch.tensor([hout_do_scale], device=inp.betensor.device)))
-        shifts = torch.cat((torch.tensor([hw_do_shift], device=inp.betensor.device),
+                            torch.tensor([c_tanh_do_scale], device=dev),
+                            torch.tensor([hout_do_scale], device=dev)))
+        shifts = torch.cat((torch.tensor([hw_do_shift], device=dev),
                             sum_to_sigm_do_shift,
                             sum_to_tanh_do_shift[cell_size: 2 * cell_size],
-                            torch.tensor([c_tanh_do_shift], device=inp.betensor.device),
-                            torch.tensor([hout_do_shift], device=inp.betensor.device)))
+                            torch.tensor([c_tanh_do_shift], device=dev),
+                            torch.tensor([hout_do_shift], device=dev)))
     else:
         scales = torch.tensor([hw_do_scale, sum_to_sigm_do_scale, sum_to_tanh_do_scale, c_tanh_do_scale, hout_do_scale],
-                              device=inp.betensor.device)
+                              device=dev)
         shifts = torch.tensor([hw_do_shift, sum_to_sigm_do_shift, sum_to_tanh_do_shift, c_tanh_do_shift, hout_do_shift],
-                              device=inp.betensor.device)
+                              device=dev)
 
-    c_do_scales = torch.zeros(2 * time_step, device=inp.betensor.device)
-    c_do_shifts = torch.zeros(2 * time_step, device=inp.betensor.device)
-    # c_do_zerop = torch.zeros(2 * time_step, device=inp.betensor.device)
+    c_do_scales = torch.zeros(2 * time_step, device=dev)
+    c_do_shifts = torch.zeros(2 * time_step, device=dev)
+    # c_do_zerop = torch.zeros(2 * time_step, device=dev)
 
     c_scale = torch.zeros(time_step + 1)
     diff_shifts = torch.zeros(time_step)

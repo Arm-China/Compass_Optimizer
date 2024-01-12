@@ -10,11 +10,46 @@ OPT_INT_MIN = -2 ** 31
 OPT_INT_MAX = 2 ** 31 - 1
 
 
+def is_torch_tensor_with_multi_data(var):
+    return True if isinstance(var, torch.Tensor) and var.numel() > 1 else False
+
+
+def is_torch_tensor(var):
+    return True if isinstance(var, torch.Tensor) else False
+
+
 def construct_torch_tensor(var, device=None):
-    if isinstance(var, torch.Tensor):
-        return var.to(device=device)
-    else:
-        return torch.tensor(var, device=device)
+    try:
+        dev = device if device is not None else "cpu"
+        if var is None:
+            constructed_t = var
+        elif is_torch_tensor(var):
+            constructed_t = var.to(device=dev)
+        else:
+            constructed_t = torch.tensor(var, device=dev)
+        return constructed_t
+    except Exception as e:
+
+        OPT_WARN(f"construct torch tensor failed, and the error message is {e}, we will directly return the orignal "
+                 f"input argument = {vars}")
+        raise e
+        # return var
+
+
+torch_tensor = construct_torch_tensor
+
+
+def batch_construct_torch_tensor(vars, device=None):
+    if not isinstance(vars, (list, tuple)):
+        vars = [vars]
+    constructed_t = []
+    for var in vars:
+        constructed_t.append(construct_torch_tensor(var, device=device))
+    return constructed_t[0] if len(constructed_t) == 1 else constructed_t
+
+
+def to_list(x):
+    return [x] if not isinstance(x, list) else x
 
 
 def nhwc2nchw(x):

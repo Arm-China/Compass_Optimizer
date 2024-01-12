@@ -26,8 +26,8 @@ def sort(self, *args):
     dim = self.get_param('axis', optional=True, default_value=-1)
     descending = self.get_param('descending', optional=True, default_value=True)
     inpt = self.inputs[0].betensor
-    sorted, indices = torch.sort(inpt, dim=dim, descending=descending)
-    self.outputs[0].betensor = sorted
+    st, indices = torch.sort(inpt, dim=dim, descending=descending)
+    self.outputs[0].betensor = st
     self.outputs[1].betensor = indices
     return [o.betensor for o in self.outputs]
 

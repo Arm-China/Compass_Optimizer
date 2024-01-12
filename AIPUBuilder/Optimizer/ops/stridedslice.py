@@ -53,3 +53,17 @@ def stridedslice_quantize(self, *args):
     out.qbits = inp.qbits
     out.qmin, out.qmax = inp.qmin, inp.qmax
     out.qinvariant = inp.qinvariant
+
+    if out.is_perchannel_quantization():
+        strides = self.get_param('strides')
+        begin = self.get_param('begin')
+        end = self.get_param('end')
+        upper_bond = self.get_param('upper_bound', optional=True, default_value=False)
+
+        b = begin[out.key_axis]
+        e = end[out.key_axis]
+        s = strides[out.key_axis]
+        index = torch.arange(b, e, s, device=inp.device)
+
+        out.scale = inp.scale.index_select(0, index)
+        out.zerop = inp.zerop.index_select(0, index)

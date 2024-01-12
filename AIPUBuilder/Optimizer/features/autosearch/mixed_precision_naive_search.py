@@ -112,9 +112,7 @@ class NaiveAutoSearchMixedPrecision(object):
     #################################################################
 
     def auto_search(self):
-        self.abatches = self.hparams.mixed_precision_auto_search_batches
-        self.athres = self.hparams.mixed_precision_auto_search_thres
-        self.aless = self.hparams.mixed_precision_auto_search_less
+        self.abatches, self.athres, self.aless = self.hparams.mixed_precision_auto_search
         # get the original metric score first
         vdataloader = copy.deepcopy(self.validation_dataloader)
         fmetrics = copy.deepcopy(self.fmetrics)

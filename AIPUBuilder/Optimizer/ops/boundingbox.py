@@ -4,8 +4,8 @@
 from AIPUBuilder.Optimizer.ops.pad import pad
 from AIPUBuilder.Optimizer.ops.multibox_transform_Loc import calculate_box_quantization, apply_box_deltas, apply_box_deltas_q
 from AIPUBuilder.Optimizer.utils import *
+from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.logger import OPT_DEBUG, OPT_INFO, OPT_ERROR
 
 # IR
@@ -23,15 +23,15 @@ register_optype('BoundingBox')
 
 @op_register(OpType.BoundingBox)
 def boundingbox(self, *args):
-    proposal_box = self.inputs[0].betensor + (torch.tensor(
-        0) if not self.quantized else torch.tensor(self.inputs[0].zerop))
+    proposal_box = self.inputs[0].betensor + (torch_tensor(0, device=self.inputs[0].device)
+                                              if not self.quantized else self.inputs[0].zerop)
     box_delta = self.inputs[1].betensor
 
     if not self.quantized:
         refined_box = apply_box_deltas(self, proposal_box, box_delta)
     else:
         # x,y (box_delta[0:2]) need convert to symetric,dh,dw as lut index, zerop is aborbed to lut
-        box_delta[..., 0:2] = box_delta[..., 0:2]+torch.tensor(self.inputs[1].zerop)
+        box_delta[..., 0:2] = box_delta[..., 0:2] + self.inputs[1].zerop
         refined_box = apply_box_deltas_q(self, proposal_box, box_delta, self.inputs[0].dtype, self.inputs[1].dtype)
         '''
         #x,y (box_delta[0:2]) need convert to symetric,dh,dw as lut index, zerop is aborbed to lut
@@ -49,7 +49,7 @@ def boundingbox_quantize(self, *args):
     out = self.outputs[:]
 
     # ################################get initial params###########################################
-    STD_DIV = self.params['std_div'] if 'std_div' in self.params else [10, 10, 5, 5]
+    STD_DIV = self.get_param('std_div', optional=True, default_value=[10, 10, 5, 5])
 
     calculate_box_quantization(self, inp[0], inp[1], STD_DIV)
     '''
@@ -117,11 +117,11 @@ def boundingbox_quantize(self, *args):
     #calculate_box_quantization(self, inp[0], inp[1], STD_DIV)
     '''
     # set dtpye and qbits
-    out[0].scale, out[0].zerop, out[0].dtype, out[0].qbits = 32767, 0, Dtype.INT16, 16     # box
+    out[0].scale, out[0].zerop, out[0].dtype, out[0].qbits = 32767., 0, Dtype.INT16, 16     # box
     out[0].qinvariant = inp[0].qinvariant
     # out[1] and out[2] will be deleted in IR
     for idx in range(1, len(self.outputs)):
-        out[idx].scale = 1
+        out[idx].scale = 1.
         out[idx].zerop = 0
         out[idx].dtype = Dtype.UINT16
         out[idx].qbits = 16

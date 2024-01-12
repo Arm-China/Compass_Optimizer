@@ -21,7 +21,8 @@ def spacetobatch(self, *args):
         OPT_ERROR("batch size in calibratoin or metric dataset should be equal to batch size in IR")
     # inp is NHWC format
     paddings = (0, 0, pad_left, pad_right, pad_top, pad_bottom)
-    pad_value = -self.inputs[0].zerop if self.quantized else 0
+    # TODO: support per-channel zerop and pad the per-channel zerop
+    pad_value = -self.inputs[0].zerop[0] if self.quantized else 0
     y = torch.nn.functional.pad(inp, paddings, value=pad_value)
     n, h, w, c = y.shape
     y = y.view(n, h//block_size_y, block_size_y, w//block_size_x, block_size_x, c)

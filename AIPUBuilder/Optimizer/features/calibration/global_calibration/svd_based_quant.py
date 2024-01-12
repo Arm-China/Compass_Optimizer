@@ -2,9 +2,8 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
-from AIPUBuilder.Optimizer.logger import tqdm
+from AIPUBuilder.Optimizer.logger import tqdm, OPT_ERROR
 import torch
-import re
 import sys
 
 
@@ -117,7 +116,11 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
             min_dist = torch.dist(S, qS)
             # zero = torch.clamp(zerop.round(), -2 ** (out.qbits - 1) + 1, 2 ** (out.qbits - 1))
-            for s in torch.linspace(alpha * scale, beta * scale, nsteps):
+            # TODO: support per-channel
+            if is_torch_tensor_with_multi_data(scale):
+                OPT_ERROR(f"svd now only support per-tensor quantization.")
+            start, end = alpha * scale.item(), beta * scale.item()
+            for s in torch.linspace(start, end, nsteps):
                 qbetensor = linear_quantize_clip(filt_out, s, zerop, q_min, q_max)
                 deqbetenor = linear_dequantize(qbetensor, s, zerop)
                 qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)

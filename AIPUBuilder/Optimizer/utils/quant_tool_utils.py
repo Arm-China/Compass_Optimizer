@@ -9,6 +9,10 @@ from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
 
 SHIFT_DTYPE = Dtype.INT8
+OP_ONLY_CHANGE_SHAPE = [OpType.Reshape, OpType.Permute, OpType.Transpose, OpType.Squeeze, OpType.Tile, OpType.Repeat, OpType.Pad,
+                        OpType.StridedSlice, OpType.Slice, OpType.Split, OpType.Crop,
+                        OpType.SpaceToDepth, OpType.DepthToSpace, OpType.SpaceToBatch, OpType.BatchToSpace, OpType.BatchToDepth,
+                        ]
 OP_NEED_ALIGN_INP_OUT_DTYPE = [OpType.GRUv3, OpType.GRUv1, OpType.BasicLSTM]
 OP_NEED_ADD_PAD_AVOID_ASYNC_DIVIDE = [OpType.Pooling, OpType.Pooling3D]
 ASYM2SYM_OP_DICT = {  # (op.type)      : (tensor_idx,         QuantMode)
@@ -16,6 +20,10 @@ ASYM2SYM_OP_DICT = {  # (op.type)      : (tensor_idx,         QuantMode)
     OpType.GRUv1:      ((1,),       "per_tensor_symmetric_restricted_range"),
     OpType.GRUv3:      ((1,),       "per_tensor_symmetric_restricted_range"),
 }
+
+ABSORB_INPUT_SCALE_OP = [OpType.Convolution, OpType.FullyConnected, OpType.LayerNorm]
+AIFF_AHEAD_SHIFT_OP = [OpType.Convolution, OpType.Convolution3D, OpType.ConvTranspose,
+                       OpType.ConvTranspose3D, OpType.DepthwiseConv, OpType.FullyConnected, OpType.MatMul]
 
 #########################################################################################################################
 # class routines
@@ -179,9 +187,10 @@ def layer_similarity(n, qn):
 
 
 def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
-    assert QuantMode.is_valid(quant_mode), "%s is not one of '%s'" % (quant_mode, str(QuantMode.mode_names()))
-    assert bits > 0
+    assert QuantMode.is_valid(quant_mode), f"{quant_mode} is not one of [{QuantMode.mode_names}]"
+    assert bits > 0, "quantization bits should be > 0, now is {bits}"
     QUANTIZE_ZERO_BAND = torch.finfo(torch.float32).eps
+    dev = x.betensor.device
 
     q_max, q_min = 2 ** bits - 1, 0
     if is_signed:
@@ -193,9 +202,6 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
             q_min = -1 * q_max
     q_range = q_max - q_min
 
-    f_ranges = torch.tensor(x.max - x.min, dtype=torch.float32, device=x.betensor.device)
-    f_zfactor = torch.tensor(x.min, dtype=torch.float32, device=x.betensor.device)
-    f_zoffset = torch.zeros_like(f_zfactor)
     if QuantMode.is_per_channel(quant_mode):
         if QuantMode.is_asymmetric(quant_mode):
             f_ranges = x.max_key_axis - x.min_key_axis
@@ -209,14 +215,15 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
             f_zoffset = torch.zeros_like(f_zfactor)
     else:
         if QuantMode.is_asymmetric(quant_mode):
-            f_ranges = torch.tensor(x.max - x.min, dtype=torch.float32, device=x.betensor.device)
-            f_zfactor = torch.tensor(x.min, dtype=torch.float32, device=x.betensor.device)
+            f_ranges = torch_tensor(x.max - x.min, device=dev).to(torch.float32)  # pylint: disable=no-member
+            f_zfactor = torch_tensor(x.min, device=dev).to(torch.float32)  # pylint: disable=no-member
             f_zoffset = q_min * torch.ones_like(f_zfactor)
         else:
-            f_ranges = torch.tensor(max(abs(x.max), abs(x.min)), dtype=torch.float32, device=x.betensor.device)
+            f_ranges = torch_tensor(max(abs(x.max), abs(x.min)), device=dev).to(  # pylint: disable=no-member
+                torch.float32)
             if is_signed:
                 f_ranges = f_ranges * 2.0
-            f_zfactor = torch.tensor(0.0, dtype=torch.float32, device=x.betensor.device)
+            f_zfactor = torch.tensor(0.0, dtype=torch.float32, device=dev)
             f_zoffset = torch.zeros_like(f_zfactor)
     q_ranges = q_range * torch.ones_like(f_ranges)
     f_ranges = torch.where(f_ranges < QUANTIZE_ZERO_BAND, q_ranges, f_ranges)
@@ -224,28 +231,34 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
     scale = q_ranges / f_ranges
     zerop = torch.clamp(scale.mul(f_zfactor).round() - f_zoffset, -2 ** (bits - 1) + 1, 2 ** (bits - 1))
 
-    if scale.dim() < 1:
-        return scale.item(), zerop.item(), q_min, q_max, bits2dtype(bits, is_signed)
-    else:
-        return scale, zerop, q_min, q_max, bits2dtype(bits, is_signed)
+    return scale, zerop, q_min, q_max, bits2dtype(bits, is_signed)
 
 
-def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max):
-    x_t = construct_torch_tensor(x)
-    clamp_min_t = construct_torch_tensor(clamp_min, x_t.device)
-    clamp_max_t = construct_torch_tensor(clamp_max, x_t.device)
+def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max, key_axis=None):
+    dev = x.device if isinstance(x, torch.Tensor) else None
+    x_t, scale_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
+        [x, scale, zero_point, clamp_min, clamp_max], device=dev)
+    if key_axis is not None:
+        scale_shape = [-1 if s == key_axis else 1 for s in range(x_t.dim())]
+        scale_t = scale_t.reshape(scale_shape)
+        zero_point_t = zero_point_t.reshape(scale_shape)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(scale * x_t.float() - zero_point), clamp_min_t, clamp_max_t).float()
+    y = torch.clamp(torch.round(scale_t * x_t.float() - zero_point_t), clamp_min_t, clamp_max_t).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))
     if xmin <= clamp_min_t.min().item() and xmax >= clamp_max_t.max().item():
-        return y.to(x_type)
-    else:
-        return y
+        y = y.to(x_type)
+    return y
 
 
-def linear_dequantize(x, scale, zero_point):
-    return (x + zero_point) / (scale.float() if isinstance(scale, torch.Tensor) else float(scale))
+def linear_dequantize(x, scale, zero_point, key_axis=None):
+    dev = x.device if isinstance(x, torch.Tensor) else None
+    x_t, scale_t, zero_point_t = batch_construct_torch_tensor([x, scale, zero_point], device=dev)
+    if key_axis is not None:
+        scale_shape = [-1 if s == key_axis else 1 for s in range(x_t.dim())]
+        scale_t = scale_t.reshape(scale_shape)
+        zero_point_t = zero_point_t.reshape(scale_shape)
+    return (x_t + zero_point_t) / scale_t
 
 
 def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mult_bits_ceil=15, shift_bits_ceil=31, force_shift_positive=False):
@@ -276,33 +289,44 @@ def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mul
         return multiplier, multiplier_type, shift_bits, shiftbits_type
 
 
-def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max):
-    x_t = x if isinstance(x, torch.Tensor) else torch.tensor(x)
+def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max, key_axis=None):
+    dev = x.device if isinstance(x, torch.Tensor) else None
+    x_t, multiplier_t, shift_bits_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
+        [x, multiplier, shift_bits, zero_point, clamp_min, clamp_max], device=dev)
+    if key_axis is not None:
+        broadcast_shape = [-1 if s == key_axis else 1 for s in range(x_t.dim())]
+        multiplier_t = multiplier_t.reshape(broadcast_shape)
+        shift_bits_t = shift_bits_t.reshape(broadcast_shape)
+        zero_point_t = zero_point_t.reshape(broadcast_shape)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(x_t.double() * multiplier * (0.5 ** shift_bits)) -
-                    zero_point, clamp_min, clamp_max).float()
+    y = torch.clamp(torch.round(x_t.double() * multiplier_t * (0.5 ** shift_bits_t)) -
+                    zero_point_t, clamp_min_t, clamp_max_t).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))
     if (xmin <= clamp_min) and (xmax >= clamp_max):
-        return y.to(x_type)
-    else:
-        return y
+        y = y.to(x_type)
+    return y
 
 
-def linear_requantize_floor(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max):
-    x_t = x if isinstance(x, torch.Tensor) else torch.tensor(x)
+def linear_requantize_floor(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max, key_axis=None):
+    dev = x.device if is_torch_tensor(x) else None
+    x_t, multiplier_t, shift_bits_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
+        [x, multiplier, shift_bits, zero_point, clamp_min, clamp_max], device=dev)
+    if key_axis is not None:
+        broadcast_shape = [-1 if s == key_axis else 1 for s in range(x_t.dim())]
+        multiplier_t = multiplier_t.reshape(broadcast_shape)
+        shift_bits_t = shift_bits_t.reshape(broadcast_shape)
+        zero_point_t = zero_point_t.reshape(broadcast_shape)
     x_type = x_t.dtype
-    shift_bits = shift_bits.to(torch.long) if isinstance(
-        shift_bits, torch.Tensor) else torch.tensor(shift_bits, dtype=torch.long, device=x_t.device)
-    y_tmp = torch.round(x_t.double() * multiplier).to(torch.long)
-    y_tmp = torch.where(shift_bits >= 0, y_tmp >> shift_bits, y_tmp << torch.abs(shift_bits))
-    y = torch.clamp(y_tmp - zero_point, clamp_min, clamp_max).float()
-    y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
+    shift_bits_t = shift_bits_t.long()
+    y_tmp = torch.round(x_t.double() * multiplier_t).long()
+    y_tmp = torch.where(shift_bits_t >= 0, y_tmp >> shift_bits_t, y_tmp << torch.abs(shift_bits_t))
+    y = torch.clamp(y_tmp - zero_point_t, clamp_min_t, clamp_max_t).float()
+    y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))
     if (xmin <= clamp_min) and (xmax >= clamp_max):
-        return y.to(x_type)
-    else:
-        return y
+        y = y.to(x_type)
+    return y
 
 
 def unify_shifts_for_aiff_with_per_n_channel_quant(node: PyNode, xt: PyTensor, xt_q_mode: str, xt_q_bits: int, xt_signed: bool, rescales_calc_func, initial_group: int = 0):
@@ -311,7 +335,7 @@ def unify_shifts_for_aiff_with_per_n_channel_quant(node: PyNode, xt: PyTensor, x
     # because the scale computation steps may be lossy (there are very tiny channel scales)
     # so we have to merge min/max to per-n-channel groups from the beginning
     # and use the rescales_calc_func to recompute rescales again and again
-    multiplier_bits = node.attrs['multiplier_bits']
+    multiplier_bits = node.get_attrs('multiplier_bits', optional=True, default_value=node.attrs['q_bits_activation'])
     force_shift_positive = node.force_shift_positive
     snum = xt.min_key_axis.numel()
     mgroup = snum if initial_group < 1 else min(initial_group, snum)
@@ -383,3 +407,47 @@ def whether_align_to_out_scale(n):
             if len(qn.outputs) > 0 and qn.outputs[0].scale != iscale:
                 scale_changed.append(True)
         return len(scale_changed) > 1
+
+
+def aiff_clear_lower_bits_for_bias(b: torch.Tensor, node: PyNode = None):
+    mbits = range2bits(b.min(), b.max())[0]
+    lbits = 32
+    if node is not None:
+        lbits = node.get_attrs('bias_effective_bits', optional=True, default_value=32)
+    if mbits <= lbits:
+        return b
+    shift = mbits - lbits
+    b = (b.round().long() >> shift) << shift
+    return b.float()
+
+
+def aiff_merge_shifts(scales: torch.Tensor, shifts: torch.Tensor):
+    if not isinstance(scales, torch.Tensor):
+        scales = torch.tensor(scales)
+        shifts = torch.tensor(shifts)
+    m_shift = shifts.int().max()
+    scale_norm = scales * 2 ** (m_shift - shifts)
+    remain_shift = torch.log2(scale_norm.max() + 1).ceil() - 15
+    if remain_shift > 0:
+        scale_norm = scale_norm >> remain_shift
+        m_shift -= remain_shift
+    return scale_norm, m_shift
+
+
+def aiff_ahead_shift_bias(x: torch.Tensor, origin_shift: torch.Tensor,
+                          biases=None, remain_shift=20):
+    if not isinstance(origin_shift, torch.Tensor):
+        origin_shift = torch.tensor(origin_shift)
+    origin_shift = origin_shift.flatten()[0].item()
+    if origin_shift > remain_shift:
+        # ITP only takes 32bit data
+        data = linear_requantize(x, 1.0, (origin_shift - remain_shift), 0, -2147483648, 2147483647)
+        if biases is not None:
+            biases = (biases.round().long() >> (origin_shift - remain_shift))
+            biases = torch.clamp(biases, -2147483648, 2147483647).float()
+    else:
+        data = torch.clamp(x, -2147483648, 2147483647).float()
+        remain_shift = origin_shift
+    if biases is not None:
+        data = data.float() + biases.float()
+    return data, remain_shift

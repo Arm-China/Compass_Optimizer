@@ -21,7 +21,7 @@ def graph_inference(graph, g_forward, dataloader, metrics, with_float=False, max
     desc = 'float metric batch' if with_float else 'quant metric batch'
     graph.current_batch_size = dataloader.batch_size
     current_batch_idx = 0
-    with tqdm(dataloader, desc=desc, file=sys.stdout, disable=disable_tqdm) as pbar:
+    with tqdm(dataloader, desc=desc, file=sys.stdout, disable=disable_tqdm, consumer=graph) as pbar:
         for i, sample in enumerate(pbar):
             graph.current_batch_idx = current_batch_idx
             current_batch_idx += 1
@@ -95,29 +95,19 @@ class QuantizeGraph(PyGraph):
 
     def statistic(self, inputs, config):
         import sys
+        import re
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import TensorShape, PyTensor
         from AIPUBuilder.Optimizer.utils import QuantMode
-        from AIPUBuilder.Optimizer.config import CalibrationStrategyField, TrimInfinityField
-        from AIPUBuilder.Optimizer.logger import tqdm, OPT_DEBUG
+        from AIPUBuilder.Optimizer.config import CalibrationStrategyField
+        from AIPUBuilder.Optimizer.logger import tqdm, OPT_DEBUG, OPT_ERROR
 
         time_saving_mode = not config.save_statistic_info
-        trim_inf_c, trim_inf_v = TrimInfinityField.parse(config.trim_infinity_before_statistic)
         trim_inf = {}
         for n in self.nodes:
             dv = ((float('-inf'), float('inf')), '')
-            if trim_inf_c == 1:
-                trim_inf[n] = trim_inf_v
-            elif trim_inf_c == 2:
-                tname = n.type.name.lower().strip()
-                trim_inf[n] = trim_inf_v[tname] if tname in trim_inf_v.keys() else dv
-            elif trim_inf_c == 3:
-                layer_id = int(n.attrs['layer_id'])
-                trim_inf[n] = trim_inf_v[layer_id] if layer_id in trim_inf_v.keys() else dv
-            else:
-                trim_inf[n] = dv
-            if trim_inf[n] != dv:
-                OPT_DEBUG(
-                    f"{n.type}, layer_id={n.attrs['layer_id']}, layer_name={n.name}, infinite values will be trimed {trim_inf[n]} before statistic", log_once=True)
+            tcmd = [x for x in re.split(
+                r',|\(|\)', n.attrs['trim_infinity_before_statistic'].strip()) if x.lower().strip()]
+            trim_inf[n] = dv if len(tcmd) < 3 else ((float(tcmd[1]), float(tcmd[2])), str(tcmd[0]))
 
         if not self.constants_statisticed:
             with tqdm(total=len(self.nodes), desc='statistic weights and biases', file=sys.stdout, leave=False) as pbar:
@@ -134,11 +124,9 @@ class QuantizeGraph(PyGraph):
                                 if not (QuantMode.is_per_channel(qmethod_wht) or n.get_param('group', optional=True, default_value=1) > 1):
                                     key_axis = None
                                 r = CalibrationStrategyField._need_statistic_info(cstrategy)
-                                if not r['histc']:
-                                    histc_bins = None
-                                if not r['std_mean']:
-                                    statistic_std_mean = False
-                            v.statistic(running_statistic_momentum, key_axis=key_axis,
+                                histc_bins = None if not r['histc'] else histc_bins
+                                statistic_std_mean = False if not r['std_mean'] else statistic_std_mean
+                            v.statistic(running_statistic_momentum, key_axis=key_axis, key_axis_g=v.key_axis_g,
                                         histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
                                         trim_infinity=trim_inf[n],
                                         reset=True)
@@ -159,27 +147,32 @@ class QuantizeGraph(PyGraph):
             if not n.quantized:
                 r = CalibrationStrategyField._need_statistic_info(astrategy)
                 if time_saving_mode:
-                    if not r['histc']:
-                        histc_bins = None
-                    if not r['std_mean']:
-                        statistic_std_mean = False
-                for o in n.outputs:
-                    o.statistic(running_statistic_momentum, key_axis=None,
-                                histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
-                                trim_infinity=trim_inf[n],
-                                reset=not self.current_batch_idx)
-                for p in n.placeholders:
-                    p.statistic(running_statistic_momentum, key_axis=None,
-                                histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
-                                trim_infinity=trim_inf[n],
-                                reset=not self.current_batch_idx)
+                    histc_bins = None if not r['histc'] else histc_bins
+                    statistic_std_mean = False if not r['std_mean'] else statistic_std_mean
+                try:
+                    for o in n.outputs:
+                        key_axis = o.key_axis if o.ir_shape != TensorShape([]) else None
+                        o.statistic(running_statistic_momentum, key_axis=key_axis, key_axis_g=o.key_axis_g,
+                                    histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
+                                    trim_infinity=trim_inf[n],
+                                    reset=not self.current_batch_idx)
+                    for p in n.placeholders:
+                        p_key_axis = None if not QuantMode.is_per_channel(qmethod_act) else p.key_axis
+                        p.statistic(running_statistic_momentum, key_axis=p_key_axis, key_axis_g=p.key_axis_g,
+                                    histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
+                                    trim_infinity=trim_inf[n],
+                                    reset=not self.current_batch_idx)
+                except Exception as e:
+                    OPT_ERROR(f"{n}, {o} statistic failed")
+                    raise e
             for pld in n.placeholders:
                 del pld.betensor
                 pld.betensor = tz
         for n in self.nodes:
             for t in n.outputs:
-                del t.betensor
-                t.betensor = tz
+                if t not in self.output_tensors:
+                    del t.betensor
+                    t.betensor = tz
         self.reset_edge_tensors_ref_count()
 
     def save_statistic_info(self, statistic_info_fname):
@@ -449,6 +442,40 @@ class QuantizeGraph(PyGraph):
         return inserted_op_list
 
     def insert_dummy_node_ahead(self, ntype, condition_func=lambda node, parent_node, edge_tensor: False):
+        from AIPUBuilder.Optimizer.utils.string_utils import timestamp_string
+        from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
+        cast_count_num = 0
+        inserted_op_list = []
+        for n in self.nodes:
+            for inp_t in n.inputs:
+                parent_node = None
+                if inp_t.pnode:
+                    parent_node = inp_t.pnode
+                else:
+                    for parent in n.parents:
+                        if inp_t in parent.outputs:
+                            parent_node = parent
+                if parent_node and condition_func(n, parent_node, inp_t):
+                    _nname = parent_node.name + ("_%s_" % (str(ntype)[7:],)) + str(cast_count_num) + timestamp_string()
+                    index = parent_node.outputs.index(inp_t)
+                    dummy_op = PyNode(self.get_valid_node_name(_nname), ntype)
+                    dummy_op.additional = True
+                    dummy_op.add_input(inp_t)
+                    atensor_name = self.get_valid_tensor_name(
+                        inp_t.name + ("_%s_tensor_" % (str(ntype)[7:],)) + str(cast_count_num) + timestamp_string())
+                    atensor = inp_t.clone(atensor_name)
+                    dummy_op.add_output(atensor)
+                    idx = n.remove_input(inp_t)
+                    n.add_input(atensor, idx)
+                    # because the output tensor of dummy_op is clone from the output of parent_node, so using
+                    # the attributes of parent_node to quantize is reasonable
+                    dummy_op.attrs.update(parent_node.attrs.clone())
+                    inserted_op_list.append(dummy_op)
+                    cast_count_num += 1
+                    self.add_node(dummy_op)
+        return inserted_op_list
+
+    def insert_dummy_node_ahead_old(self, ntype, condition_func=lambda node, parent_node, edge_tensor: False):
         from AIPUBuilder.Optimizer.utils.string_utils import timestamp_string
         from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
         import copy

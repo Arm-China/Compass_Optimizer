@@ -6,6 +6,7 @@ import numpy as np
 from AIPUBuilder.Optimizer.framework import *
 
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
+from AIPUBuilder.Optimizer.utils.dtype_utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 from AIPUBuilder.Optimizer.utils.math_utils import lookup_lut_powerof2
 from AIPUBuilder.Optimizer.logger import *
@@ -160,16 +161,16 @@ def get_roi_one_batch(dec_boxes, class_score, roi_boxes, roi_scores, score_thres
         label_perclass_all[:label_perclass.shape[0]] = label_perclass
         box_num_perclass_all[:box_num_perclass.shape[0]] = box_num_perclass
 
-        return roi_boxes, roi_scores, box_num_perclass_all, label_perclass_all, torch.tensor(total_class_num)
+        return roi_boxes, roi_scores, box_num_perclass_all, label_perclass_all, torch_tensor(total_class_num, device=roi_boxes.device)
 
 
 def get_roi(boxes, scores, threshold, max_box_num, max_class_num, real_class_num):
     batch_size = scores.shape[0]
-    roi_boxes = torch.zeros([batch_size, max_box_num, boxes.shape[2]], dtype=boxes.dtype)
-    roi_scores = torch.zeros([batch_size, max_box_num], dtype=scores.dtype)
-    box_num_perclass = torch.zeros([batch_size, max_class_num], dtype=torch.float32)
-    label_perclass = torch.zeros([batch_size, max_class_num], dtype=torch.float32)
-    total_class_num = torch.zeros([batch_size, 1], dtype=torch.float32)
+    roi_boxes = torch.zeros([batch_size, max_box_num, boxes.shape[2]], dtype=boxes.dtype, device=boxes.device)
+    roi_scores = torch.zeros([batch_size, max_box_num], dtype=scores.dtype, device=boxes.device)
+    box_num_perclass = torch.zeros([batch_size, max_class_num], dtype=torch.float32, device=boxes.device)
+    label_perclass = torch.zeros([batch_size, max_class_num], dtype=torch.float32, device=boxes.device)
+    total_class_num = torch.zeros([batch_size, 1], dtype=torch.float32, device=boxes.device)
 
     for bs in range(batch_size):
         ret = get_roi_one_batch(boxes[bs],
@@ -199,7 +200,11 @@ def decodebox_ssd(self, *args):
     if len(self.inputs) == 3:
         anchor_box = self.inputs[2].betensor
     else:
-        anchor_box = self.constants['weights'].betensor
+        ha = self.constants['ha'].betensor
+        wa = self.constants['wa'].betensor
+        xcenter = self.constants['xcenter'].betensor
+        ycenter = self.constants['ycenter'].betensor
+
     if not self.quantized:
         score_threshold = self.get_param('score_threshold')
         variance = self.get_param('variance', optional=True, default_value=_param_default_value['variance'])
@@ -208,7 +213,8 @@ def decodebox_ssd(self, *args):
         config['w_max'] = self.get_param('width_max', optional=True, default_value=1.0)
         config['clip'] = self.get_param('clip', optional=True, default_value=True)
         config['variance'] = variance
-
+        if len(self.inputs) < 3:
+            anchor_box = torch.stack([ycenter, xcenter, ha, wa], dim=1)
         decode_boxes, stats_coords, stats_boxes = float_decode_box(bbox, anchor_box, config)
 
         if len(self.placeholders) == 0:
@@ -223,22 +229,14 @@ def decodebox_ssd(self, *args):
             self.placeholders[1].betensor = stats_boxes
     else:
         class_score = self.inputs[0].betensor + self.inputs[0].zerop
-        # bbox = self.inputs[1].betensor + self.inputs[1].zerop
-        weights = self.constants['weights'].betensor.to(dev)
-        box_num = bbox.shape[1]
-        weights_len = weights.shape[0]
-        delta_len = weights_len - box_num * 4
-        anchor_lut = weights[delta_len:].reshape(-1, box_num)
-        tyxhw_lut = torch.split(weights[:delta_len], int(delta_len/4))
-
-        config['ty_lut'] = tyxhw_lut[0]
-        config['tx_lut'] = tyxhw_lut[1]
-        config['th_lut'] = tyxhw_lut[2]
-        config['tw_lut'] = tyxhw_lut[3]
+        config['ty_lut'] = self.constants['ty_lut'].betensor
+        config['tx_lut'] = self.constants['tx_lut'].betensor
+        config['th_lut'] = self.constants['th_lut'].betensor
+        config['tw_lut'] = self.constants['tw_lut'].betensor
         config['lut_in_bits'] = self.inputs[1].qbits
-        config['lut_out_bits'] = dtype2bits(self.get_constant('weights').dtype)
+        config['lut_out_bits'] = dtype2bits(self.get_constant('ty_lut').dtype)
         config['in_is_signed'] = is_signed(self.inputs[1].dtype)
-        config['out_is_signed'] = is_signed(self.get_constant('weights').dtype)
+        config['out_is_signed'] = is_signed(self.inputs[1].dtype)
 
         config['h_min'] = 0
         config['h_max'] = self.get_param('height')
@@ -247,7 +245,9 @@ def decodebox_ssd(self, *args):
         config['clip'] = self.get_param('clip', optional=True, default_value=True)
         config['box_shift'] = self.get_param('box_shift')
 
-        decode_boxes, _, _ = quant_decode_box(bbox, anchor_lut, config)
+        if len(self.inputs) < 3:
+            anchor_box = torch.stack([wa, ha, ycenter, xcenter], dim=0)
+        decode_boxes, _, _ = quant_decode_box(bbox, anchor_box, config)
         score_threshold = self.params['score_threshold_uint8']
 
     # params['max_box_num'] #This parameter is not used at present because it takes time and the nms will do it later
@@ -256,10 +256,10 @@ def decodebox_ssd(self, *args):
     class_num = self.get_param('class_num')
     outputs = get_roi(decode_boxes, class_score, score_threshold, max_box_num, max_class_num, class_num)
     # boxes, box_num_perclass, total_class_num, roi_scores, label_perclass
-    zerops = [torch.tensor(0.)] * 5
+    zerops = [torch_tensor(0., device=self.outputs[0].device)] * 5
     if self.quantized:
         for zp, out in zip(zerops, self.outputs):
-            zp = torch.tensor(out.zerop)
+            zp = out.broadcast_zerop
     self.outputs[0].betensor = outputs[0] - zerops[0]
     self.outputs[1].betensor = outputs[1] - zerops[1]
     self.outputs[2].betensor = outputs[2] - zerops[2]
@@ -311,8 +311,9 @@ def quantize_decodebox(self, *args):
     _qbits_list[3] = in_score.qbits
 
     # step1
-    score_threshold = self.get_param('score_threshold')
-    self.params['score_threshold_uint8'] = int(score_threshold * (2 ** in_score.qbits - 1.0))
+    score_threshold = self.get_param('score_threshold')  # int(score_threshold * (2 ** in_score.qbits - 1.0))
+    self.params['score_threshold_uint8'] = linear_quantize_clip(
+        score_threshold, in_score.scale, in_score.zerop, in_score.qmin, in_score.qmax).int().item()
 
     # step2
     q_in_anchor = None
@@ -327,22 +328,29 @@ def quantize_decodebox(self, *args):
         coord_scale = in_anchor.scale
         coord_zp = in_anchor.zerop
     else:
-        in_anchor_t = self.constants['weights']
-        in_anchor = in_anchor_t.betensor
+        anchor_name = ['ha', 'wa', 'xcenter', 'ycenter']
+        ha = self.constants['ha'].betensor
+        wa = self.constants['wa'].betensor
+        xcenter = self.constants['xcenter'].betensor
+        ycenter = self.constants['ycenter'].betensor
+        anchor_box = torch.stack([ycenter, xcenter, ha, wa], dim=1)
+        anchor_Pytensor = PyTensor(self.name+"/anchor_box", anchor_box.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        anchor_Pytensor.max = anchor_box.max().item()
+        anchor_Pytensor.min = anchor_box.min().item()
         sign = is_signed(in_bbox.dtype)
         stats_coords.qbits = _qbits_list[0]
         qstats = get_linear_quant_params_from_tensor(
             stats_coords, 'per_tensor_symmetric_restricted_range', _qbits_list[0], sign)
         stats_coords.scale, stats_coords.zerop, stats_coords.qmin, stats_coords.qmax, stats_coords.dtype = qstats
-        in_anchor_t.scale, in_anchor_t.zerop, in_anchor_t.qmin, in_anchor_t.qmax, in_anchor_t.dtype = qstats
-        in_anchor_t.qbits = stats_coords.qbits
-        in_anchor_t.qinvariant = in_bbox.qinvariant
 
-        coord_scale = max(1, 2**(torch.floor(torch.log2(torch.tensor(stats_coords.scale)))).int().item())
-        q_in_anchor = in_anchor * coord_scale
-        q_in_anchor = torch.clamp(q_in_anchor, stats_coords.qmin, stats_coords.qmax).short()
+        coord_scale = max(1, 2**(torch.floor(torch.log2(stats_coords.scale))).int().item())
+        for name in anchor_name:
+            self.constants[name].scale, self.constants[name].zerop, self.constants[name].qmin, self.constants[name].qmax, self.constants[name].dtype = qstats
+            self.constants[name].qbits = stats_coords.qbits
+            self.constants[name].qinvariant = in_bbox.qinvariant
+            self.constants[name].betensor = torch.clamp(
+                self.constants[name].betensor * coord_scale, stats_coords.qmin, stats_coords.qmax).short()
 
-        # self.attrs['weights'] = q_in_anchor
         coord_zp = stats_coords.zerop
 
     self.params['height'] = coord_scale
@@ -358,7 +366,7 @@ def quantize_decodebox(self, *args):
         qstats[2],\
         qstats[3]
 
-    box_shift = torch.floor(torch.log2(torch.tensor(stats_boxes.scale))).int()
+    box_shift = torch.floor(torch.log2(stats_boxes.scale)).int().item()
     box_scale = 2 ** box_shift
 
     in_scale = in_bbox.scale
@@ -375,21 +383,11 @@ def quantize_decodebox(self, *args):
     th_lut = get_bbox_lut(in_scale, in_zerop, var[2], box_scale, lut_in_dtype, lut_size_bits, lut_out_udtype, True)
     tw_lut = get_bbox_lut(in_scale, in_zerop, var[3], box_scale, lut_in_dtype, lut_size_bits, lut_out_udtype, True)
 
-    self.params['box_shift'] = box_shift.item()
+    lut_name = ['ty_lut', 'tx_lut', 'th_lut', 'tw_lut']
+    for name in lut_name:
+        self.constants[name] = PyTensor(self.name+name, eval(name).cpu().numpy().astype(dtype2nptype(lut_out_dtype)))
 
-    # step4
-    weights = torch.cat((ty_lut.flatten(), tx_lut.flatten(), th_lut.flatten(), tw_lut.flatten())).to(dev)
-    if len(self.inputs) == 2:
-        '''
-        fp32 ir anchor order: ya, xa, ha, wa,
-        lib/gt need order: wa, ha, ya, xa
-        '''
-        yaq, xaq, haq, waq = torch.split(q_in_anchor, 1, dim=-1)
-        weights = torch.cat((weights, waq.flatten(), haq.flatten(), yaq.flatten(), xaq.flatten()))
-
-    # weight_tensor = PyTensor(self.name + '/weights', weights.cpu().numpy())
-    self.constants['weights'].betensor = weights
-    self.constants['weights'].dtype = bits2dtype(_qbits_list[0], is_signed=is_signed(in_bbox.dtype))
+    self.params['box_shift'] = box_shift
 
     # step5
     _oscale_list = [coord_scale, 1.0, 1.0, in_score.scale, 1.0]

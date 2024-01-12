@@ -60,8 +60,8 @@ def reduce(self, *args):
         mean_qx = (scale*fp_x1+scale*fp_x2...+scale*fp_xn)/n = (fp_x1+fp_x2+fp_xn)/n*scale
 
         '''
-        inp_betensor = inp.betensor + (torch.tensor(0, device=inp.betensor.device)
-                                       if not self.quantized else torch.tensor(self.inputs[0].zerop, device=inp.betensor.device))
+        inp_betensor = inp.betensor + (torch_tensor(0, device=inp.device)
+                                       if not self.quantized else self.inputs[0].zerop)
         outp = torch.sum(inp_betensor, axis, keepdims=True)
         if self.quantized:
             shift = self.params["shift_value"]

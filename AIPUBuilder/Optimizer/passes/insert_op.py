@@ -49,7 +49,7 @@ class InsertCastOp(BaseInsertOp):
             inputs_dtype.append(t.dtype)
         for tidx, t in enumerate(node.outputs):
             outputs_type.append(t.dtype)
-        dtype_spec = get_op_dtype_spec(node.type)
+        dtype_spec = node.get_lib_dtype_spec()
         is_spec_valid = True
         if len(dtype_spec) > 0:
             if len(inputs_dtype) != len(dtype_spec[0].in_dtypes):
@@ -104,7 +104,6 @@ class InsertCastOp(BaseInsertOp):
 
     def insert(self):
         _conditions = self.criteria()
-
         for _cond in _conditions:
             self.inserted_cast_layers += self.g.insert_cast_op_ahead(condition_func=_cond)
             self.g.set_tensor_quantization_attrs()
@@ -131,8 +130,8 @@ class InsertCastOp(BaseInsertOp):
     def after_pass(self):
         # adaptor_cast_to_lib_implementation(inserted_cast_layers):
         def set_cast_totype(node):
-            def mix_quantization_condition(
-                node): return node.parents[0].attrs['q_bits_activation'] != node.children[0].attrs['q_bits_activation']
+            def mix_quantization_condition(node):
+                return node.parents[0].attrs['q_bits_activation'] != node.children[0].attrs['q_bits_activation']
             output_dtype = []
             for output in node.children[0].outputs:
                 if mix_quantization_condition(node) and False == output.qinvariant:
@@ -140,7 +139,7 @@ class InsertCastOp(BaseInsertOp):
                         node.children[0].attrs['q_bits_activation'], is_signed(output.dtype)))
                 else:
                     output_dtype.append(output.dtype)
-            dtype_spec = get_op_dtype_spec(node.children[0].type)
+            dtype_spec = node.children[0].get_lib_dtype_spec()
             candidates = []
             backups = []
             for spec in dtype_spec:
@@ -169,8 +168,8 @@ class InsertCastOp(BaseInsertOp):
                     else:
                         dt = node.children[0].inputs[j].dtype
                         for cp in node.children[0].parents:
-                            if cp != node and cp.type == OpType.Cast and cp.additional and cp.outputs[0] == node.children[0].inputs[j]:
-                                dt = cp.params['to_dtype']
+                            if cp.type == OpType.Cast and cp.additional and cp.outputs[0] == node.children[0].inputs[j]:
+                                dt = cp.params['to_dtype'] if cp != node else cp.inputs[0].dtype
                                 break
 
                     dqmin, dqmax = dtype2range(dt)
@@ -205,12 +204,25 @@ class InsertCastOp(BaseInsertOp):
                         idx = tidx
                         break
                 cast_totype_list = set_cast_totype(n)
-                if len(cast_totype_list) > idx:
-                    n.params['to_dtype'] = cast_totype_list[idx]
-                    if n.params['to_dtype'] != n.inputs[0].dtype:
-                        OPT_INFO("layer_id=%s, %s, '%s', cast its output '%s' dtype from %s to %s due to lib's %s spec by insert a cast layer." % (str(n.parents[0].attrs['layer_id']), str(
-                            n.parents[0].type), str(n.parents[0].name), str(n.inputs[0].name), str(n.inputs[0].dtype), str(n.params['to_dtype']), str(n.children[0].type)))
+                if len(cast_totype_list):
+                    for parent in n.children[0].parents:
+                        if parent.type == OpType.Cast and parent.additional:
+                            inp_id = n.children[0].inputs.index(parent.outputs[0])
+                            if len(cast_totype_list) > inp_id:
+                                parent.params['to_dtype'] = cast_totype_list[inp_id]
+                                if parent in self.inserted_cast_layers and parent.name not in unique_flags:
+                                    unique_flags[parent.name] = True
+                                if parent.params['to_dtype'] != parent.inputs[0].dtype:
+                                    OPT_INFO(f"{parent.parents[0]}', cast its output '{parent.inputs[0].name}' "
+                                             f"dtype from {parent.inputs[0].dtype} to {parent.params['to_dtype']} "
+                                             f"due to lib's {n.children[0].type} spec by insert a cast layer.")
 
+            """
+            when trigger_float_op is true, first set_unquantifiable(), then insert the dequantize and quantize op,
+            if needed insert cast op, the cast op does not have 'unquantifiable' params, so we independently
+            set this params in here
+            """
+            n.params['unquantifiable'] = any([is_float(dt) for dt in [n.inputs[0].dtype, n.params['to_dtype']]])
         for n in self.g.nodes:
             if n.type in ASYM2SYM_OP_DICT:
                 for idx in range(len(n.inputs)):
@@ -240,7 +252,8 @@ class InsertQuantizeOp(BaseInsertOp):
     def criteria(self):
         _condition = [
             lambda node, parent_node, edge_tensor:
-            (parent_node.params['unquantifiable'] == True and node.params['unquantifiable'] == False)
+            (parent_node.get_param('unquantifiable', optional=True, default_value=False) and
+             not edge_tensor.qinvariant and node.get_param('unquantifiable', optional=True, default_value=False) == False)
         ]
         # qinvariant tensors with scale=1.0, zp=0 are safe to pass through
         return _condition
@@ -250,18 +263,8 @@ class InsertQuantizeOp(BaseInsertOp):
             inpt = n.inputs[0]
             if inpt.qbits is None or inpt.qmin is None or inpt.qmax is None:
                 OPT_ERROR(f"the output({inpt.name}) doesn't quantize in InsertQuantizeOp.")
-            if isinstance(inpt.scale, torch.Tensor) and inpt.scale.numel() > 1:
-                scale_t = PyTensor(self.g.get_valid_tensor_name(inpt.name),
-                                   TensorShape(*list(inpt.scale.shape)), Dtype.FP32)
-                scale_t.betensor = inpt.scale
-                n.constants['quantize_scale'] = scale_t
-                zerop_t = PyTensor(self.g.get_valid_tensor_name(inpt.name),
-                                   TensorShape(*list(inpt.zerop.shape)), Dtype.INT32)
-                zerop_t.betensor = inpt.zerop.to(torch.int32)
-                n.constants['quantize_zp'] = zerop_t
-            else:
-                n.params['quantize_scale'] = float(inpt.scale)
-                n.params['quantize_zp'] = int(inpt.zerop)
+            n.attrs['quantize_scale'] = inpt.scale
+            n.attrs['quantize_zp'] = inpt.zerop
 
             n.params['unquantifiable'] = True
             n.outputs[0].dtype = inpt.dtype
@@ -294,7 +297,8 @@ class InsertDeQuantizeOp(BaseInsertOp):
     def criteria(self):
         _condition = [
             lambda node, parent_node, edge_tensor:
-            (parent_node.params['unquantifiable'] == False and node.params['unquantifiable'] == True)
+            (not parent_node.get_param('unquantifiable', optional=True, default_value=True) and not
+             edge_tensor.qinvariant and node.get_param('unquantifiable', optional=True, default_value=False) == True)
         ]
         # qinvariant tensors with scale=1.0, zp=0 are safe to pass through
         return _condition
@@ -302,19 +306,10 @@ class InsertDeQuantizeOp(BaseInsertOp):
     def after_insert(self):
         for n in self.inserted_nodes:
             n.params['unquantifiable'] = True
+            n.attrs['trigger_float_op'] = n.children[0].attrs['trigger_float_op']
             inpt = n.inputs[0]
-            if isinstance(inpt.scale, torch.Tensor) and inpt.scale.numel() > 1:
-                scale_t = PyTensor(self.g.get_valid_tensor_name(inpt.name),
-                                   TensorShape(*list(inpt.scale.shape)), Dtype.FP32)
-                scale_t.betensor = inpt.scale
-                n.constants['quantize_scale'] = scale_t
-                zerop_t = PyTensor(self.g.get_valid_tensor_name(inpt.name),
-                                   TensorShape(*list(inpt.zerop.shape)), Dtype.INT32)
-                zerop_t.betensor = inpt.zerop.to(torch.int32)
-                n.constants['quantize_zp'] = zerop_t
-            else:
-                n.params['quantize_scale'] = float(inpt.scale)
-                n.params['quantize_zp'] = int(inpt.zerop)
+            n.attrs['quantize_scale'] = inpt.scale
+            n.attrs['quantize_zp'] = inpt.zerop
 
     def insert(self):
         conditions = self.criteria()

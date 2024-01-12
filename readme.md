@@ -22,7 +22,9 @@ In addition to this readme file, you can find a more detailed tutorial document 
   - EasyQuant: Refer to [EasyQuant: Post-training Quantization via Scale Optimization.](https://arxiv.org/abs/2006.16669)
 
   - Adaround: Refer to [Up or Down? Adaptive Rounding for Post-Training Quantization.](https://arxiv.org/abs/2004.10568)
-- Featuremap tiling in common operators.
+
+  - Adaquant: Refer to [Improving Post Training Neural Quantization: Layer-wise Calibration and Integer Programming](https://arxiv.org/abs/2006.10518)
+
 - Compatible with all Zhouyi NPU series processors, specially optimizing the quantization schemes and the whole computation graph.
 
 

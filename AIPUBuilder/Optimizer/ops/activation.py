@@ -35,18 +35,10 @@ def none_activation(self, *args):
     out = self.outputs[0]
     x = inp.betensor
     if self.quantized:
-        do_shift = 0
-        if "shift" in self.constants:
-            do_shift = self.constants["shift"].betensor
-        elif "shift_value" in self.params:
-            do_shift = self.params["shift_value"]
-        do_scale = 1
-        if "scale" in self.constants:
-            do_scale = self.constants["scale"].betensor
-        elif "scale_value" in self.params:
-            do_scale = self.params["scale_value"]
-        x = linear_requantize(x + inp.zerop, do_scale, do_shift,
-                              self.outputs[0].zerop, self.outputs[0].qmin, self.outputs[0].qmax)
+        do_shift = self.get_ir_field(['shift', 'shift_value'], default_value=0)
+        do_scale = self.get_ir_field(['scale', 'scale_value'], default_value=1)
+        x = linear_requantize(x + inp.zerop.reshape([-1]), do_scale, do_shift,
+                              self.outputs[0].zerop.reshape([-1]), self.outputs[0].qmin, self.outputs[0].qmax)
     out.betensor = x
     return out.betensor
 
@@ -196,68 +188,45 @@ def apply_with_activation_quantize(self, x_qinvariant, *args):
             t.__setattr__(p, bak_out_tensor_property[t.name][p])
 
 
-def apply_with_activation(self, x, x_scale, x_zerop, requant_scale, requant_shift, *args):
+def apply_with_activation(self, x, *args, **kargs):
+    simulate_ahead_shift = False
+    shift_bk = None
+    for k, v in kargs.items():
+        if k == 'aasrb':
+            simulate_ahead_shift = True
+            aasrb, bias = v
+            do_shift = 0
+            if "shift" in self.constants:
+                do_shift = self.constants["shift"].betensor
+                shift_bk = self.constants["shift"].clone()
+            elif "shift_value" in self.params:
+                do_shift = self.params["shift_value"]
+            x, shift = aiff_ahead_shift_bias(x, do_shift, bias, int(aasrb))
+            self.constants['shift'] = PyTensor('shift', torch.tensor(shift))
+            break
+
     bak_betensor = self.inputs[0].betensor
-    bak_scale = self.inputs[0].scale
-    bak_zerop = self.inputs[0].zerop
+    bk_inp_zp = self.inputs[0].zerop
     self.inputs[0].betensor = x
-    self.inputs[0].scale = x_scale
-    self.inputs[0].zerop = x_zerop
-
-    # this code is for inserting a placeholder tensor between convolution and with_activation op and for quantizing the with_activation op
-    # if not self.quantized and self.get_param('with_activation', optional=True, default_value='none').lower() in ['clip']:
-    #     if 'with_activation_placeholder_name' not in self.attrs:
-    #         ph_len = len(self.placeholders)
-    #         ph_name = self.name + '_placeholder_' + str(ph_len)
-    #         self.attrs['with_activation_placeholder_name'] = ph_name
-    #         stat_result = PyTensor(ph_name, x.cpu().numpy())
-    #         self.placeholders.append(stat_result)
-    #     else:
-    #         placeholder_name = self.attrs['with_activation_placeholder_name']
-    #         for p in self.placeholders:
-    #             if p.name == placeholder_name:
-    #                 p.betensor = x
-
-    if self.quantized:
-        bak_shift_value = 0
-        if 'shift_value' in self.params:
-            bak_shift_value = self.params['shift_value']
-            self.params['shift_value'] = requant_shift
-        bak_scale_value = 1
-        if 'scale_value' in self.params:
-            bak_scale_value = self.params['scale_value']
-            self.params['scale_value'] = requant_scale
-        bak_shift_tensor = 0
-        if 'shift' in self.constants:
-            bak_shift_tensor = self.constants["shift"].betensor
-            self.constants["shift"].betensor = requant_shift
-        bak_scale_tensor = 0
-        if 'scale' in self.constants:
-            bak_scale_tensor = self.constants["scale"].betensor
-            self.constants["scale"].betensor = requant_scale
+    self.inputs[0].zerop = args[0] if len(args) == 1 else 0
 
     act_type = self.get_param('with_activation', optional=True, default_value='none').lower()
     if act_type not in with_activation_supported:
         (OPT_FATAL("id=%s, optype=%s, 'with_activation=%s', but with_activation only supported:%s." %
                    (self.attrs['layer_id'], str(self.type), act_type.upper(), str(with_activation_supported))))
-    bak_out_zerop = self.outputs[0].zerop
+    bak_out_zp = self.outputs[0].zerop
     # if act_type in with_activation_allow_merge_out_zerop_to_bias and 'biases' in self.constants:
     #     self.outputs[0].zerop = 0 # biases has absorbed out.zerop
     func = g_activation_method_supported[act_type][1]
     x = func(self, *args)
-    self.outputs[0].zerop = bak_out_zerop
-    if self.quantized:
-        if 'shift_value' in self.params:
-            self.params['shift_value'] = bak_shift_value
-        if 'scale_value' in self.params:
-            self.params['scale_value'] = bak_scale_value
-        if 'shift' in self.constants:
-            self.constants["shift"].betensor = bak_shift_tensor
-        if 'scale' in self.constants:
-            self.constants["scale"].betensor = bak_scale_tensor
 
+    self.outputs[0].zerop = bak_out_zp
+    self.inputs[0].zerop = bk_inp_zp
     self.inputs[0].betensor = bak_betensor
-    self.inputs[0].scale = bak_scale
-    self.inputs[0].zerop = bak_zerop
 
+    if simulate_ahead_shift:
+        if shift_bk is not None:
+            self.constants['shift'] = shift_bk
+        else:
+            del self.constants['shift']
     return x

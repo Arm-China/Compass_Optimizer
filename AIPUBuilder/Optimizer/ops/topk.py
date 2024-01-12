@@ -123,13 +123,10 @@ def topk_quantize(self, *args):
     out.zerop = inp.zerop
     out.qbits = inp.qbits
     out.qinvariant = inp.qinvariant
-    # for indice no quanti
-    q_bits_activation = self.attrs["q_bits_activation"]
+    # for indice no quant
     out = self.outputs[1]
     out.scale = 1.0
     out.zerop = 0
-    # out.qbits, out.dtype = range2dtype(out.extrema_min, out.extrema_max)#max(16, q_bits_activation)
-    # out.dtype = bits2dtype(out.qbits, is_signed=False)
     axis = self.get_param('axis')
     index_max = inp.ir_shape[axis]
     if index_max < 256:  # assure at least 16bit indice
@@ -137,4 +134,6 @@ def topk_quantize(self, *args):
     out.qbits, out.dtype = range2dtype(0, index_max, force_int=self.force_dtype_int)
     out.qinvariant = True
 
-    self.params['select_index'] = 'last'
+    scaling_bits = self.attrs['scaling_bits']
+    smethod = int(scaling_bits[0] if len(scaling_bits) > 0 else -1)
+    self.params['select_index'] = 'last' if smethod < 0 else 'first'

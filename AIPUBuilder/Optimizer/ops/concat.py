@@ -16,13 +16,14 @@ def concat_quantize(self, *args):
     multiplier_bits = self.attrs['multiplier_bits']
     # #decide the output tensors' key properties related to quantization
     out = self.outputs[0]
+    dev = out.device
     onumel = 1
     for s in out.ir_shape:
         onumel *= s
-    min_scale = float("inf")
-    min_index = 0
-    max_scale = float("-inf")
-    max_index = 0
+    min_scale = torch_tensor(float("inf"), device=dev)
+    min_index = torch_tensor(0, device=dev)
+    max_scale = torch_tensor(float("-inf"), device=dev)
+    max_index = torch_tensor(0, device=dev)
     sign_branches = 0
     majority = 0
     majority_index = 0
@@ -49,10 +50,15 @@ def concat_quantize(self, *args):
             majority = bnumel
             majority_index = i
         alpha = bnumel / onumel
-        weighted_min += alpha * inp.min
-        weighted_max += alpha * inp.max
-        zps.append(inp.zerop)
-        scs.append(inp.scale)
+        weighted_min = weighted_min + alpha * inp.min
+        weighted_max = weighted_max + alpha * inp.max
+        # currently not support per-channel activation quantization,so inp.scale and inp.zerop numel is 1
+        if isinstance(inp.scale, torch.Tensor) and inp.scale.numel() == 1:
+            zps.append(inp.zerop.item())
+            scs.append(inp.scale.item())
+        else:
+            zps.append(inp.zerop)
+            scs.append(inp.scale)
         qinv_s.append(inp.qinvariant)
         qin_bits.append(inp.qbits)
         if inp.qinvariant:

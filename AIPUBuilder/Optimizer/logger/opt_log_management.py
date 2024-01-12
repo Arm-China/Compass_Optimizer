@@ -29,12 +29,12 @@ class OptLogManagement(object):
         device = f"cuda::{cuda_visible}" if cuda else "cpu"
         OPT_INFO(f"tool name: {TOOL_NAME}, version: {VERSION}, use cuda: {cuda}, running device: {device}")
         cfg_str = '[model name]: ' + cfg.model_name + ', ' + \
-                  '[quantization method for weight]: ' + cfg.quantize_method_for_weight + ', ' + \
-                  '[quantization method for activation]: ' + cfg.quantize_method_for_activation + ', ' + \
-                  '[calibation strategy for weight]: ' + cfg.calibration_strategy_for_weight + ', ' + \
-                  '[calibation strategy for activation]: ' + cfg.calibration_strategy_for_activation + ', ' + \
-                  '[quantization precision]: activation_bits=%d, weight_bits=%d, bias_bits=%d, lut_items_in_bits=%d' % (
-                      cfg.activation_bits, cfg.weight_bits, cfg.bias_bits, cfg.lut_items_in_bits)
+                  '[quantization method for weight]: ' + str(cfg.quantize_method_for_weight) + ', ' + \
+                  '[quantization method for activation]: ' + str(cfg.quantize_method_for_activation) + ', ' + \
+                  '[calibation strategy for weight]: ' + str(cfg.calibration_strategy_for_weight) + ', ' + \
+                  '[calibation strategy for activation]: ' + str(cfg.calibration_strategy_for_activation) + ', ' + \
+                  '[quantization precision]: activation_bits=%s, weight_bits=%s, bias_bits=%s, lut_items_in_bits=%s' % (
+                      str(cfg.activation_bits), str(cfg.weight_bits), str(cfg.bias_bits), str(cfg.lut_items_in_bits))
         OPT_INFO('[quantization config Info]%s\n' % (cfg_str))
         return cfg_str
 

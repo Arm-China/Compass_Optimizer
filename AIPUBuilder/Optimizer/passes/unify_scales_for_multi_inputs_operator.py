@@ -4,6 +4,7 @@
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
+torch_tensor = construct_torch_tensor
 
 
 def opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt):
@@ -94,11 +95,13 @@ def opt_unify_scales_for_multi_inputs_operators(graph, optype_cfg_dt):
             for anc in branch:
                 t = anc.outputs[0]
                 t.scale = s
-                t.zerop = 0
+                t.zerop = torch.zeros_like(t.scale)
                 if anc.type == OpType.Quantize:
                     anc.params['quantize_scale'] = s
                     anc.params['quantize_zp'] = 0
-                t.min, t.max = scale2minmax(s, is_signed(t.dtype), t.qmax - t.qmin)
+                t_min, t_max = scale2minmax(s, is_signed(t.dtype), t.qmax - t.qmin)
+                t.min = torch_tensor(t_min, device=n.inputs[0].betensor.device)
+                t.max = torch_tensor(t_max, device=n.inputs[0].betensor.device)
                 OPT_DEBUG(f"layer_id={anc.attrs['layer_id']}, {str(anc.type)}, {anc.name} : its output0's min/max were changed during opt_unify_scales_for_multi_inputs_operators"
                           f"for layer_id={n.attrs['layer_id']}, {str(n.type)}, {n.name}")
     graph.clear_tensor_quantization_attrs()

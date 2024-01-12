@@ -2,7 +2,6 @@
 # Copyright © 2023 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.utils import *
 import torch
 
@@ -36,7 +35,7 @@ def ceil_quantize(self, *args):
     out.qbits = q_bits_activation
     out_sign = is_signed(inp.dtype)
     out.dtype = bits2dtype(out.qbits, is_signed=out_sign)
-    dev = inp.betensor.device
+    dev = inp.device
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
         out, q_mode_activation, out.qbits, out_sign)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))

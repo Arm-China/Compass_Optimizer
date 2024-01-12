@@ -14,15 +14,14 @@ def conv3d(self, *args):
     weights = self.constants["weights"].betensor.clone().float()
     bias = self.constants['biases'].betensor.clone().float()
     pad_val = 0
+    aasrb = self.get_param('remain_shift',
+                           optional=True, default_value=None)
     if self.quantized:
         # input's zerop has been absorbed to bias.
         # inp += self.inputs[0].zerop
-        pad_val = -self.inputs[0].zerop
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
-        bias += self.constants['biases'].zerop
+        pad_val = -self.inputs[0].zerop[0]
+        weights += self.constants["weights"].broadcast_zerop
+        bias += self.constants['biases'].broadcast_zerop
 
     inp = inp.permute(0, 4, 1, 2, 3)
     weights = weights.permute(0, 4, 3, 1, 2)  # [out_c, h, w, d, in_c] -> [out_c, in_c, d, h, w]
@@ -36,35 +35,21 @@ def conv3d(self, *args):
     inp = torch.nn.functional.pad(inp, padding, value=pad_val)
     x = torch.nn.functional.conv3d(inp,
                                    weights,
-                                   bias,
+                                   bias if aasrb is None else None,
                                    stride=stride,
                                    padding=0,
                                    dilation=dilation,
                                    groups=self.get_param("group")
                                    )
     x = x.permute(0, 2, 3, 4, 1)
-
-    requant_scale = 1
-    requant_shift = 0
-    if self.quantized:
-        if 'scale_value' in self.params:
-            requant_scale = self.params['scale_value']
-        elif "scale" in self.constants:
-            requant_scale = self.constants["scale"].betensor
-
-        if 'shift_value' in self.params:
-            requant_shift = self.params['shift_value']
-        elif "shift" in self.constants:
-            requant_shift = self.constants["shift"].betensor
-
-    x = apply_with_activation(self, x,
-                              self.inputs[0].scale * self.constants["weights"].scale, 0,
-                              requant_scale,
-                              requant_shift,
-                              *args)
-
-    self.outputs[0].betensor = x
-    return x
+    shift_bk = None
+    if self.quantized and aasrb is not None:
+        bias = aiff_clear_lower_bits_for_bias(bias, self)
+        self.outputs[0].betensor = apply_with_activation(self, x,
+                                                         *args, aasrb=(aasrb, bias))
+        return self.outputs[0].betensor
+    self.outputs[0].betensor = apply_with_activation(self, x, *args)
+    return self.outputs[0].betensor
 
 
 @quant_register(OpType.Convolution3D)

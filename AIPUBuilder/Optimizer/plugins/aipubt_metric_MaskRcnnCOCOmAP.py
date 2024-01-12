@@ -110,7 +110,7 @@ class MaskRcnnCOCOmAPMetric(OptBaseMetric):
         boxes = detections[:N, :4]
         class_ids = detections[:N, 4].astype(np.int32)
         scores = detections[:N, 5]
-        masks = mrcnn_mask[np.arange(N), :, :, class_ids]
+        masks = mrcnn_mask[np.arange(N), :, :, class_ids]  # shape[N,28,28]
 
         window = self.norm_boxes(window, image_shape[:2])
         wy1, wx1, wy2, wx2 = window
@@ -235,3 +235,57 @@ class MaskRcnnCOCOmAPMetric(OptBaseMetric):
                      precisions[indices])
 
         return mAP, precisions, recalls, overlaps
+
+
+@register_plugin(PluginType.Metric, '1.0')
+class MaskRcnnTorchmAPMetric(MaskRcnnCOCOmAPMetric):
+    """
+        This MaskRcnnTorchmAPMetric is used for the metric of MaskRcnn torch model in Optimizer.
+        """
+
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, pred, target):
+
+        box_num = pred[5].shape[1]
+        batch_num = pred[5].shape[0]
+        class_num = pred[6].shape[1]
+        boxnum_perclass = pred[6].cpu().numpy().astype(np.int32)  # [1,90]
+        class_id = pred[3].cpu().numpy().astype(np.int32)  # [1,90]
+        bbox = pred[5].cpu().numpy().astype(np.int32)
+        score = pred[7].cpu().numpy()  # [1,100]
+        batch_mask = pred[10].cpu().numpy().transpose(0, 1, 3, 4, 2)  # [[1,100,91,28,28]]->[1,100,28,28,91]
+        for b in range(batch_num):
+            box_class_id = np.zeros([box_num]).astype(np.int32)
+            new_box = np.zeros([0, 4]).astype(np.int32)
+            new_score = np.zeros([box_num])
+            new_mask = np.zeros([box_num, 28, 28])
+            full_mask = np.zeros([box_num, 800, 800], dtype=bool)
+            offset = 0
+            for c in range(class_num):
+                cboxnum = int(boxnum_perclass[b, c])
+                if cboxnum == 0:
+                    continue
+                id = int(class_id[b, c])
+                new_box = np.concatenate([new_box, bbox[b, offset:offset+cboxnum, :]], axis=0)
+                new_mask[offset:offset+cboxnum, ...] = batch_mask[b, offset:offset+cboxnum, :, :, id+1]
+                for tmp_offset in range(cboxnum):
+                    full_mask[offset+tmp_offset, ...] = self.unmold_mask(
+                        new_mask[offset+tmp_offset, ...], new_box[offset+tmp_offset], (800, 800))
+                box_class_id[offset:offset+cboxnum] = [id] * cboxnum
+                new_score[offset:offset+cboxnum] = score[b, offset:offset+cboxnum]
+                offset += cboxnum
+            box_class_id = box_class_id[:offset]
+            new_score = new_score[:offset]
+            full_mask = full_mask[:offset].transpose(1, 2, 0)  # [instance,h,w] -> [h,w,instance]
+            ap, precisions, recalls, overlaps = self._ap(
+                target['box'][b].cpu().numpy(),
+                target['class_id'][b].cpu().numpy(),
+                target['mask'][b].cpu().numpy(),
+                new_box,
+                box_class_id,
+                new_score,
+                full_mask
+            )
+            self.AP.append(ap)

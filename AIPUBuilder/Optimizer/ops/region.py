@@ -266,7 +266,7 @@ def region(self, *args):
         invalid_score_mask = conf_softmax_score <= new_score_threshold
         conf_softmax_score[invalid_score_mask] = 0
         factor = 2 ** inp_t.qbits - 1
-        conf_softmax_score = conf_softmax_score * factor // sum_score
+        conf_softmax_score = torch.div(conf_softmax_score * factor, sum_score, rounding_mode='trunc')
         inp[..., 5:] = conf_softmax_score
 
         anchor_exp_h_shift = self.get_param('anchors_exp_h_shift')
@@ -378,7 +378,7 @@ def quantize_region(self, *args):
     anchor_bits, out_signed = _quantize_params['anchor_dtype'][0], _quantize_params['anchor_dtype'][1]
     a_rmin, a_rmax = dtype2range(_quantize_params['anchor_dtype'][2])
     anchor_param = get_linear_quant_params_from_tensor(anchors_tensor, q_mode_out, anchor_bits, out_signed)
-    anchor_exp_shift = torch.floor(torch.log2(torch.tensor(anchor_param[0])))
+    anchor_exp_shift = torch.floor(torch.log2(anchor_param[0]))
     q_anchors = linear_quantize_clip(f_anchors, 2 ** anchor_exp_shift, 0, a_rmin, a_rmax)
 
     self.params['anchors_exp_h_shift'] = anchor_exp_shift.int().item()

@@ -353,8 +353,8 @@ def gruv3_quantize(self, *args):
                                                         w_zerop_expand[idx].reshape(scale_zp_shape), w_ele_t.qmin,
                                                         w_ele_t.qmax)
             else:
-                w_scale_expand.append(torch.tensor(w_ele_t.scale, device=w_ele.device))
-                w_zerop_expand.append(torch.tensor(w_ele_t.zerop, device=w_ele.device))
+                w_scale_expand.append(w_ele_t.scale)
+                w_zerop_expand.append(w_ele_t.zerop)
                 quantized_weight = linear_quantize_clip(
                     w_ele, w_scale_expand[idx], w_zerop_expand[idx], w_ele_t.qmin, w_ele_t.qmax)
             quantized_w.append(quantized_weight)
@@ -367,8 +367,8 @@ def gruv3_quantize(self, *args):
     cand_kernel_q = torch.cat((quantized_wx_ck, quantized_wh_ck), dim=1)
     quantized_weight = torch.cat((gate_kernel_q, cand_kernel_q), dim=0).contiguous()
     weights = self.constants["weights"]
-    weights.scale = w_scale_expand
-    weights.zerop = w_zerop_expand
+    weights.scale = torch.cat(w_scale_expand, dim=0)
+    weights.zerop = torch.cat(w_zerop_expand, dim=0)
     weights.betensor = quantized_weight
     weights.qbits = q_bits_weight
     weights.dtype = bits2dtype(weights.qbits, is_signed=True)
@@ -429,8 +429,8 @@ def gruv3_quantize(self, *args):
     cb_scale = xwc_scale
     candidate_bias_q = linear_quantize_clip(candidate_bias, cb_scale, zerop, qmin, qmax)
     quantized_bias = torch.cat((gates_bias_q, candidate_bias_q, quantized_bias), dim=0)
-    b.zerop = 0
-    b.scale = [gb_scale, cb_scale]  # min(gb_scale, cb_scale)
+    b.scale = torch.cat([gb_scale, cb_scale], dim=0)  # min(gb_scale, cb_scale)
+    b.zerop = torch.zeros_like(b.scale)
     b.qmin = qmin
     b.qmax = qmax
     b.qbits = q_bits_bias

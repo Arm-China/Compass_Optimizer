@@ -4,7 +4,7 @@
 import os
 from AIPUBuilder.Optimizer.plugins import *
 from AIPUBuilder.Optimizer.framework import *
-from AIPUBuilder.Optimizer.utils import dtype2nptype
+from AIPUBuilder.Optimizer.utils import dtype2nptype, torch_tensor
 from AIPUBuilder.Optimizer.optmaster import *
 from AIPUBuilder.Optimizer.logger import *
 
@@ -37,7 +37,9 @@ class OptForward(object):
 
         for node in self.optimizer.g.nodes:
             node.attrs['layer_id'] = str(node.attrs.get('layer_id', -1))
-
+            key_axes = node.get_param('key_axis', optional=True, default_value=[None] * len(node.outputs))
+            for oi, ot in enumerate(node.outputs):
+                ot.key_axis = key_axes[oi]
         if not hasattr(self.optimizer.g, 'compat_quantized_model'):  # gsim output IR or opt output IR or self-define IR
             self.optimizer.deduce_quantization_infos(self.optimizer.g)
         elif self.optimizer.g.compat_quantized_model:
@@ -83,12 +85,12 @@ class OptForward(object):
         if input_data:
             out = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
             for o in out:
-                o_data = o.betensor.cpu().numpy()
                 if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
-                    o_data = linear_dequantize(o_data, o.scale, o.zerop)
+                    o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop).cpu().numpy()
                 else:
                     # keep the ir_dtype
-                    o_data = o_data.astype(dtype2nptype(o.ir_dtype))
+                    o_data = o.betensor.cpu().numpy().astype(dtype2nptype(o.ir_dtype))
+                o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
 
         return output_data
@@ -109,14 +111,7 @@ class OptForward(object):
         self.optimizer.g.current_batch_idx = 0
         dequantized_data = []
         for data, inp_t in zip(input_data, input_tensors):
-            in_zp = inp_t.zerop
-            in_scale = inp_t.scale
-            if isinstance(inp_t.zerop, torch.Tensor):
-                in_zp = in_zp.cpu().numpy()
-            if isinstance(inp_t.scale, torch.Tensor):
-                in_scale = in_scale.cpu().numpy()
-
-            d = ((data.astype('int64') + in_zp) / in_scale)
+            d = linear_dequantize(torch_tensor(data).long(), inp_t.broadcast_scale, inp_t.broadcast_zerop)
             dequantized_data.append(d)
         out = self.forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
         return out

@@ -26,12 +26,10 @@ def neg_quantize(self, *args):
     out.qinvariant = inp.qinvariant
     out.scale = inp.scale
     out.qbits = inp.qbits
-    out.dtype = inp.dtype
+    out.dtype = bits2dtype(dtype2bits(inp.dtype), is_signed=True)
     out.zerop = inp.zerop
-    if QuantMode.is_asymmetric(q_mode_activation):
-        if is_signed(inp.dtype):
-            out.zerop = -1 * inp.zerop + 1
-        else:
-            out.dtype = bits2dtype(dtype2bits(inp.dtype), is_signed=True)
-            out.qmin, out.qmax = dtype2range(out.dtype)
-            out.zerop = -1 * inp.zerop - out.qmax
+    if is_signed(inp.dtype):
+        out.zerop = -1 * inp.zerop + 1
+    else:
+        out.qmin, out.qmax = dtype2range(out.dtype)
+        out.zerop = -1 * inp.zerop - out.qmax

@@ -22,14 +22,107 @@ def field_register(field, ftype='default'):
     return wrapper
 
 
+class PerNodeFieldDict:
+    from typing import Union
+
+    def __init__(self, default_value=None) -> None:
+        self.global_value = string_to_base_type(default_value) if isinstance(default_value, str) else default_value
+        self.tdict = {}
+        self.rdict = {}
+
+    def __repr__(self):
+        from collections import defaultdict
+        msg = str(self.global_value)
+        if (len(self.tdict) > 0) or (len(self.rdict) > 0):
+            msg += " & "
+            vdict = defaultdict(list)
+            for k, v in self.tdict.items():
+                vdict[v].append(k)
+            for t, c in vdict.items():
+                msg += f"<{c}:{t}> "
+            vdict = defaultdict(list)
+            for k, v in self.rdict.items():
+                vdict[v].append(k)
+            for t, c in vdict.items():
+                msg += f"<{c}:{t}> "
+        return msg
+
+    def set_default_value(self, default_value):
+        self.global_value = string_to_base_type(default_value) if isinstance(default_value, str) else default_value
+
+    def add_optype_field(self, key: str, value):
+        self.tdict[key.lower()] = string_to_base_type(value) if isinstance(value, str) else value
+
+    def add_layer_range_field(self, key: tuple, value):
+        self.rdict[key] = string_to_base_type(value) if isinstance(value, str) else value
+
+    def get(self, node: PyNode):
+        tkey = node.type.name.lower()
+        mkey = node.params['method'].lower() if (node.type == OpType.Activation) else ''
+        lid = int(node.attrs['layer_id'])
+        # per-layer config with highest priority
+        for rkey, rval in self.rdict.items():
+            if lid >= rkey[0] and lid <= rkey[1]:
+                return rval
+        # then per operator config with higher priority
+        if tkey in self.tdict.keys():
+            return self.tdict[tkey]
+        elif mkey in self.tdict.keys():
+            return self.tdict[mkey]
+        # then use global default config
+        return self.global_value
+
+
 class BaseField(object):
+    rint = r'\s*(\-|\+)?\d+\s*'
+    rfloat = r'\s*(\-|\+)?\d+((\.\d+)|\.)?\s*'
+    roptype = r'\s*[a-zA-Z_0-9]+\s*'
+    roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
+    rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
+    rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
+    per_node_cfg_usage = "\nYou can also use 'global_value & <[(layer_id1,layer_id2),(layer_id3,layer_id4), ...]:local_value1> < [operator_type1, operator_type2, ...]:local_value2> ...' formart (where 'global_value' is the default value to configure each layer, and 'lobal_value' is for overwriting the default value on specific layers you assigned, 'layer_id' stands for layer_id in input IR and '(layer_id1, layer_id2)' specify the layers which will be applied, 'operator_type' stands for valid operator type names that specify the operators which will be applied) for per-layer configuration."
+
+    @staticmethod
+    def _re_parse(cfg_content, roi_pattern: str):
+        cfg_line = str(cfg_content)
+        rnode_cfg = r'\s*(({})|({})):\s*({})\s*'.format(BaseField.rlayers, BaseField.roptypes, roi_pattern)
+        re_per_node_field = r'(^\s*{}\s*$)|(^\s*{}&(\<{}\>)+\s*$)'.format(roi_pattern, roi_pattern, rnode_cfg)
+        pdict = PerNodeFieldDict()
+        flag = False
+        if re.match(re_per_node_field, cfg_line):
+            flag = True
+            pidx = cfg_line.find('&')
+            default_value = cfg_line.strip()
+            if pidx > 0:
+                default_value = cfg_line[:pidx].strip()
+                pair_str_list = [x for x in re.split(r'\<|\>', cfg_line[pidx+1:].strip()) if x.lower().strip()]
+                for pair_str in pair_str_list:
+                    kidx = pair_str.find(':')
+                    assert kidx > 0
+                    kstr = pair_str[:kidx].strip()
+                    vstr = pair_str[kidx+1:].strip()
+                    assert re.match(roi_pattern, vstr)
+                    if re.match(BaseField.roptypes, kstr):
+                        for ot in [o.lower().strip() for o in re.split(r',|\[|\]|\(|\)|\s+', kstr) if o.lower().strip()]:
+                            pdict.add_optype_field(ot, vstr)
+                    elif re.match(BaseField.rlayers, kstr):
+                        layer_ranges = [int(idx) for idx in re.split(
+                            r',|\[|\]|\(|\)|\s+', kstr) if idx.lower().strip()]
+                        for k in range(0, len(layer_ranges), 2):
+                            pdict.add_layer_range_field((layer_ranges[k], layer_ranges[k+1]), vstr)
+                    else:
+                        pass
+            pdict.set_default_value(default_value)
+        return flag, pdict
+
     @staticmethod
     def default(*args):
         raise NotImplementedError()
 
     @staticmethod
-    def check(*args):
+    def parse(*args):
         raise NotImplementedError()
+        # return bool, PerNodeFieldDict/Any
 
     @staticmethod
     def error(*args):
@@ -47,8 +140,8 @@ class GraphField(BaseField):
         return ''
 
     @staticmethod
-    def check(g):
-        return True if not os.path.isfile(g) else False
+    def parse(g):
+        return os.path.isfile(g), g
 
     @staticmethod
     def error(g):
@@ -66,8 +159,8 @@ class BinField(BaseField):
         return ''
 
     @staticmethod
-    def check(b):
-        return True if not os.path.isfile(b) else False
+    def parse(b):
+        return os.path.isfile(b), b
 
     @staticmethod
     def error(b):
@@ -85,36 +178,55 @@ class ModelNameField(BaseField):
         return ''
 
     @staticmethod
-    def check(m):
-        return True if m == '' else False
+    def parse(m):
+        return m != '', m
 
     @staticmethod
     def error(m):
-        return f"Require the non-empty 'model_name' field, now mode_name is '' char."
+        return f"Require the non-empty 'model_name' field, now mode_name is ''."
 
     @staticmethod
     def message():
         return f"A name for distinguishing different models."
 
 
-@field_register('quant_ir_name', 'default')
+@field_register('out_ir_name', 'default')
+class OutIRNameField(BaseField):
+    @staticmethod
+    def default():
+        return ''
+
+    @staticmethod
+    def parse(q):
+        return True, str(q)
+
+    @staticmethod
+    def error(q):
+        return (f"Suggest the non-empty 'out_ir_name' field, if out_ir_name='', "
+                f"Optimizer will use the <model_name>_o for output IR.")
+
+    @staticmethod
+    def message():
+        return f"A name for output IR."
+
+
+@field_register('quant_ir_name', 'hidden')
 class QuantIRNameField(BaseField):
     @staticmethod
     def default():
         return ''
 
     @staticmethod
-    def check(q):
-        return True if q == '' else False
+    def parse(q):
+        return True, str(q)
 
     @staticmethod
     def error(q):
-        return (f"Suggest the non-empty 'quant_ir_name' field, if quant_ir_name='', "
-                f"Optimizer will use the <model_name> for quant IR.")
+        return (f"Should be valid string(can only be made of 'a-z', 'A-Z', '0-9', '_').")
 
     @staticmethod
     def message():
-        return f"A name for Compass quantized IR name."
+        return f"A name for output IR. Suggest use 'out_ir_name' instead."
 
 
 @field_register('output_dir', 'default')
@@ -125,16 +237,16 @@ class OutputDirField(BaseField):
         return './opt_log'
 
     @staticmethod
-    def check(od):
-        return False
+    def parse(od):
+        return True, od
 
     @staticmethod
     def error(od):
-        return f"Now 'output_dir={od}' does not existed. Optimizer will create the path."
+        return f"Now 'output_dir={od}' does not existed. Optimizer will try to create the path."
 
     @staticmethod
     def message():
-        return f"A path to save the quantized IR, calibration statistic file and quantization configuration json file."
+        return f"A path to save the output IR, calibration statistic file and quantization configuration json file."
 
 
 @field_register('dataset', 'default')
@@ -149,21 +261,14 @@ class DatasetField(BaseField):
         return ''
 
     @staticmethod
-    def check(d):
-        if isinstance(d, list):
-            return True
+    def parse(d):
         _plugins = str([k for k in DatasetField._dataset_plugins()] + [''])
-        if d.lower() not in _plugins:
-            return True
-        return False
+        return (not isinstance(d, (tuple, list))) and (d.lower() in _plugins), d
 
     @staticmethod
     def error(d):
-        if isinstance(d, (tuple, list)):
-            return f"Optimizer now does not support multi-dataset, and now dataset = {d}"
         _plugins = str([k for k in DatasetField._dataset_plugins()] + [''])
-        if d not in _plugins:
-            return f"Require the 'dataset' field must be in {_plugins}, and now dataset = {d}."
+        return f"Require the 'dataset' field must be in {_plugins}, and do not support multi-dataset,  now dataset = {d}."
 
     @staticmethod
     def message():
@@ -218,23 +323,23 @@ class MetricField(BaseField):
         return ''
 
     @staticmethod
-    def check(m):
+    def parse(m):
         if not isinstance(m, str):
-            return True
+            return False, m
         m = m.replace(' ', '')
         if m != '':
             if m.count('(') != m.count(')'):
-                return True
+                return False, m
             metrics = MetricField._split_metrics(m)
             if isinstance(metrics, bool) and metrics == False:
-                return True
+                return False, m
             func_args = MetricField._get_func_args(metrics)
             mnames = [fa[0].lower() for fa in func_args]
         else:
             mnames = m
         if set(mnames).issubset(set(MetricField._metric_plugins() + [''])):
-            return False
-        return True
+            return True, m
+        return False, m
 
     @staticmethod
     def error(m):
@@ -253,13 +358,13 @@ class MetricField(BaseField):
             msg += f"Please check the 'metric' field format. "
         else:
             msg += f"Require the 'metric' field must be in {MetricField._metric_plugins()}, "
-        msg += f"now 'metric={m}'"
+        msg += f"now 'metric={m}'."
         return msg
 
     @staticmethod
     def message():
-        return (f"A metric plugin name for metric one model. It supports multi-metric and uses ',' to seperate. "
-                f"Now Optimizer supports metric plugin name is {MetricField._metric_plugins()}.")
+        return (f"A metric plugin name for measure model's accuracy. It supports multi-metric and uses ',' to seperate. "
+                f"Now Optimizer supports metric plugins: {MetricField._metric_plugins()}.")
 
 
 @field_register('eval_original_model', 'default')
@@ -270,8 +375,8 @@ class EvalOriginalModelField(BaseField):
         return 'True'
 
     @staticmethod
-    def check(e):
-        return True if not isinstance(e, bool) else False
+    def parse(e):
+        return isinstance(e, bool), e
 
     @staticmethod
     def error(e):
@@ -279,7 +384,7 @@ class EvalOriginalModelField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether run evaluation on original (float) model."
+        return f"Whether run evaluation on original model."
 
 
 @field_register('data', 'default')
@@ -290,8 +395,8 @@ class DataField(BaseField):
         return ''
 
     @staticmethod
-    def check(d):
-        return True if not (os.path.isfile(d) or os.path.exists(d) or d == '') else False
+    def parse(d):
+        return os.path.isfile(d) or os.path.exists(d) or d == '', d
 
     @staticmethod
     def error(d):
@@ -299,7 +404,7 @@ class DataField(BaseField):
 
     @staticmethod
     def message():
-        return f"A dataset path for metric a model."
+        return f"A dataset path for evaluating a model."
 
 
 @field_register('label', 'default')
@@ -310,8 +415,8 @@ class LabelField(BaseField):
         return ''
 
     @staticmethod
-    def check(l):
-        return True if not (os.path.isfile(l) or os.path.exists(l) or l == '') else False
+    def parse(l):
+        return os.path.isfile(l) or os.path.exists(l) or l == '', l
 
     @staticmethod
     def error(l):
@@ -319,7 +424,7 @@ class LabelField(BaseField):
 
     @staticmethod
     def message():
-        return f"A label path for metric a model."
+        return f"A label path for evaluating a model."
 
 
 @field_register('data_batch_dim', 'default')
@@ -329,8 +434,8 @@ class DataBatchDimField(BaseField):
         return '0'
 
     @staticmethod
-    def check(bd):
-        return True if not (isinstance(bd, int) and bd >= 0) else False
+    def parse(bd):
+        return isinstance(bd, int) and bd >= 0, bd
 
     @staticmethod
     def error(bd):
@@ -353,8 +458,8 @@ class LabelBatchDimField(BaseField):
         return '0'
 
     @staticmethod
-    def check(bd):
-        return True if not (isinstance(bd, int) and bd >= 0) else False
+    def parse(bd):
+        return isinstance(bd, int) and bd >= 0, bd
 
     @staticmethod
     def error(bd):
@@ -377,8 +482,8 @@ class WithoutBatchDimField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(wobd):
-        return True if not isinstance(wobd, bool) else False
+    def parse(wobd):
+        return isinstance(wobd, bool), wobd
 
     @staticmethod
     def error(wobd):
@@ -397,13 +502,13 @@ class DataloaderWorkersField(BaseField):
         return '0'
 
     @staticmethod
-    def check(dw):
-        return True if not (isinstance(dw, int) and dw >= 0) else False
+    def parse(dw):
+        return isinstance(dw, int) and dw >= 0, dw
 
     @staticmethod
     def error(dw):
         msg = dw if isinstance(dw, int) else type(dw)
-        return f"Required the nonnegative integer(>= 0) 'dataloader_workers' field, now is {msg}. default value=0."
+        return f"Required the nonnegative integer(>= 0) 'dataloader_workers' field, now is {msg}. default value=0 (means without multi-thread)."
 
     @staticmethod
     def message():
@@ -418,8 +523,8 @@ class CalibrationBatchSizeField(BaseField):
         return '1'
 
     @staticmethod
-    def check(cbz):
-        return True if not (isinstance(cbz, int) and cbz > 0) else False
+    def parse(cbz):
+        return isinstance(cbz, int) and cbz > 0, cbz
 
     @staticmethod
     def error(cbz):
@@ -439,8 +544,8 @@ class MetricBatchSizeField(BaseField):
         return '1'
 
     @staticmethod
-    def check(mbz):
-        return True if not (isinstance(mbz, int) and mbz > 0) else False
+    def parse(mbz):
+        return isinstance(mbz, int) and mbz > 0, mbz
 
     @staticmethod
     def error(mbz):
@@ -449,7 +554,7 @@ class MetricBatchSizeField(BaseField):
 
     @staticmethod
     def message():
-        return f"Batch size when metricing a model."
+        return f"Batch size when evaluating a model's accuracy."
 
 
 @field_register('dump', 'default')
@@ -460,8 +565,8 @@ class DumpField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(dp):
-        return True if not isinstance(dp, bool) else False
+    def parse(dp):
+        return isinstance(dp, bool), dp
 
     @staticmethod
     def error(dp):
@@ -480,16 +585,16 @@ class DumpDirField(BaseField):
         return './opt_dump'
 
     @staticmethod
-    def check(dd):
-        return False
+    def parse(dd):
+        return True, dd
 
     @staticmethod
     def error(dd):
-        return f"Now 'dump_dir={dd}' does not existed. Optimizer will create the path."
+        return f"Now 'dump_dir={dd}' does not existed. Optimizer will try to create the path."
 
     @staticmethod
     def message():
-        return f"Dump all data files will save to this path when 'dump=true'."
+        return f"Dumped data files will save to this path when 'dump=true'."
 
 
 @field_register('opt_config', 'default')
@@ -500,8 +605,8 @@ class OptConfigField(BaseField):
         return ''
 
     @staticmethod
-    def check(oc):
-        return True if not (os.path.isfile(oc) or oc == '') else False
+    def parse(oc):
+        return os.path.isfile(oc) or oc == '', oc
 
     @staticmethod
     def error(oc):
@@ -509,19 +614,19 @@ class OptConfigField(BaseField):
 
     @staticmethod
     def message():
-        return f"A file stores quantization configurations of each node."
+        return f"A file stores configurations of each node."
 
 
 @field_register('statistic_file', 'default')
 class StatisticFileField(BaseField):
-    # statistic information file computed with this tool before, load this file can save some time juring quantization.
+    # statistic information file computed with this tool before, load this file can save some time during quantization.
     @staticmethod
     def default():
         return ''
 
     @staticmethod
-    def check(sf):
-        return True if not (os.path.isfile(sf) or sf == '') else False
+    def parse(sf):
+        return os.path.isfile(sf) or sf == '', sf
 
     @staticmethod
     def error(sf):
@@ -534,24 +639,18 @@ class StatisticFileField(BaseField):
 
 class CalibrationStrategyField(BaseField):
     # activation calibration method like 'mean', 'extrema', 'Nstd', 'kld', etc.
-    @staticmethod
-    def _check_calibration_method(cm):
-        if re.match(r'^\d+std$', cm.lower()):
-            return False
-        elif re.match(r'^\d*kld$', cm.lower()):
-            return False
-        elif re.match(r'^(\d\.?\d*)*aciq_laplace$', cm.lower()):
-            return False
-        elif re.match(r'^(\d\.?\d*)*aciq_gauss$', cm.lower()):
-            return False
-        elif re.match(r'^(\d\.?\d*)*percentile$', cm.lower()):
-            return False
-        elif re.match(r'^weighted_scale_param\[[0-9]+\.?[0-9]*\s*,\s*[0-9]+\.?[0-9]*\s*,\s*[0-9]+\.?[0-9]*\s*,\s*[0-9]+\.?[0-9]*\s*\,?\s*]$', cm.lower()):
-            return False
-        elif cm.lower() in ['extrema', 'mean', 'in_ir']:
-            return False
-        else:
-            return True
+    cs_pattern = rf'^(extrema)|(mean)|(in_ir)|(\d+std)|(\d*kld)|((\d\.?\d*)*aciq_laplace)|((\d\.?\d*)*aciq_gauss)|((\d\.?\d*)*percentile)|(weighted_scale_param\[{BaseField.rfloat},{BaseField.rfloat},{BaseField.rfloat},{BaseField.rfloat}\])$'
+    cs_wgt = [
+        'extrema',
+        'in_ir',
+        'Nstd',
+        '[N]kld',
+        '[R]aciq_laplace',
+        '[R]aciq_gauss',
+        '[R]percentile',
+        'weighted_scale_param[x1.y1,x2.y2,x3.y3,x4.y4]',
+    ]
+    cs_act = cs_wgt.append('mean')
 
     @staticmethod
     def _need_statistic_info(cm):
@@ -572,34 +671,8 @@ class CalibrationStrategyField(BaseField):
         return r
 
     @staticmethod
-    def _calibration_method():
-        _calib_methods = [
-            'extrema',
-            'Nstd',
-            'in_ir',
-            '[N]kld',
-            '[R]aciq_laplace',
-            '[R]aciq_gauss',
-            '[R]percentile',
-            'weighted_scale_param[x1.y1,x2.y2,x3.y3,x4.y4]',
-        ]
-        return _calib_methods
-
-    @staticmethod
-    def default():
-        return "extrema"
-
-    @staticmethod
-    def check(cw):
-        return CalibrationStrategyField._check_calibration_method(cw)
-
-    @staticmethod
-    def error(cs):
-        pass
-
-    @staticmethod
-    def message():
-        pass
+    def parse(cw):
+        return BaseField._re_parse(cw, CalibrationStrategyField.cs_pattern)
 
 
 @field_register('calibration_strategy_for_weight', 'default')
@@ -609,12 +682,12 @@ class CalibrationStrategyForWeightField(CalibrationStrategyField):
         return 'extrema'
 
     @staticmethod
-    def check(cw):
-        return CalibrationStrategyField.check(cw)
+    def parse(cw):
+        return CalibrationStrategyField.parse(cw)
 
     @staticmethod
     def error(cw):
-        msg = (f"Optimizer supports 'calibration_method={CalibrationStrategyForWeightField._calibration_method()}', Now calibration method = '{cw}' in cfg file. "
+        msg = (f"Optimizer supports 'calibration_method={CalibrationStrategyForWeightField.cs_wgt}', Now calibration method = '{cw}' in cfg file. "
                f"The 'N' in 'Nstd' means one positive integer, like '2std'. "
                f"The '[N]' in '[N]kld' means none or one positive integer, like 'kld' or '2kld'. "
                f"The '[R]' in '[R]aciq_laplace', '[R]aciq_gauss' and '[R]percentile' means none or one positive real number, like 'aciq_laplace' or '1.5aciq_laplace'. "
@@ -624,28 +697,26 @@ class CalibrationStrategyForWeightField(CalibrationStrategyField):
 
     @staticmethod
     def message():
-        return f"'Weight calibration strategy. Now Optimizer supports weight calibration strategy: {CalibrationStrategyForWeightField._calibration_method()}."
+        msg = (f"'Weight calibration strategy. Now Optimizer supports weight calibration strategy: {CalibrationStrategyForWeightField.cs_wgt}."
+               f"{BaseField.per_node_cfg_usage}"
+               )
+        return msg
 
 
 @field_register('calibration_strategy_for_activation', 'default')
 class CalibrationStrategyForActivationField(CalibrationStrategyField):
     # activation calibration method like 'mean', 'extrema', 'Nstd', 'kld', etc.
     @staticmethod
-    def _calibration_method():
-        _act_calib_methods = CalibrationStrategyField._calibration_method() + ['mean']
-        return _act_calib_methods
-
-    @staticmethod
     def default():
         return 'mean'
 
     @staticmethod
-    def check(ca):
-        return CalibrationStrategyField.check(ca)
+    def parse(ca):
+        return CalibrationStrategyField.parse(ca)
 
     @staticmethod
     def error(ca):
-        msg = (f"Optimizer supports 'calibration_method={CalibrationStrategyForActivationField._calibration_method()}', Now calibration method = '{ca}' in cfg file. "
+        msg = (f"Optimizer supports 'calibration_method={CalibrationStrategyForActivationField.cs_act}', Now calibration method = '{ca}' in cfg file. "
                f"The 'N' in 'Nstd' means one positive integer, like '2std'. "
                f"The '[N]' in '[N]kld' means none or one positive integer, like 'kld' or '2kld'. "
                f"The '[R]' in '[R]aciq_laplace', '[R]aciq_gauss' and '[R]percentile' means none or one positive real number, like 'aciq_laplace' or '1.5aciq_laplace'. "
@@ -654,14 +725,17 @@ class CalibrationStrategyForActivationField(CalibrationStrategyField):
 
     @staticmethod
     def message():
-        return f"Activation calibration strategy. Now Optimizer supports activation calibration strategy: {CalibrationStrategyForActivationField._calibration_method()}"
+        msg = (f"Activation calibration strategy. Now Optimizer supports activation calibration strategy: {CalibrationStrategyForActivationField.cs_act}"
+               f"{BaseField.per_node_cfg_usage}"
+               )
+        return msg
 
 
 @field_register('global_calibration', 'default')
 class GlobalCalibrationParamField(BaseField):
     # global calibration method like 'easy_quant', 'ada_round', ... , default is None, means no global calibration.
     @staticmethod
-    def _parse(gc):
+    def parse(gc):
         rfloat = r'\s*(\-|\+)?\d+((\.\d+)|\.)?\s*'
         roptype = r'\s*[a-zA-Z_0-9]+\s*'
         rparams = r'\s*\[{}(,{})*\]\s*'.format(rfloat, rfloat)
@@ -741,16 +815,6 @@ class GlobalCalibrationParamField(BaseField):
             You can also apply multiple methods sequentially with `&`, e.g. `adaround[10, 3, 32] & easy_quant`. "
 
     @staticmethod
-    def check(gc):
-        m = gc.lower()
-        if 'none' == m:
-            return False
-        elif GlobalCalibrationParamField._parse(m)[0]:
-            return False
-        else:
-            return True
-
-    @staticmethod
     def error(gc):
         return GlobalCalibrationParamField.message() + f" now is {gc}"
 
@@ -763,8 +827,8 @@ class CalibrationDataField(BaseField):
         return ''
 
     @staticmethod
-    def check(cd):
-        return True if not (os.path.isfile(cd) or os.path.exists(cd) or cd == '') else False
+    def parse(cd):
+        return os.path.isfile(cd) or os.path.exists(cd) or cd == '', cd
 
     @staticmethod
     def error(cd):
@@ -783,8 +847,8 @@ class CalibrationShuffleField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(cs):
-        return True if not isinstance(cs, bool) else False
+    def parse(cs):
+        return isinstance(cs, bool), cs
 
     @staticmethod
     def error(cs):
@@ -807,9 +871,13 @@ class QuantizeMethodForWeightField(BaseField):
         return 'per_tensor_symmetric_restricted_range'
 
     @staticmethod
-    def check(qmw):
+    def parse(qmw):
         _weight_qmethod = QuantizeMethodForWeightField._weight_quantize_method()
-        return True if qmw.lower() not in _weight_qmethod else False
+        qmw_pattern = r''
+        for m in _weight_qmethod:
+            qmw_pattern += rf'({m})|'
+        qmw_pattern = qmw_pattern[:-1]
+        return BaseField._re_parse(qmw, qmw_pattern)
 
     @staticmethod
     def error(qmw):
@@ -819,7 +887,7 @@ class QuantizeMethodForWeightField(BaseField):
     @staticmethod
     def message():
         _weight_qmethod = QuantizeMethodForWeightField._weight_quantize_method()
-        return f"Weight quantization method. Now Optimizer supports quantzation method: {_weight_qmethod}"
+        return f"Weight quantization method. Now Optimizer supports quantzation method: {_weight_qmethod}. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('quantize_method_for_activation', 'default')
@@ -834,9 +902,13 @@ class QuantizeMethodForActivationField(BaseField):
         return 'per_tensor_symmetric_full_range'
 
     @staticmethod
-    def check(qma):
+    def parse(qma):
         _activation_qmethod = QuantizeMethodForActivationField._activation_quantize_method()
-        return True if qma.lower() not in _activation_qmethod else False
+        qma_pattern = r''
+        for m in _activation_qmethod:
+            qma_pattern += rf'({m})|'
+        qma_pattern = qma_pattern[:-1]
+        return BaseField._re_parse(qma, qma_pattern)
 
     @staticmethod
     def error(qma):
@@ -846,7 +918,7 @@ class QuantizeMethodForActivationField(BaseField):
     @staticmethod
     def message():
         _activation_qmethod = QuantizeMethodForActivationField._activation_quantize_method()
-        return f"Activation quantization method. Now Optimizer supports quantzation method: {_activation_qmethod}"
+        return f"Activation quantization method. Now Optimizer supports quantzation method: {_activation_qmethod}. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('weight_bits', 'default')
@@ -861,9 +933,13 @@ class WeightBitsField(BaseField):
         return '8'
 
     @staticmethod
-    def check(wb):
+    def parse(wb):
         _wbits = WeightBitsField._weight_bits()
-        return True if not (isinstance(wb, int) and wb in _wbits) else False
+        wb_pattern = r''
+        for b in _wbits:
+            wb_pattern += rf'({b})|'
+        wb_pattern = wb_pattern[:-1]
+        return BaseField._re_parse(wb, wb_pattern)
 
     @staticmethod
     def error(wb):
@@ -873,7 +949,7 @@ class WeightBitsField(BaseField):
     @staticmethod
     def message():
         _wbits = WeightBitsField._weight_bits()
-        return f"Weight bits for quantizating weight data. Now Optimizer supports weight bits:{_wbits}."
+        return f"Weight bits for quantizating weight data. Now Optimizer supports weight bits:{_wbits}. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('activation_bits', 'default')
@@ -888,9 +964,13 @@ class ActivationBitsField(BaseField):
         return '8'
 
     @staticmethod
-    def check(ab):
+    def parse(ab):
         _abits = ActivationBitsField._activation_bits()
-        return True if not (isinstance(ab, int) and ab in _abits) else False
+        ab_pattern = r''
+        for b in _abits:
+            ab_pattern += rf'({b})|'
+        ab_pattern = ab_pattern[:-1]
+        return BaseField._re_parse(ab, ab_pattern)
 
     @staticmethod
     def error(ab):
@@ -900,7 +980,7 @@ class ActivationBitsField(BaseField):
     @staticmethod
     def message():
         _abits = ActivationBitsField._activation_bits()
-        return f"Activation bits for quantizating activation data. Now Optimizer supports activation bits:{_abits}."
+        return f"Activation bits for quantizating activation data. Now Optimizer supports activation bits:{_abits}. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('lut_items_in_bits', 'default')
@@ -916,9 +996,13 @@ class LutItemsInBitsField(BaseField):
         return '8'
 
     @staticmethod
-    def check(lb):
+    def parse(lb):
         _abits = LutItemsInBitsField._activation_bits()
-        return True if not (isinstance(lb, int) and lb in _abits) else False
+        ab_pattern = r''
+        for b in _abits:
+            ab_pattern += rf'({b})|'
+        ab_pattern = ab_pattern[:-1]
+        return BaseField._re_parse(lb, ab_pattern)
 
     @staticmethod
     def error(lb):
@@ -928,7 +1012,7 @@ class LutItemsInBitsField(BaseField):
     @staticmethod
     def message():
         _abits = LutItemsInBitsField._activation_bits()
-        return f"Maximal LUT items (in bits, as only support LUT with 2**N items) amount when representing nonlinear functions in quantization, default to '8', suggest to set to 10+ when quantizing activations to 16bit. Now Optimizer supports: {_abits} ."
+        return f"Maximal LUT items (in bits, as only support LUT with 2**N items) amount when representing nonlinear functions in quantization, default to '8', suggest to set to 10+ when quantizing activations to 16bit. Now Optimizer supports: {_abits} . {BaseField.per_node_cfg_usage}"
 
 
 @field_register('bias_bits', 'default')
@@ -943,9 +1027,13 @@ class BiasBitsField(BaseField):
         return '32'
 
     @staticmethod
-    def check(bb):
+    def parse(bb):
         _bbits = BiasBitsField._bias_bits()
-        return True if not (isinstance(bb, int) and bb in _bbits) else False
+        ab_pattern = r''
+        for b in _bbits:
+            ab_pattern += rf'({b})|'
+        ab_pattern = ab_pattern[:-1]
+        return BaseField._re_parse(bb, ab_pattern)
 
     @staticmethod
     def error(bb):
@@ -955,7 +1043,7 @@ class BiasBitsField(BaseField):
     @staticmethod
     def message():
         _bbits = BiasBitsField._bias_bits()
-        return f"Bias bits for quantizating bias data. Now Optimizer supports bias bits:{_bbits} ."
+        return f"Bias bits for quantizating bias data. Now Optimizer supports bias bits:{_bbits}. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('bias_effective_bits', 'default')
@@ -969,9 +1057,15 @@ class BiasEffectiveBitsField(BaseField):
         return ''
 
     @staticmethod
-    def check(bb):
+    def parse(bb):
+        if '' == bb:
+            return True, bb
         _bbits = BiasEffectiveBitsField._bias_bits()
-        return True if not (bb == '' or (isinstance(bb, int) and bb in _bbits)) else False
+        ab_pattern = r''
+        for b in _bbits:
+            ab_pattern += rf'({b})|'
+        ab_pattern = ab_pattern[:-1]
+        return BaseField._re_parse(bb, ab_pattern)
 
     @staticmethod
     def error(bb):
@@ -982,7 +1076,7 @@ class BiasEffectiveBitsField(BaseField):
     @staticmethod
     def message():
         return (f"The effective high bits for bias data which realy taking part "
-                f"in computation (lower bits will be set to 0), due to hardware restriction. ")
+                f"in computation (lower bits will be set to 0), due to hardware restriction. {BaseField.per_node_cfg_usage}")
 
 
 @field_register('unify_shifts_for_aiff', 'default')
@@ -992,8 +1086,8 @@ class UnifyShiftsForAIFFField(BaseField):
         return 'True'
 
     @staticmethod
-    def check(us):
-        return True if not isinstance(us, bool) else False
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
 
     @staticmethod
     def error(us):
@@ -1001,7 +1095,7 @@ class UnifyShiftsForAIFFField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether to unify shifts for AIFF OPs due to hardware limitations."
+        return f"Whether to unify shifts for AIFF operators due to hardware limitations. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('cast_dtypes_for_lib', 'default')
@@ -1011,8 +1105,8 @@ class CastDtypesForLibField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(cd):
-        return False
+    def parse(cd):
+        return True, cd
 
     @staticmethod
     def error(cd):
@@ -1037,9 +1131,9 @@ class MinZhouyiTarget(BaseField):
         return 'Z2'
 
     @staticmethod
-    def check(us):
+    def parse(us):
         support_target_ = MinZhouyiTarget._support_target()
-        return str(us).upper() not in support_target_
+        return str(us).upper() in support_target_, us
 
     @staticmethod
     def error(cd):
@@ -1049,7 +1143,7 @@ class MinZhouyiTarget(BaseField):
     @staticmethod
     def message():
         support_target = MinZhouyiTarget._support_target()
-        return (f"The lowest compatible architecture version for deployment, it may affect some operators' quantization schema, currently support: {support_target}.")
+        return (f"The lowest compatible architecture version for deployment, it may affect some operators' quantization (or approximation) schema, currently support: {support_target}.")
 
 
 @field_register('force_dtype_int', 'default')
@@ -1059,8 +1153,8 @@ class ForceDtypeIntField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(fdi):
-        return True if not isinstance(fdi, bool) else False
+    def parse(fdi):
+        return BaseField._re_parse(fdi, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
 
     @staticmethod
     def error(fdi):
@@ -1068,7 +1162,7 @@ class ForceDtypeIntField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether force layer top tensors to be quantized to int types (may cause accuracy drop or be rejected by lib's restriction) instead of being decided automatically."
+        return f"Whether force layer top tensors to be quantized to int types (may cause accuracy drop or be rejected by lib's restriction) instead of being decided automatically. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('force_shift_positive', 'default')
@@ -1078,8 +1172,8 @@ class ForceShiftPositiveField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(fsp):
-        return True if not isinstance(fsp, bool) else False
+    def parse(fsp):
+        return BaseField._re_parse(fsp, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
 
     @staticmethod
     def error(fsp):
@@ -1087,7 +1181,7 @@ class ForceShiftPositiveField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether to force each layer's requantization parameter 'shift' to be positive (due to hardware's limitation, accuracy drop may occurs)."
+        return f"Whether to force each layer's requantization parameter 'shift' to be positive (due to hardware's limitation, accuracy drop may occurs). {BaseField.per_node_cfg_usage}"
 
 
 @field_register('running_statistic_momentum', 'default')
@@ -1098,8 +1192,8 @@ class RunningStatisticMomentumField(BaseField):
         return '0.9'
 
     @staticmethod
-    def check(rsm):
-        return True if not isinstance(rsm, (int, float)) else False
+    def parse(rsm):
+        return BaseField._re_parse(rsm, r'\s*\d+((\.\d+)|\.)?\s*')
 
     @staticmethod
     def error(rsm):
@@ -1107,7 +1201,7 @@ class RunningStatisticMomentumField(BaseField):
 
     @staticmethod
     def message():
-        return f"Momentum(range[0.0, 1.0]) used for calculating weighted average of some statistics when calibration dataset has multiple batches."
+        return f"Momentum(range[0.0, 1.0]) used for calculating weighted average of some statistics when calibration dataset has multiple batches. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('histc_bins', 'default')
@@ -1118,8 +1212,8 @@ class HistcBinsField(BaseField):
         return '2048'
 
     @staticmethod
-    def check(hb):
-        return True if not (isinstance(hb, int) and hb > 0) else False
+    def parse(hb):
+        return BaseField._re_parse(hb, r'\s*\d+\s*')
 
     @staticmethod
     def error(hb):
@@ -1127,7 +1221,7 @@ class HistcBinsField(BaseField):
 
     @staticmethod
     def message():
-        return f"Bins when statistic histograms of each tensor."
+        return f"Bins when statistic histograms of each tensor. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('set_qinvariant_for_start_nodes', 'default')
@@ -1138,13 +1232,11 @@ class SetQinvariantForStartNodesField(BaseField):
         return ''
 
     @staticmethod
-    def check(sqs):
-        if '' == sqs:
-            return False
-        elif re.match(r'^\s*\d+(\s*,\s*\d+)*\s*,?\s*$', str(sqs)):
-            return False
+    def parse(sqs):
+        if '' == sqs or re.match(r'^\s*\d+(\s*,\s*\d+)*\s*,?\s*$', str(sqs)):
+            return True, sqs
         else:
-            return True
+            return False, sqs
 
     @staticmethod
     def error(sqs):
@@ -1167,13 +1259,11 @@ class FakeQuantScopesForDebugField(BaseField):
         return ''
 
     @staticmethod
-    def check(fqs):
-        if '' == fqs:
-            return False
-        elif re.match(r'^\s*\[(\s*\(\s*\d+\s*,\s*\d+\s*\)\s*,?\s*)+\]\s*$', fqs):
-            return False
+    def parse(fqs):
+        if '' == fqs or re.match(r'^\s*\[(\s*\(\s*\d+\s*,\s*\d+\s*\)\s*,?\s*)+\]\s*$', fqs):
+            return True, fqs
         else:
-            return True
+            return False, fqs
 
     @staticmethod
     def error(fqs):
@@ -1194,8 +1284,8 @@ class FakeQuantOperatorsForDebugField(BaseField):
         return ''
 
     @staticmethod
-    def check(fqod):
-        return False
+    def parse(fqod):
+        return True, fqod
 
     @staticmethod
     def error(fqod):
@@ -1218,8 +1308,8 @@ class ResizeDegradeToNearestField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(rdn):
-        return True if not isinstance(rdn, bool) else False
+    def parse(fsp):
+        return BaseField._re_parse(fsp, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
 
     @staticmethod
     def error(rdn):
@@ -1227,7 +1317,7 @@ class ResizeDegradeToNearestField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether to degrade resize method to nearest neighbor to speed up resize."
+        return f"Whether to degrade resize method to nearest neighbor to speed up resize. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('unify_scales_for_concat', 'default')
@@ -1238,8 +1328,8 @@ class UnifyScalesForConcatField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(usc):
-        return True if not isinstance(usc, bool) else False
+    def parse(usc):
+        return isinstance(usc, bool), usc
 
     @staticmethod
     def error(usc):
@@ -1258,8 +1348,8 @@ class UnifyScalesForConcatThresholdField(BaseField):
         return '1.05'
 
     @staticmethod
-    def check(usct):
-        return True if not (isinstance(usct, float) and usct >= 1.0) else False
+    def parse(usct):
+        return isinstance(usct, float) and usct >= 1.0, usct
 
     @staticmethod
     def error(usct):
@@ -1279,8 +1369,8 @@ class UnifyScalesForConcatMaxDepthField(BaseField):
         return '20'
 
     @staticmethod
-    def check(uscmd):
-        return True if not (isinstance(uscmd, int) and uscmd > 0) else False
+    def parse(uscmd):
+        return isinstance(uscmd, int) and uscmd > 0, uscmd
 
     @staticmethod
     def error(uscmd):
@@ -1299,19 +1389,10 @@ class UnifyScales4MultiInputsOP(BaseField):
         return ''
 
     @staticmethod
-    def check(sqs):
-        if '' == sqs:
-            return False
-        elif re.match(r'^\s*\[(\s*\(\s*[a-zA-Z_0-9]+\s*,\s*\d+\s*,\s*\d+((\.\d+)|\.)?\s*,\s*((max)|(min)|(avg)|(out))\s*,?\s*\)\s*,?\s*)+\]\s*$', str(sqs).lower().strip()):
-            return False
-        else:
-            return True
-
-    @staticmethod
     def parse(sqs):
-        if UnifyScales4MultiInputsOP.check(sqs):
-            return {}
-        else:
+        if '' == sqs:
+            return True, {}
+        elif re.match(r'^\s*\[(\s*\(\s*[a-zA-Z_0-9]+\s*,\s*\d+\s*,\s*\d+((\.\d+)|\.)?\s*,\s*((max)|(min)|(avg)|(out))\s*,?\s*\)\s*,?\s*)+\]\s*$', str(sqs).lower().strip()):
             r = {}
             s = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|\s+', str(sqs).lower().strip()) if x.lower().strip()]
             for i in range(0, len(s), 4):
@@ -1322,7 +1403,9 @@ class UnifyScales4MultiInputsOP(BaseField):
                 for k, v in OpType.__dict__.items():
                     if str(k).lower().strip() == op_name:
                         r[v] = (depth, thres, method)
-            return r
+            return True, r
+        else:
+            return False, {}
 
     @staticmethod
     def error(sqs):
@@ -1352,8 +1435,8 @@ class WithWinogradField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(ww):
-        return True if not isinstance(ww, bool) else False
+    def parse(ww):
+        return BaseField._re_parse(ww, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
 
     @staticmethod
     def error(ww):
@@ -1361,7 +1444,7 @@ class WithWinogradField(BaseField):
 
     @staticmethod
     def message():
-        return f"Whether to enable winograd algorithm when possible."
+        return f"Whether to enable winograd algorithm when possible. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('mixed_precision_auto_search', 'default')
@@ -1371,8 +1454,12 @@ class MixedPrecisionAutoSearchField(BaseField):
         return '0,0.,L'
 
     @staticmethod
-    def check(mpas):
-        return True if not re.match(r'^\s*[0-9]+\s*,\s*-?[0-9]+\.?[0-9]*\s*,\s*[G|g|L|l]\s*$', mpas) else False
+    def parse(mpas):
+        if re.match(r'^\s*[0-9]+\s*,\s*-?[0-9]+\.?[0-9]*\s*,\s*[G|g|L|l]\s*$', mpas):
+            cmd = [x for x in re.split(r',', mpas.strip()) if x.lower().strip()]
+            return True, (int(cmd[0]), float(cmd[1]), cmd[2].strip().lower() == 'l')
+        else:
+            return False, mpas
 
     @staticmethod
     def error(mpas):
@@ -1402,14 +1489,12 @@ class FeaturemapTilingParamField(BaseField):
         return ''
 
     @staticmethod
-    def check(ftp):
-        if '' == ftp:
-            return False
+    def parse(ftp):
         # layout is [(start_node end_node slice_h,slice_w)]
-        elif re.match(r'^\s*\[(\s*\(\s*\d+\s*,\s*\d+\s*\,\s*\d+\s*\,\s*\d+\s*\)\s*,?\s*)+\]\s*$', ftp):
-            return False
+        if '' == ftp or re.match(r'^\s*\[(\s*\(\s*\d+\s*,\s*\d+\s*\,\s*\d+\s*\,\s*\d+\s*\)\s*,?\s*)+\]\s*$', ftp):
+            return True, ftp
         else:
-            return True
+            return False, ftp
 
     @staticmethod
     def error(ftp):
@@ -1433,9 +1518,9 @@ class FeaturemapSplitsItemXField(BaseField):
         return '1'
 
     @staticmethod
-    def check(ix):
+    def parse(ix):
         _item_n = FeaturemapSplitsItemXField._item_num()
-        return True if not (isinstance(ix, int) and ix in _item_n) else False
+        return isinstance(ix, int) and ix in _item_n, ix
 
     @staticmethod
     def error(ix):
@@ -1460,9 +1545,9 @@ class FeaturemapSplitsItemYField(BaseField):
         return '1'
 
     @staticmethod
-    def check(iy):
+    def parse(iy):
         _item_n = FeaturemapSplitsItemYField._item_num()
-        return True if not (isinstance(iy, int) and iy in _item_n) else False
+        return isinstance(iy, int) and iy in _item_n, iy
 
     @staticmethod
     def error(iy):
@@ -1486,9 +1571,9 @@ class FeaturemapSplitsConcatBlkField(BaseField):
         return '3'
 
     @staticmethod
-    def check(num):
+    def parse(num):
         _item_n = FeaturemapSplitsConcatBlkField._item_num()
-        return True if not (isinstance(num, int) and num in _item_n) else False
+        return isinstance(num, int) and num in _item_n, num
 
     @staticmethod
     def error(num):
@@ -1512,9 +1597,9 @@ class FeaturemapSplitsOverlapRateField(BaseField):
         return '50'
 
     @staticmethod
-    def check(rate):
+    def parse(rate):
         _or = FeaturemapSplitsOverlapRateField._overlap_rate()
-        return True if rate < _or[0] or rate > _or[-1] else False
+        return rate >= _or[0] and rate <= _or[-1], rate
 
     @staticmethod
     def error(rate):
@@ -1538,9 +1623,9 @@ class FeaturemapSplitsSramSizeField(BaseField):
         return '0'
 
     @staticmethod
-    def check(ss):
+    def parse(ss):
         _ssize = FeaturemapSplitsSramSizeField._sram_size()
-        return True if not(isinstance(ss, int) and ss in _ssize) else False
+        return isinstance(ss, int) and ss in _ssize, ss
 
     @staticmethod
     def error(ss):
@@ -1553,7 +1638,7 @@ class FeaturemapSplitsSramSizeField(BaseField):
         return f"Maximum allowed sram size for reducing memory footprint by tiling featuremaps. Now Optimizer supports sram size: {_ssize[0]}~{_ssize[-1]} k."
 
 
-@field_register('scaling_bits', 'hidden')
+@field_register('scaling_bits', 'default')
 class ScalingBitsField(BaseField):
     '''
     decodebox: [box_bits, box_num_perclass_bits, total_class_num_bits, label_perclass_bits],
@@ -1567,7 +1652,7 @@ class ScalingBitsField(BaseField):
     Resize:[interp_shift],
     RioAlign: [quant_bits, spatial_shift],
     ROIPooling: [index_precision],
-    Softmax: [max_value_scaling_bits],
+    Softmax: [max_value_scaling_bits, adjust_q],
     '''
     @staticmethod
     def _scaling_bits_default():
@@ -1582,7 +1667,8 @@ class ScalingBitsField(BaseField):
                   Resize: [13], \
                   RoiAlign: [12, 10], \
                   ROIPooling: [16], \
-                  Softmax: [20], \
+                  Softmax: [20, 1], \
+                  TopK: [0], \
                 }".replace(' ', '')
 
     @staticmethod
@@ -1604,9 +1690,9 @@ class ScalingBitsField(BaseField):
         return cmatch, cpattern
 
     @staticmethod
-    def check(scaling_bits):
+    def parse(scaling_bits):
         cmatch, _ = ScalingBitsField._match(scaling_bits)
-        return True if cmatch is None else False
+        return cmatch is not None, scaling_bits
 
     @staticmethod
     def _get_scaling_bits(scaling_bits):
@@ -1624,7 +1710,7 @@ class ScalingBitsField(BaseField):
         for sgms in split_gms:
             key, values = sgms.split(':')
             if len(values) > 1:
-                bits = [eval(b) for b in re.findall('\d+', values)]
+                bits = [eval(b) for b in re.findall('[+-]?\d+', values)]
                 scaling_bits_dict.update({key.lower(): bits})
         return scaling_bits_dict
 
@@ -1633,7 +1719,7 @@ class ScalingBitsField(BaseField):
         msg = ''
         if scaling_bits.count('{') != scaling_bits.count('}') or scaling_bits.count('[') != scaling_bits.count(']'):
             msg += "The num of '{' or '[' is not same to the num of '}' or ']'."
-        elif ScalingBitsField.check(scaling_bits):
+        elif not ScalingBitsField.parse(scaling_bits)[0]:
             msg += f"Please check the 'scaling_bits' field format, which should be like a dict format: " \
                    f"scaling_bits={{key:[value], key1:[value1]}}, " \
                    f"and 'key' should be op_type or a method in Activation Op; " \
@@ -1653,7 +1739,9 @@ class ScalingBitsField(BaseField):
             scaling_bits_key = str(node.type)[7:].lower()
             if scaling_bits_key in default_scaling_bits and scaling_bits_key in parsed_scaling_bits:
                 if len(default_scaling_bits[scaling_bits_key]) != len(parsed_scaling_bits[scaling_bits_key]):
-                    OPT_WARN('%s is set risky length of scaling_bits.' % str(node.type))
+                    OPT_WARN(f"({node}) is set risky length of scaling_bits, "
+                             f"which is default length(={len(default_scaling_bits[scaling_bits_key])}) != "
+                             f"configured length(={len(parsed_scaling_bits[scaling_bits_key])}).", log_once=True)
             node.attrs['scaling_bits'] = all_scaling_bits[scaling_bits_key]
         elif 'method' in node.params and node.params['method'].lower() in all_scaling_bits:
             scaling_bits_key = node.params['method'].lower()
@@ -1665,62 +1753,13 @@ class ScalingBitsField(BaseField):
 @field_register('trigger_float_op', 'default')
 class TriggerFloatOpField(BaseField):
     @staticmethod
-    def _parse(tf):
-        dstr = 'disable'
-        roptype = r'\s*[a-zA-Z_0-9]+\s*'
-        roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
-        rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
-        rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
-        rmethod = r'\s*(((float16_preferred)|(bfloat16_preferred)|(float32_preferred)|\
-            (float32_act_int_wht)|(float16_act_int_wht)|(bfloat16_act_int_wht))(!)?)\s*'
-        rmethod_optypes = r'{}{}~(({})|({}))'.format(rmethod, roptypes, rmethod, dstr)
-        rmethod_layers = r'{}{}~(({})|({}))'.format(rmethod, rlayers, rmethod, dstr)
-        one_method = r'\s*(({})|({})|({}))\s*'.format(rmethod, rmethod_optypes, rmethod_layers)
-        # multi_methods = r'^{}(&{})*$'.format(one_method, one_method)
-        # multi methods is actually disabled for simplicity
-        multi_methods = r'^{}$'.format(one_method)
-        tfstr = str(tf).lower().strip()
-        if dstr == tfstr:
-            return (True, [('disable', [], dstr)])
-        elif re.match(multi_methods, tfstr):
-            valid_methods = []
-            for mstr in [x.lower().strip() for x in re.split(r'&', tfstr) if x.lower().strip()]:
-                name = mstr + ' '
-                name_idx = name.find('[')
-                name = name[:name_idx].strip()
-                oplist = []
-                ol_str = mstr[name_idx:]
-                if re.match(rmethod_optypes, mstr):
-                    alt_idx = ol_str.find('~')
-                    dstr = ol_str[alt_idx+1:].strip()
-                    ol_str = ol_str[:alt_idx]
-                    oplist = [o.lower().strip() for o in re.split(
-                        r',|\[|\]|\(|\)|\s+', ol_str) if o.lower().strip()]
-                elif re.match(rmethod_layers, mstr):
-                    alt_idx = ol_str.find('~')
-                    dstr = ol_str[alt_idx+1:].strip()
-                    ol_str = ol_str[:alt_idx]
-                    idx_list = re.split(r',|\[|\]|\(|\)|\s+', ol_str)
-                    layer_ranges = [int(idx) for idx in idx_list if idx.lower().strip()]
-                    for k in range(0, len(layer_ranges), 2):
-                        for l in range(layer_ranges[k], layer_ranges[k+1]+1):
-                            oplist.append(l)
-                valid_methods.append((name, set(oplist), dstr))
-            return (True, valid_methods)
-        else:
-            return (False, [])
-
-    @staticmethod
     def default():
         return 'disable'
 
     @staticmethod
-    def check(tfo):
-        m = tfo.lower()
-        if TriggerFloatOpField._parse(m)[0]:
-            return False
-        else:
-            return True
+    def parse(tfo):
+        tf_pattern = r'((disable)|(float16_preferred)|(bfloat16_preferred)|(float32_preferred)|(float16_act_int_wht)|(bfloat16_act_int_wht)|(float32_act_int_wht))(!)?'
+        return BaseField._re_parse(tfo, tf_pattern)
 
     @staticmethod
     def error(tfo):
@@ -1733,8 +1772,8 @@ The `trigger_float_op` is used for activating layer lib's float implementation w
 
 disable
 float16_preferred
-bfloat16_preffered
-float32_preffered
+bfloat16_preferred
+float32_preferred
 float16_act_int_wht
 float32_act_int_wht
 bfloat16_act_int_wht
@@ -1745,12 +1784,9 @@ and quantization will be applied under such circumstances).
 
 Option ended with _int_wht means weight-only quantization will be applied (activations will be kept as float).
 
-If you want to ignore the implementation limitations of libs' dtype spec and force the specified float type to be used, you can append a '!' behind (so 'disable' is no need to append a '!'), e.g. 'float16_preferred!', 'float16_act_int_wht![FullyConnected]'.
-
-You can also assign option to specific layers (with corresponding layer_id range in input IR, e.g. 'float16_act_int_wht[(1,10),(20,30)]~float16_preferred!', 'float32_act_int_wht[(1,10)]~float16_preferred') or operator types (with valid operator type names, e.g. 'float16_act_int_wht[Abs, BatchNorm]~float16_preferred!', 'float16_act_int_wht[BatchNorm]~disable'), for layers not being specified, will use option behind '~'.
-
-The default value is 'disable'.
-        '''
+If you want to ignore the implementation limitations of libs' dtype spec and force the specified float type to be used, you can append a '!' behind (so 'disable' is no need to append a '!'), e.g. 'float16_preferred!', 'float16_act_int_wht!'.
+The default value is 'disable'. {}
+        '''.format(BaseField.per_node_cfg_usage)
 
 
 @field_register('save_statistic_info', 'default')
@@ -1760,8 +1796,8 @@ class SaveStatisticInfoField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(ww):
-        return True if not isinstance(ww, bool) else False
+    def parse(ww):
+        return isinstance(ww, bool), ww
 
     @staticmethod
     def error(ww):
@@ -1776,70 +1812,30 @@ class SaveStatisticInfoField(BaseField):
 class TrimInfinityField(BaseField):
     @staticmethod
     def default():
-        return ''
+        return 'clip(-inf, inf)'
 
     @staticmethod
-    def check(ti):
-        conf = str(ti).lower().strip()
-        range_method = r'\s*\(\s*(((\-|\+)?\d+((\.\d+)|\.)?)|(\-inf))\s*,\s*(((\-|\+)?\d+((\.\d+)|\.)?)|(inf))\s*\)\s*:\s*((clip)|(second))\s*'
-        op_range_method = r'\s*[a-zA-Z_0-9]+\s*:{}'.format(range_method)
-        id_range_method = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*:{}'.format(range_method)
-        if '' == ti:
-            return False
-        elif re.match(r'^{}$'.format(range_method), conf):
-            return False
-        elif re.match(r'^\s*\[\s*{}\s*(\s*,\s*({}))*\]\s*$'.format(op_range_method, op_range_method), conf):
-            return False
-        elif re.match(r'^\s*\[\s*{}\s*(\s*,\s*({}))*\]\s*$'.format(id_range_method, id_range_method), conf):
-            return False
-        else:
-            return True
-
-    @staticmethod
-    def parse(ti):
-        conf = str(ti).lower().strip()
-        if len(conf) > 0 and (not TrimInfinityField.check(conf)):
-            y = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|:|\s+', conf) if x.lower().strip()]
-            if conf[0] == '(':
-                return 1, ((float(y[0]), float(y[1])), y[-1])
-            elif conf[0] == '[':
-                r = {}
-                if conf[1:].strip()[0] == '(':
-                    for i in range(0, len(y), 5):
-                        key = (int(y[i]), int(y[i+1]))
-                        val = ((float(y[i+2]), float(y[i+3])), y[i+4])
-                        for k in range(key[0], key[1]+1):
-                            r[k] = val
-                    return 3, r
-                else:
-                    for i in range(0, len(y), 4):
-                        key = y[i]
-                        val = ((float(y[i+1]), float(y[i+2])), y[i+3])
-                        r[key] = val
-                    return 2, r
-            else:
-                pass
-        return 0, {}
+    def parse(tibs):
+        tpattern = rf'(clip)|(second)\(({BaseField.rfloat})|(\-inf)\s*,({BaseField.rfloat})|(inf)\s*\)'
+        return BaseField._re_parse(tibs, tpattern)
 
     @staticmethod
     def error(ti):
-        return (f"For uniform configuration, must be `(min_value, max_value):method`. "
-                f"For specific configuration, must be `[operator_type:(min_value, max_value):method, ...]` or `[(i, j):(min_value, max_value):method, ...]`. "
-                f"Where values <= `min_value` or >= `max_value` will be treated as infinite values (need: min_value <= 0 <= max_value), `method` decides how to deal with infinite values and currently "
+        return (f"Must be `method(min_value, max_value)`, "
+                f"where values <= `min_value` or >= `max_value` will be treated as infinite values (need: min_value <= 0 <= max_value), `method` decides how to deal with infinite values and currently "
                 f"supports `clip` (infinite values will be clamped into [min_value, max_value]) and `second` (infinite values will be replaced by min/max values "
-                f"after excluding infinite values), `operator_type` is valid operator type name, `i` and `j` stand for layer_id in input IR. "
-                f"Valid examples: `(-inf, inf):second`, `(-65536, 65535):clip`, `[Abs:(0, inf):second, BatchNorm:(-32767, 65535):clip]`, `[(1,10):(-inf,inf):second, (20,30):(-32767,32767):clip]`. "
-                f"to layer_id in float IR) tuples like '[(i,j,h,w)]' or '[(i,j,h,w),...,(k,l,x,y)]'. "
+                f"after excluding infinite values). "
+                f"Valid examples: `second(-inf, inf)`, `second(-32767, inf)`, `clip(-inf, inf)`, `clip(-65536, 65535)`. {BaseField.per_node_cfg_usage}"
                 f"Now is: {ti}")
 
     @staticmethod
     def message():
-        return (f"Exclude the infinite or equivalent very large/small values from statistic. For uniform configuration, must be `(min_value, max_value):method`. "
-                f"For specific configuration, must be `[operator_type:(min_value, max_value):method, ...]` or `[(i, j):(min_value, max_value):method, ...]`. "
-                f"Where values <= `min_value` or >= `max_value` will be treated as infinite values (need: min_value <= 0 <= max_value), `method` decides how to deal with infinite values and currently "
+        return (f"Exclude the infinite or equivalent very large/small values from statistic. "
+                f"Must be `method(min_value, max_value)`, "
+                f"where values <= `min_value` or >= `max_value` will be treated as infinite values (need: min_value <= 0 <= max_value), `method` decides how to deal with infinite values and currently "
                 f"supports `clip` (infinite values will be clamped into [min_value, max_value]) and `second` (infinite values will be replaced by min/max values "
-                f"after excluding infinite values), `operator_type` is valid operator type name, `i` and `j` stand for layer_id in input IR. "
-                f"Valid examples: `(-inf, inf):second`, `(-65536, 65535):clip`, `[Abs:(0, inf):second, BatchNorm:(-32767, 65535):clip]`, `[(1,10):(-inf,inf):second, (20,30):(-32767,32767):clip]`. "
+                f"after excluding infinite values). "
+                f"Valid examples: `second(-inf, inf)`, `second(-32767, inf)`, `clip(-inf, inf)`, `clip(-65536, 65535)`. {BaseField.per_node_cfg_usage}"
                 f"Disabled by default.")
 
 
@@ -1850,8 +1846,8 @@ class SimilarityDataNumField(BaseField):
         return '1'
 
     @staticmethod
-    def check(sdn):
-        return True if not (isinstance(sdn, int) and sdn > 0) else False
+    def parse(sdn):
+        return isinstance(sdn, int) and sdn > 0, sdn
 
     @staticmethod
     def error(sdn):
@@ -1873,9 +1869,9 @@ class RunModeField(BaseField):
         return 'default'
 
     @staticmethod
-    def check(rm):
+    def parse(rm):
         _rmode = RunModeField._run_mode()
-        return True if not (isinstance(rm, str) and rm.lower() in _rmode) else False
+        return isinstance(rm, str) and rm.lower() in _rmode, rm
 
     @staticmethod
     def error(rm):
@@ -1887,6 +1883,25 @@ class RunModeField(BaseField):
         return f"Run mode for Optimizer."
 
 
+@field_register('write_similarity_to_ir', 'hidden')
+class WriteSimilarityField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(rdai):
+        return isinstance(rdai, bool), rdai
+
+    @staticmethod
+    def error(rdai):
+        return f"Require the 'write_similarity_to_ir' field must be in bool type, now is {type(rdai)} type. default value=False."
+
+    @staticmethod
+    def message():
+        return f"Whether to write similarity (cosine distance, and MSE versus input IR) information to output IR (convenient for visualization)."
+
+
 @field_register('record_debug_acc_info', 'hidden')
 class RecordDebugAccInfoField(BaseField):
     @staticmethod
@@ -1894,8 +1909,8 @@ class RecordDebugAccInfoField(BaseField):
         return 'False'
 
     @staticmethod
-    def check(rdai):
-        return True if not isinstance(rdai, bool) else False
+    def parse(rdai):
+        return isinstance(rdai, bool), rdai
 
     @staticmethod
     def error(rdai):
@@ -1913,8 +1928,8 @@ class CompatQuantizedModelEliminateCastField(BaseField):
         return 'True'
 
     @staticmethod
-    def check(ec):
-        return True if not isinstance(ec, bool) else False
+    def parse(ec):
+        return isinstance(ec, bool), ec
 
     @staticmethod
     def error(ec):
@@ -1932,8 +1947,8 @@ class CompatQuantizedModelFeild(BaseField):
         return 'False'
 
     @staticmethod
-    def check(cqm):
-        return True if not isinstance(cqm, bool) else False
+    def parse(cqm):
+        return isinstance(cqm, bool), cqm
 
     @staticmethod
     def error(cqm):
@@ -1956,8 +1971,8 @@ class CompatQuantizedModelStrategyFeild(BaseField):
         return '8bSymWeightUnchange'
 
     @staticmethod
-    def check(csfqm):
-        return False if csfqm.lower() in CompatQuantizedModelStrategyFeild._strategies_lower else True
+    def parse(csfqm):
+        return csfqm.lower() in CompatQuantizedModelStrategyFeild._strategies_lower, csfqm
 
     @staticmethod
     def error(csfqm):
@@ -1980,9 +1995,15 @@ class MultiplierBitsField(BaseField):
         return ''
 
     @staticmethod
-    def check(mb):
+    def parse(mb):
+        if '' == mb:
+            return True, mb
         _abits = MultiplierBitsField._multiplier_bits()
-        return True if not (mb == '' or (isinstance(mb, int) and mb in _abits)) else False
+        mb_pattern = r''
+        for b in _abits:
+            mb_pattern += rf'({b})|'
+        mb_pattern = mb_pattern[:-1]
+        return BaseField._re_parse(mb, mb_pattern)
 
     @staticmethod
     def error(mb):
@@ -1992,7 +2013,35 @@ class MultiplierBitsField(BaseField):
     @staticmethod
     def message():
         _abits = MultiplierBitsField._multiplier_bits()
-        return f"The bits used to represent 'M' when applying 'scale = M / (2**N)'. Now Optimizer supports: {_abits}."
+        return f"The bits used to represent 'M' when applying 'scale = M / (2**N)'. Now Optimizer supports: {_abits}. {BaseField.per_node_cfg_usage}"
+
+
+@field_register('remain_shift', 'default')
+class RemainBitsField(BaseField):
+    @staticmethod
+    def parse(s):
+        if '' == s:
+            return True, s
+        return BaseField._re_parse(s, r'\d*')
+
+    @staticmethod
+    def default():
+        return ''
+
+    @staticmethod
+    def error(mb):
+        return f"Required the 'remain_shift' is an integer, now is {mb}"
+
+    @staticmethod
+    def message():
+        return '''
+        In AIFF, computation layer such as Convolution, FullyConnected and Matmul uses ahead shift feature to avoid overflow in following ITP process.\
+        The middle result comming from MAC has 48bit width, while ITP only takes 32bit data as input. So AIFF will shift M bits after MAC and before ITP,\
+        then clip the data of 32bit width. In ITP, the shifter will right shift remaining bits (i.e, origin shift bits - M bits) to get final result.\
+        To simulate this process, config this field. Currently Optimizer support config remaining bits within range of 0-32.
+        Affected OpTypes: {}. \
+        {}
+        '''.format(AIFF_AHEAD_SHIFT_OP, BaseField.per_node_cfg_usage)
 
 
 @field_register('compat_quantized_model_int8_to_uint8', 'hidden')
@@ -2002,8 +2051,8 @@ class CompatQuantizedModelInt8ToUint8Field(BaseField):
         return 'False'
 
     @staticmethod
-    def check(itou):
-        return True if not isinstance(itou, bool) else False
+    def parse(itou):
+        return isinstance(itou, bool), itou
 
     @staticmethod
     def error(itou):
@@ -2026,13 +2075,13 @@ class CompatQuantizedModelOpsField(BaseField):
         return cqmo.lower().strip().replace(' ', '').split(',')
 
     @staticmethod
-    def check(cqmo):
+    def parse(cqmo):
         lower_optype = [k.lower() for k in OpType.__dict__.keys()] + ['']
         ops = cqmo.strip().split(',')
         for o in ops:
             if cqmo.lower() not in lower_optype:
-                return True
-        return False
+                return False, cqmo
+        return True, cqmo
 
     @staticmethod
     def error(cqmo):
@@ -2052,8 +2101,8 @@ class CompatQuantizedModelUnifyShiftsModeField(BaseField):
         return 'auto'
 
     @staticmethod
-    def check(usm):
-        return False if usm in ['max', 'mean', 'auto', 'none', 'entropy'] else True
+    def parse(usm):
+        return usm in ['max', 'mean', 'auto', 'none', 'entropy'], usm
 
     @staticmethod
     def error(usm):
@@ -2076,9 +2125,9 @@ class CompatQuantizedModelLeftShiftField(BaseField):
         return '8'
 
     @staticmethod
-    def check(mb):
+    def parse(mb):
         _abits = CompatQuantizedModelLeftShiftField._left_shift_bits()
-        return True if not (isinstance(mb, int) and mb in _abits) else False
+        return isinstance(mb, int) and mb in _abits, mb
 
     @staticmethod
     def error(mb):
@@ -2089,6 +2138,68 @@ class CompatQuantizedModelLeftShiftField(BaseField):
     def message():
         _abits = CompatQuantizedModelLeftShiftField._left_shift_bits()
         return f"The bits used to set the left shift bits in eltwise op."
+
+
+@field_register('activation_perchannel_min_elements', 'hidden')
+class ActivationPerChannelMinElementsField(BaseField):
+    # when enable activation per-channel, want to limit the min element number in one channel.
+    @staticmethod
+    def default():
+        return '1'
+
+    @staticmethod
+    def parse(apme):
+        return isinstance(apme, int) and apme > 0, apme
+
+    @staticmethod
+    def error(apme):
+        return (f"Require the positive integer 'min_element_number_one_channel' field, "
+                f"now is {apme}, default value={ActivationPerChannelMinElementsField.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"When enable activation perchannel quantization, we want to limit the min element number in one channel "
+                f"to avoid statistical instability caused by too few elements.")
+
+
+@field_register('enable_activation_perchannel', 'hidden')
+class EnableActivationPerChannelField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'enable_activation_perchannel' field, "
+                f"now is {eap}, default value= {EnableActivationPerChannelField.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"Whether enable experimental perchannel quantization for activation tensors.")
+
+
+@field_register('enable_pass_merge_matmul_mul', 'default')
+class PassMergeMatmulMul(BaseField):
+    @staticmethod
+    def default():
+        return 'True'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'enable_pass_merge_matmul_mul' field, "
+                f"now is {eap}, default value= {PassMergeMatmulMul.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: merge Matmul Mul, as the constant scale factor in Mul operator can be fused into the quantization scale of the output tensor of preceding Matmul operator if possible.")
 
 
 ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}

@@ -71,7 +71,7 @@ def normalizedMoments_quantize(self, *args):
     var_placeholder = PyTensor(self.name + '/var_placeholder')
     var_placeholder.scale = var_t.scale * count
     if var_t.zerop != 0:
-        var_clip_max // 2
+        var_clip_max = var_clip_max // 2
     var_scale0, var_scale1, var_do_scale, var_do_shift, var_do_scale_type, var_do_shift_type, _ = calc_eltwise_add_like_scale_shift(var_placeholder,
                                                                                                                                     plh,
                                                                                                                                     out1,

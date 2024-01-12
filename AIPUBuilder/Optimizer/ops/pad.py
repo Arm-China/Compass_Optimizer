@@ -60,8 +60,7 @@ def pad_forward(self, *args):
     outt = self.outputs[0]
     pad_mode = self.get_param('mode').lower()
     pad_value = 0 if pad_mode != 'constant' else self.get_param('constant_value')
-    pad_value = torch.clamp(torch.tensor(pad_value), torch.finfo(
-        torch.float32).min, torch.finfo(torch.float32).max).item()
+    pad_value = max(torch.finfo(torch.float32).min, min(torch.finfo(torch.float32).max, pad_value))
     paddings = self.get_param('pads')
 
     def list_unpack(l):
@@ -72,14 +71,15 @@ def pad_forward(self, *args):
         torch_paddings = paddings[::-1]  # compass IR:nhwc, torch: cwhn when input.ndims == 4
         torch_paddings = list_unpack(torch_paddings)
         out = torch.nn.functional.pad(inp, torch_paddings, mode=pad_mode, value=pad_value)
-    elif pad_mode in ['symmetric', 'reflect']:
+    elif pad_mode in ['symmetric', 'reflect', 'edge', 'wrap']:
         import numpy as np
         inp_np = inp.cpu().numpy()
         out = np.pad(inp_np, paddings, mode=pad_mode)
         out = torch.tensor(out, device=inp.device)
     else:
         out = torch.zeros(outt.betensor.shape)
-        OPT_ERROR(f"mode of Pad op now only support ['CONSTANT', 'REFLECT', 'SYMMETRIC'], but now is {pad_mode}")
+        OPT_ERROR(
+            f"mode of Pad op now only support ['CONSTANT', 'REFLECT', 'SYMMETRIC', 'EDGE', 'WRAP'], but now is {pad_mode}")
 
     outt.betensor = out
     return outt.betensor

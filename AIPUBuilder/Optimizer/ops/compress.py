@@ -45,8 +45,7 @@ def compress(self, *args):
     out = self.outputs[0]
 
     if inp1.dim() != 1:
-        OPT_FATAL('layer_id=%s, type=%s, condition rank does not equal 1-D, please check' % (
-            self.attrs['layer_id'], str(self.type)))
+        OPT_FATAL(f"{self}: condition rank does not equal 1-D, please check")
 
     axis = int(self.get_param('axis'))  # only int
 
@@ -54,8 +53,7 @@ def compress(self, *args):
     input_shape = list(inp0.shape)
     axis_dim = input_shape[axis]
     if index.numel() > axis_dim:
-        OPT_WARN('layer_id=%s, type=%s, len(condition) is larger than the size of a along the given axis, so data slices exceeding the condition length are discarded' % (
-            self.attrs['layer_id'], str(self.type)))
+        OPT_WARN(f"{self}, len(condition) is larger than the size of a along the given axis, so data slices exceeding the condition length are discarded")
 
     input_shape[axis] = 0
     data = torch.zeros(input_shape, device=inp0.device)

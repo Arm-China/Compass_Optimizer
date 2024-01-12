@@ -34,15 +34,12 @@ def conv_transpose3d(self, *args):
     # weights = weights.permute(4, 0, 3, 1, 2)  # [out_c, h, w, d, in_c] -> [in_c, out_c, d, h, w]
     bias = self.constants['biases'].betensor.clone().float()
     if self.quantized:
-        inp += self.inputs[0].zerop
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
+        inp += self.inputs[0].broadcast_zerop
+        weights += self.constants['weights'].broadcast_zerop
         # pass inputs'zp as padding value to torch.convtranspose is inconvenient
         # so bias will release inputs'zp out of it first, and inp should add its zp firstly.
         bias -= compute_input_zp_mul_reduce_weight(self.inputs[0].zerop, weights).repeat(self.get_param('group'))
-        bias += self.constants['biases'].zerop
+        bias += self.constants['biases'].broadcast_zerop
 
     inp = inp.permute(0, 4, 1, 2, 3)
     weights = weights.permute(4, 0, 3, 1, 2)  # [out_c, h, w, d, in_c] -> [in_c, out_c, d, h, w]
@@ -88,25 +85,5 @@ def conv_transpose3d(self, *args):
 
     crop_x = x[..., pad_z_begin:d-pad_z_end, pad_y_begin:h-pad_y_end, pad_x_begin:w-pad_x_end]
     x = crop_x.permute(0, 2, 3, 4, 1)
-
-    requant_scale = 1
-    requant_shift = 0
-    if self.quantized:
-        if 'scale_value' in self.params:
-            requant_scale = self.params['scale_value']
-        elif "scale" in self.constants:
-            requant_scale = self.constants["scale"].betensor
-
-        if 'shift_value' in self.params:
-            requant_shift = self.params['shift_value']
-        elif "shift" in self.constants:
-            requant_shift = self.constants["shift"].betensor
-
-    x = apply_with_activation(self, x,
-                              self.inputs[0].scale * self.constants["weights"].scale, 0,
-                              requant_scale,
-                              requant_shift,
-                              *args)
-
-    self.outputs[0].betensor = x
-    return x
+    self.outputs[0].betensor = apply_with_activation(self, x, *args)
+    return self.outputs[0].betensor

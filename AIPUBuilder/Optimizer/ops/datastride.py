@@ -18,20 +18,6 @@ def datastride(self, *args):
     stride_x = self.get_param('stride_x')
     stride_y = self.get_param('stride_y')
 
-    # if needing padding and dilation
-    # dv = 0
-    # padding = (self.get_param('pad_left', True, dv),
-    #            self.get_param('pad_right', True, dv),
-    #            self.get_param('pad_top', True, dv),
-    #            self.get_param('pad_bottom', True, dv))
-    # dilation = (self.get_param('dilation_y', True, dv), self.get_param('dilation_x', True, dv))
-    # patches = inpt_padded.unfold(inpt,
-    #                              kernel_size=(kernel_y, kernel_x),
-    #                              stride=(stride_y, stride_x),
-    #                              padding=0,
-    #                              dilation=dilation)
-    # inpt = torch.nn.functional.pad(inpt, padding)
-
     patches = inpt.unfold(2, kernel_y, stride_y).unfold(3, kernel_x, stride_x)
     patches = patches.permute(0, 4, 5, 1, 2, 3).contiguous()
     patches = patches.view(inpt.shape[0], -1, patches.shape[-2], patches.shape[-1])

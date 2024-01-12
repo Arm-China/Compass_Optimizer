@@ -7,6 +7,11 @@ from AIPUBuilder.Optimizer.framework import *
 
 def apply_box_deltas(self, config, score, deltas):
     dev = score.device
+    wa = self.constants['wa'].betensor
+    ha = self.constants['ha'].betensor
+    ya = self.constants['ycenter'].betensor
+    xa = self.constants['xcenter'].betensor
+
     if self.quantized:
         tw_lut = self.constants['tw_lut'].betensor
         th_lut = self.constants['th_lut'].betensor
@@ -14,13 +19,6 @@ def apply_box_deltas(self, config, score, deltas):
         tx_lut = self.constants['tx_lut'].betensor
 
         shift = self.params["box_shift_value"]
-        # scale = torch.tensor(self.params["scale_value"], device=score.device) #[32,139]#self.constants["scale"].betensor
-
-        wa = self.constants['wa_lut'].betensor
-        ha = self.constants['ha_lut'].betensor
-        ya = self.constants['ycenter_lut'].betensor
-        xa = self.constants['xcenter_lut'].betensor
-
         image_height = self.get_param('height')
         image_width = self.get_param('width')
 
@@ -30,9 +28,9 @@ def apply_box_deltas(self, config, score, deltas):
         tw = deltas[:, :, 3]
 
         lut_in_bits = self.inputs[1].qbits
-        lut_out_bits = dtype2bits(self.get_constant('wa_lut').dtype)
+        lut_out_bits = dtype2bits(self.get_constant('ty_lut').dtype)
         in_is_signed = is_signed(self.inputs[1].dtype)
-        out_is_signed = is_signed(self.get_constant('wa_lut').dtype)
+        out_is_signed = is_signed(self.get_constant('ty_lut').dtype)
 
         lut_h = lookup_lut_powerof2(th, th_lut, lut_in_bits, in_is_signed, lut_out_bits, out_is_signed)
         lut_w = lookup_lut_powerof2(tw, tw_lut, lut_in_bits, in_is_signed, lut_out_bits, out_is_signed)
@@ -63,11 +61,6 @@ def apply_box_deltas(self, config, score, deltas):
         height = self.get_param('height')
         width = self.get_param('width')
 
-        w = torch.tensor(proposals_context.wa, device=dev)
-        h = torch.tensor(proposals_context.ha, device=dev)
-        ycenter = torch.tensor(proposals_context.ycenter_a, device=dev)
-        xcenter = torch.tensor(proposals_context.xcenter_a, device=dev)
-
         dy = deltas[:, :, 0].clone()
         dx = deltas[:, :, 1].clone()
         dh = deltas[:, :, 2].clone()
@@ -79,10 +72,10 @@ def apply_box_deltas(self, config, score, deltas):
         dw /= config.STD_DIV[3]
 
         # adjust achors size and position
-        ycenter = dy * h + ycenter
-        xcenter = dx * w + xcenter
-        h = torch.exp(dh) * h
-        w = torch.exp(dw) * w
+        ycenter = dy * ha + ya
+        xcenter = dx * wa + xa
+        h = torch.exp(dh) * ha
+        w = torch.exp(dw) * wa
 
         ymin = ycenter - h / 2.
         xmin = xcenter - w / 2.
@@ -160,18 +153,6 @@ def get_box_score(node, batch_class_score, batch_box_encoding):
     return box, score, box_num_perClass
 
 
-class Proposals_Context:
-    def __init__(self):
-        self.tile_anchor_done = False
-        self.wa = None
-        self.ha = None
-        self.xcenter_a = None
-        self.ycenter_a = None
-
-
-proposals_context = Proposals_Context()
-
-
 @op_register(OpType.Proposal)
 def Proposal(self, *args):
     class config(object):
@@ -194,14 +175,6 @@ def Proposal(self, *args):
     batch_inp_scores = self.inputs[0].betensor
     batch_inp_bboxes = self.inputs[1].betensor
 
-    if not proposals_context.tile_anchor_done and not self.quantized:
-        batch_inp_anchors = self.inputs[2].betensor
-        proposals_context.ycenter_a = ((batch_inp_anchors[..., 0] + batch_inp_anchors[..., 2]) / 2).cpu().numpy()
-        proposals_context.xcenter_a = ((batch_inp_anchors[..., 1] + batch_inp_anchors[..., 3]) / 2).cpu().numpy()
-        proposals_context.ha = (batch_inp_anchors[..., 2] - batch_inp_anchors[..., 0]).cpu().numpy()
-        proposals_context.wa = (batch_inp_anchors[..., 3] - batch_inp_anchors[..., 1]).cpu().numpy()
-        proposals_context.tile_anchor_done = True
-        self.inputs[2].need_deleted = True
     box, score = apply_box_deltas(self, anchor_config, batch_inp_scores, batch_inp_bboxes)
 
     proposal_boxes, proposal_scores, box_num_perClass = get_box_score(self, score, box)
@@ -227,7 +200,6 @@ def Proposal_quantize(self, *args):
     # input scale
     batch_inp_scores_scales,  batch_inp_scores_zp = inp[0].scale, inp[0].zerop
     batch_inp_bboxes_scales,  batch_inp_bboxes_zp = inp[1].scale, inp[1].zerop  # 1/inp[1].scale
-    batch_inp_anchors_scales, batch_inp_anchors_zp = inp[2].scale, inp[2].zerop
     q_bits_activation = self.attrs["q_bits_activation"]
     q_mode_activation = self.attrs["q_mode_activation"]
 
@@ -245,22 +217,20 @@ def Proposal_quantize(self, *args):
     self.params['height'] = int(height * stat_coords_scale)
     self.params['width'] = int(width * stat_coords_scale)
 
-    wa = torch.tensor(proposals_context.wa, device=inp[0].betensor.device)
-    ha = torch.tensor(proposals_context.ha, device=inp[0].betensor.device)
-    ycenter_a = torch.tensor(proposals_context.ycenter_a, device=inp[0].betensor.device)
-    xcenter_a = torch.tensor(proposals_context.xcenter_a, device=inp[0].betensor.device)
-    ycenter_a_q = linear_quantize_clip(ycenter_a, stat_coords_scale, stat_coords_zp,
-                                       anchor_rmin, anchor_rmax).type(torch.int16)
-    xcenter_a_q = linear_quantize_clip(xcenter_a, stat_coords_scale, stat_coords_zp,
-                                       anchor_rmin, anchor_rmax).type(torch.int16)
-    ha_q = linear_quantize_clip(ha, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax).type(torch.int16)
-    wa_q = linear_quantize_clip(wa, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax).type(torch.int16)
+    wa = self.constants['wa'].betensor
+    ha = self.constants['ha'].betensor
+    ycenter = self.constants['ycenter'].betensor
+    xcenter = self.constants['xcenter'].betensor
+    ycenter = linear_quantize_clip(ycenter, stat_coords_scale, stat_coords_zp,
+                                   anchor_rmin, anchor_rmax).type(torch.int16)
+    xcenter = linear_quantize_clip(xcenter, stat_coords_scale, stat_coords_zp,
+                                   anchor_rmin, anchor_rmax).type(torch.int16)
+    ha = linear_quantize_clip(ha, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax).type(torch.int16)
+    wa = linear_quantize_clip(wa, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax).type(torch.int16)
 
-    constants_name = ['ycenter_lut', 'xcenter_lut', 'ha_lut', 'wa_lut']
-    constants_list = [ycenter_a_q, xcenter_a_q, ha_q, wa_q]
-    for idx, constant in enumerate(constants_name):
-        name = constants_name[idx]
-        self.constants[name] = PyTensor(self.name+name, torch.squeeze(constants_list[idx]
+    constants_name = ['ycenter', 'xcenter', 'ha', 'wa']
+    for idx, name in enumerate(constants_name):
+        self.constants[name] = PyTensor(self.name+name, torch.squeeze(eval(name)
                                                                       ).cpu().numpy().astype(dtype2nptype(bits2dtype(16, is_signed=True))))
 
     box.qbits = max(16, q_bits_activation)

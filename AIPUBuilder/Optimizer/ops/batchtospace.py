@@ -21,9 +21,9 @@ def batchtospace(self, *args):
     n, h, w, c = inp.shape
     if self.inputs[0].ir_shape[0] != inp.shape[0]:
         OPT_ERROR("batch size in calibratoin or metric dataset should be equal to batch size in IR")
-    y = inp.view(block_size_y, block_size_x, n//(block_size_x*block_size_y), h, w, c)
+    y = inp.view(block_size_y, block_size_x, n // (block_size_x*block_size_y), h, w, c)
     y = y.permute(2, 3, 0, 4, 1, 5).contiguous()
-    y = y.view(n//(block_size_x*block_size_y), h*block_size_y, w*block_size_x, c)
+    y = y.view(n // (block_size_x*block_size_y), h*block_size_y, w*block_size_x, c)
     out = y[:, crop_top:h*block_size_y-crop_bottom, crop_left:w*block_size_x-crop_right, :]
     self.outputs[0].betensor = out
     return out

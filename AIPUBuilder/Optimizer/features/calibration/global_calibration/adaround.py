@@ -38,25 +38,15 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
             self.gamma, self.zeta = -0.1, 1.1
             # init alpha
             wf = n.constants['weights'].betensor
+            qweight = qn.constants['weights']
             wscale = qn.constants['weights'].scale
             wzerop = qn.constants['weights'].zerop
             wqmin = qn.constants['weights'].qmin
             wqmax = qn.constants['weights'].qmax
-            if isinstance(wscale, torch.Tensor):
+            if is_torch_tensor_with_multi_data(wscale):
                 # expand scale/zerop shape to match weights
-                max_cnt = 0
-                mshape = None
-                for d in range(wf.dim()):
-                    if wf.shape[d] == wscale.numel():
-                        sz_shape = [1] * wf.dim()
-                        sz_shape[d] = -1
-                        wq = linear_quantize_clip(wf, wscale.reshape(sz_shape), wzerop.reshape(sz_shape), wqmin, wqmax)
-                        cnt = wq.numel() - (wq - qn.constants['weights'].betensor).count_nonzero()
-                        if cnt >= max_cnt:
-                            max_cnt = cnt
-                            mshape = sz_shape
-                wscale = wscale.reshape(mshape)
-                wzerop = wzerop.reshape(mshape)
+                wscale = qweight.broadcast_scale
+                wzerop = qweight.broadcast_zerop
             wqf = wf * wscale
             rest = wqf - wqf.floor()
             alpha0 = - torch.log((self.zeta - self.gamma) / (rest - self.gamma) - 1.)
@@ -201,7 +191,7 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                         for it in qn.inputs:
                             t = cached_quant_tensors[it.name] if it.name in abnormal_tensors.keys(
                             ) else cached_quant_tensors[it.name][indices]
-                            t = linear_dequantize(t, it.scale, it.zerop)
+                            t = linear_dequantize(t, it.scale, it.zerop, it.key_axis)
                             cur_qmodule_inp.append(t)
                         qmodule.n.current_batch_idx = cur_batch_idx
                         qmodule.n.current_batch_size = batch_size

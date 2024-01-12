@@ -19,7 +19,7 @@ def bnll_quantize(self, *args):
     out.qbits = q_bits_activation
     out_sign = False or self.force_dtype_int
     out.dtype = bits2dtype(out.qbits, is_signed=out_sign)
-    dev = inp.betensor.device
+    dev = inp.device
     # out.scale, out.zerop = 2**out.qbits - 1, 0
     # out.qmin, out.qmax = 0, 2**out.qbits - 1
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(

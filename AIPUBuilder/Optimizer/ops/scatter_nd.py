@@ -97,9 +97,10 @@ def ScatterND_quantize(self, *args):
 
 @op_register(OpType.ScatterND)
 def ScatterND(self, *args):
-    data = self.inputs[0].betensor
-    indices = self.inputs[1].betensor.to(torch.long)
-    updates = self.inputs[2].betensor
+    dev = self.inputs[0].betensor.device
+    data = self.inputs[0].betensor.cpu()
+    indices = self.inputs[1].betensor.to(torch.long).cpu()
+    updates = self.inputs[2].betensor.cpu()
     out = self.outputs[0]
     reduce_method = self.get_param('reduction', optional=False, default_value='NONE').upper()  # NONE/ADD/MUL
     qbits = self.outputs[0].qbits
@@ -115,8 +116,8 @@ def ScatterND(self, *args):
             shift, _, shift_ = self.params['shift_value']
         else:
             shift = self.params['shift_value']
-        data = (data + self.inputs[0].zerop) * scale0
-        updates = (updates + self.inputs[2].zerop) * scale1
+        data = (data + self.inputs[0].zerop.to(data.device)) * scale0
+        updates = (updates + self.inputs[2].zerop.to(updates.device)) * scale1
 
     output = torch.clone(data)
     c = [torch.arange(s) for s in indices.shape[:-1]]
@@ -169,8 +170,8 @@ def ScatterND(self, *args):
                 output[idxx] = output[idxx] * updates[idx]
     if self.quantized:
         if qbits <= 8:
-            output = linear_requantize(output, scale, shift, out.zerop, out.qmin, out.qmax)
+            output = linear_requantize(output, scale, shift, out.zerop.to(output.device), out.qmin, out.qmax)
         else:  # rounding at 16+bit is much slower than shift
-            output = linear_requantize_floor(output, scale, shift, out.zerop, out.qmin, out.qmax)
-    out.betensor = output
+            output = linear_requantize_floor(output, scale, shift, out.zerop.to(output.device), out.qmin, out.qmax)
+    out.betensor = output.to(dev)
     return out.betensor

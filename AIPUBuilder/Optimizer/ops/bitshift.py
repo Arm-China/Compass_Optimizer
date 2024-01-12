@@ -43,7 +43,7 @@ def bitshift_quantize(self, *args):
     else:  # inp0.qinvariant is true and inp1.qinvariant is true
         qbits = dtype2bits(out_dtype)
         out.qbits = qbits
-        out.scale = 1
+        out.scale = 1.
         out.zerop = 0
         qmin, qmax = dtype2range(out_dtype)
         out.qmin = qmin
@@ -63,8 +63,7 @@ def bitshift(self, *args):
     input_shift = inp1.betensor.long()
     # check valid
     if True in (input_shift < 0):
-        OPT_WARN('%s{%s} Shift cannot contain negative numbers because hardware does not support negative numbers'
-                 % (self.name, str(self.type)))
+        OPT_WARN(f"{self}: Shift cannot contain negative numbers because hardware does not support negative numbers")
 
     if 'layer_top_type_original' in self.attrs:
         out_dtype = str2dtype(self.attrs['layer_top_type_original'][0])
@@ -83,13 +82,13 @@ def bitshift(self, *args):
     elif direction == "RIGHT":
         outp = input_data >> input_shift
     else:
-        OPT_FATAL("unsupported method: %s for BitShift in node:%s" % (direction, self.name))
+        OPT_FATAL(f"{self}: unsupported method: {direction} for BitShift")
 
     outp = outp.astype(np_out_dtype)
     if not out_sign:
         pytensor = PyTensor('out', outp)
         outp = pytensor.betensor.to(inp0.betensor.device)
     else:
-        outp = torch.tensor(outp, device=inp0.betensor.device).type(dtype2torch_type(out_dtype))
+        outp = torch.tensor(outp, device=inp0.device).type(dtype2torch_type(out_dtype))
     self.outputs[0].betensor = outp
     return self.outputs[0].betensor

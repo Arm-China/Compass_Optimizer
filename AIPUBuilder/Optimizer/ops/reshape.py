@@ -42,3 +42,10 @@ def reshape_quantize(self, *args):
     out.qinvariant = inp.qinvariant
     out.qmin = inp.qmin
     out.qmax = inp.qmax
+    if inp.key_axis_g > 1:
+        out.scale = out.scale[::inp.key_axis_g]
+        out.zerop = out.zerop[::inp.key_axis_g]
+
+    if out.key_axis_g > 1:
+        out.scale = torch.tile(out.scale, (out.key_axis_g,))
+        out.zerop = torch.tile(out.zerop, (out.key_axis_g,))
