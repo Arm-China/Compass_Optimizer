@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.eltwise import *
 from AIPUBuilder.Optimizer.framework import *
@@ -50,7 +50,9 @@ def ScatterND_quantize(self, *args):
     tmp_inp = self.inputs[1]
     self.replace_input_temporarily(1, self.inputs[2])
     self.replace_input_temporarily(2, tmp_inp)
-
+    # using extra_params?
+    clip_max_bits = 14 if 16 in [self.inputs[0].qbits, self.inputs[1].qbits] else 15
+    self.attrs['clip_max_bits'] = clip_max_bits
     eltwise_quantizes(self, *args)
 
     tmp_inp = self.inputs[1]

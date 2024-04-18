@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -28,5 +28,5 @@ def quantize_forward(self, *args):
     if out.qmin is None:
         out.betensor = inp.betensor
     else:
-        out.betensor = linear_quantize_clip(inp.betensor, out.scale, out.zerop, out.qmin, out.qmax)
+        out.betensor = linear_quantize_clip(inp.betensor, out.broadcast_scale, out.broadcast_zerop, out.qmin, out.qmax)
     return out.betensor

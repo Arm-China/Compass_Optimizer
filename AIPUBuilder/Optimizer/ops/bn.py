@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.conv import *
 from AIPUBuilder.Optimizer.ops.activation import apply_with_activation
@@ -41,10 +41,13 @@ def batch_norm(self, *args):
         inp = torch.permute(inp, perm)
 
     x = torch.add(torch.multiply(inp, weights), bias)
-    x = apply_with_activation(self, x, *args)
+    if not self.outputs[0].is_perchannel_quantization():
+        x = apply_with_activation(self, x, *args)
     if len(perm):
         orig_perm = [p for p in range(inp_dim)]
         n_perm = orig_perm[:axis] + [orig_perm[-1]] + orig_perm[axis:-1]
         x = torch.permute(x, n_perm)
+    if self.outputs[0].is_perchannel_quantization():
+        x = apply_with_activation(self, x, *args)
     self.outputs[0].betensor = x
     return self.outputs[0].betensor

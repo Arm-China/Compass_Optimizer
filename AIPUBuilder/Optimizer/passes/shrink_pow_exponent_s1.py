@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
+from AIPUBuilder.Optimizer.utils.passes_utils import passes_run
 
 
-def shrink_pow_exponent_s1(graph, config):
+@passes_run
+def shrink_pow_exponent(graph, config=None):
     def criteria(n):
         if n is not None and n.type == OpType.Pow:
             pow_parent = None

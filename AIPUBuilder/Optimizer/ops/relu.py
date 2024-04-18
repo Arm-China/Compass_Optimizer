@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -10,8 +10,6 @@ import torch
 @quant_register(OpType.RELU)
 def relu_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
 
     inp = self.inputs[0]
@@ -41,12 +39,11 @@ def relu(self, *args):
         #Yf = relu(Xf)
         # (Yq+Zy)/Sy = relu((Xq+Zx)/Sx)
         #Yq = relu(Xq+Zx) * Sy/Sx - Zy
+        # on cpu device, torch.relu does not support 'clamp_min_cpu' for half, so use inp.betensor.float()
         y = torch.nn.functional.relu(inp.betensor.float() + inp.zerop)
-        do_shift = 0
-        do_scale = 1
-        do_shift = self.get_ir_field(['shift_value', 'shift'])
-        do_scale = self.get_ir_field(['scale_value', 'scale'])
+        do_shift = self.get_ir_field(['shift_value', 'shift'], default_value=0)
+        do_scale = self.get_ir_field(['scale_value', 'scale'], default_value=1)
         out.betensor = linear_requantize(y, do_scale, do_shift, out.zerop, out.qmin, out.qmax, out.key_axis)
     else:
-        out.betensor = torch.nn.functional.relu(inp.betensor)
+        out.betensor = torch.nn.functional.relu(inp.betensor.float())
     return out.betensor

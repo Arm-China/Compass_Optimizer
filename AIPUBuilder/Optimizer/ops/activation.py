@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -37,8 +37,9 @@ def none_activation(self, *args):
     if self.quantized:
         do_shift = self.get_ir_field(['shift', 'shift_value'], default_value=0)
         do_scale = self.get_ir_field(['scale', 'scale_value'], default_value=1)
-        x = linear_requantize(x + inp.zerop.reshape([-1]), do_scale, do_shift,
-                              self.outputs[0].zerop.reshape([-1]), self.outputs[0].qmin, self.outputs[0].qmax)
+        key_axis = out.key_axis
+        x = linear_requantize(x + inp.broadcast_zerop, do_scale, do_shift, self.outputs[0].broadcast_zerop,
+                              self.outputs[0].qmin, self.outputs[0].qmax, key_axis)
     out.betensor = x
     return out.betensor
 
@@ -48,21 +49,58 @@ def unknown_activation(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
     if self.quantized:
-        x = inp.betensor
-        x = x - inp.qmin
+        x = inp.betensor.long()
+        qmin = inp.qmin - (1 if (is_signed(inp.dtype) and abs(inp.qmin) == abs(inp.qmax)) else 0)
+        x = x - qmin
         lut = self.constants["lut"].betensor
         x = torch.reshape(x, (-1,))
         y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
             self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
         out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        OPT_WARN(f"Activation op method=UNKNOWN donot support float forward, and the output.tensor will directly use input.tensor")
-        out.betensor = inp.betensor
+        func = self.get_attrs('lambda_func', optional=True, default_value=None)
+        if func is not None:
+            out.betensor = func(inp.betensor)
+        else:
+            OPT_WARN(f"Activation op method=UNKNOWN does not support float forward, and the output.tensor will directly use input.tensor")
+            out.betensor = inp.betensor
     return out.betensor
 
 
+def unknown_quantize(self, *args):
+    q_mode_activation = self.attrs["q_mode_activation"]
+    if QuantMode.is_per_channel(q_mode_activation) == True:
+        OPT_FATAL("Currently not support per-channel quantization")
+    q_bits_activation = self.attrs["q_bits_activation"]
+
+    inp = self.inputs[0]
+    out = self.outputs[0]
+    out.qbits = q_bits_activation
+    out_sign = self.get_attrs('out_signed', optional=True, default_value=True)
+    dev = inp.betensor.device
+    out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
+        out, q_mode_activation, out.qbits, out_sign)
+    lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
+    func = self.get_attrs('lambda_func', optional=True, default_value=None)
+    mirror_offset = self.get_attrs('mirror_offset', optional=True, default_value=0.0)
+    if func is not None:
+        if is_signed(inp.dtype) and (-inp.qmin == inp.qmax):
+            linspace = torch.linspace(inp.qmin, inp.qmax, steps=lsteps - 1, device=dev)
+            linspace = torch.concat([torch.tensor([inp.qmin], device=dev), linspace])
+        else:
+            linspace = torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev)
+        lut = linear_dequantize(linspace, inp.scale, inp.zerop)
+        lut = func(lut) - linspace.new_tensor(mirror_offset)
+        lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax) + \
+            torch.round(mirror_offset * out.scale)
+        self.constants["lut"] = PyTensor(f"{self.name}/{func.__name__}_lut",
+                                         lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        self.constants["lut"].dtype = out.dtype
+    out.qinvariant = False
+
+
 #                     lower_case_method_name        output_type_is_signed         forward_func     quantize_func
-g_activation_method_supported = {'sigmoid':         (False,                       sigmoid,         sigmoid_quantize),
+g_activation_method_supported = {'sigmoid':         (False,                       sigmoid_forward, sigmoid_quantize),
                                  'tanh':            (True,                        tanh,            tanh_quantize),
                                  'relu':            (False,                       relu,            relu_quantize),
                                  'relu6':           (False,                       relu6,           relu6_quantize),
@@ -84,7 +122,7 @@ g_activation_method_supported = {'sigmoid':         (False,                     
                                  'gelu':            (True,                        gelu,            gelu_quantize),
                                  'swish':           (True,                        swish,           swish_quantize),
                                  'none':            (True,                        none_activation, none_quantize),
-                                 'unknown':         (True,                        unknown_activation, none_quantize),
+                                 'unknown':         (True,                        unknown_activation, unknown_quantize),
                                  }
 with_activation_supported = ['none', 'clip', 'relu', 'relu6', 'leakyrelu', 'prelu']
 with_activation_allow_merge_out_zerop_to_bias = ('none', 'clip', 'relu', 'relu6',)

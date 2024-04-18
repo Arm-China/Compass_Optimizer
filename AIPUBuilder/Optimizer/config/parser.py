@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import os
 import re
@@ -7,8 +7,8 @@ import argparse
 import configparser
 from AIPUBuilder.Optimizer.logger import opt_workflow_register, OPT_ERROR, OPT_INFO, OPT_WARN, OPT_FATAL
 from AIPUBuilder.Optimizer.framework import ALL_OPT_OP_DICT, ALL_OPT_QUANT_OP_DICT
-from AIPUBuilder.Optimizer.utils import *
-from . cfg_fields import ALL_FIELDS, DEFAULT_FIELDS
+from AIPUBuilder.Optimizer.utils import Target, string_to_base_type
+from . cfg_fields import ALL_FIELDS, DEFAULT_FIELDS, PerNodeFieldDict
 
 
 class CfgParser(object):
@@ -38,9 +38,23 @@ class CfgParser(object):
     def parser(self):
         import difflib
 
+        # update default values for different targets
+        raw_config = configparser.ConfigParser()
+        raw_config.read(self.cfg)
+        raw_pairs = raw_config['Common'] if 'Common' in raw_config else {}
+        pk = 'min_compatible_zhouyi_target'
+        ptarget = ALL_FIELDS[pk].default()
+        if pk in raw_pairs:
+            tg = raw_pairs[pk].split('_')[0].strip().upper()
+            if Target.is_valid(tg):
+                ptarget = tg
         defaults = {}
         for k, v in ALL_FIELDS.items():
             defaults.update({k: v.default()})
+        defaults['bias_effective_bits'] = str(Target.aiff_bias_effective_bits(ptarget))
+        if Target.optimized_target_level(ptarget) >= 2:
+            defaults['enable_pass_tune_op_complicated_activations'] = '[0][1]'
+            defaults['enable_pass_tune_op_softmax'] = '[0][1]'
 
         config = configparser.ConfigParser(defaults=defaults)
         config.read(self.cfg)
@@ -53,7 +67,7 @@ class CfgParser(object):
 
                 if opt not in defaults.keys():
                     candidate = difflib.get_close_matches(opt, defaults.keys(), cutoff=0.6)
-                    msg = f"Optimizer doesnot support the '{opt}' cfg field. "
+                    msg = f"Optimizer does not support the '{opt}' cfg field. "
                     if len(candidate):
                         msg += f"please confirm whether it is the following parameters:{candidate}."
                     else:
@@ -83,10 +97,9 @@ class CfgParser(object):
             for k in ['model_name', 'output_dir', 'dump_dir', 'out_ir_name']:
                 if isinstance(self.argv[k], (bool, int, float)):
                     self.argv[k] = str(self.argv[k])
-            if ('quant_ir_name' in self.argv and self.argv['quant_ir_name'] != ''):
+            if self.argv.get('quant_ir_name', '') != '':
                 self.argv['out_ir_name'] = str(self.argv['quant_ir_name'])
-            if ('out_ir_name' in self.argv and self.argv['out_ir_name'] == '') or \
-               'out_ir_name'not in self.argv:
+            if self.argv.get('out_ir_name', '') == '' or 'out_ir_name' not in self.argv:
                 ir_name = self.argv['model_name'] + '_o'
                 self.argv.update({'out_ir_name': ir_name})
 
@@ -120,7 +133,15 @@ class CfgParser(object):
                 ret = ret and False
 
         if argv['statistic_file'] == '' and str(argv['calibration_strategy_for_activation']).lower() != 'in_ir':
-            if argv['calibration_data'] == '':
+            compat_quantized_model = ''
+            with open(argv['graph'], 'r') as f:
+                for line in f.readlines():
+                    line = line.strip().replace('\n', '').replace(' ', '')
+                    if 'compat_quantized_model=' in line:
+                        compat_quantized_model = line.split('=')[-1].lower()
+                        break
+
+            if argv['calibration_data'] == '' and compat_quantized_model != 'true':
                 OPT_WARN(f"please set 'calibration_data' field in cfg file if want to statistic quantization values."
                          f" And Optimizer will use all zeros dataset for statistic tensors information.")
                 # ret = ret and True
@@ -142,7 +163,7 @@ class CfgParser(object):
                 (OPT_INFO("'data_batch_dim' or 'label_batch_dim' is greater than zero, please use 'data_batch_dim',"
                           " 'label_batch_dim' and implement collate_fn yourself in dataset plugin."))
                 dataset_cls = self.dataset_dict[argv['dataset'].lower()]
-                if dataset_cls == None:
+                if dataset_cls is None:
                     OPT_WARN(f"currently 'dataset' in cfg file is not implemented,"
                              f" please implement the dataset plugin firstly.")
                 else:
@@ -151,11 +172,13 @@ class CfgParser(object):
                                  f" please implement collate_fn yourself to override the default collate_fn of Torch.")
         return ret
 
-    def update(self, field_obj):
+    def update(self):
         fields = self.get_fields()
         if fields is not None:
             for fk, fv in fields.items():
-                field_obj.__setattr__(fk, fv)
+                self.__setattr__(fk, fv)
+            return self
+        return False
 
     def __call__(self):
         if not self.is_cfg_existed_and_correct():
@@ -165,6 +188,15 @@ class CfgParser(object):
         ret = self.checker(argv)
 
         return ret
+
+    def __getattr__(self, item):
+        if item in self.argv:
+            if isinstance(self.argv[item], PerNodeFieldDict):
+                return self.argv[item].global_value
+            else:
+                return self.argv[item]
+        else:
+            raise AttributeError
 
 
 def show_plugins(metric_dict, dataset_dict):
@@ -184,7 +216,7 @@ def show_plugins(metric_dict, dataset_dict):
 
 
 def fields_to_str():
-    os_str = 'Now Optimizer supports configurate parameters in .cfg file:\n'
+    os_str = 'Now Optimizer supports configurated parameters in .cfg file:\n'
     show_dict = {}
     for key, val in DEFAULT_FIELDS.items():
         if key in ['graph', 'bin', 'model_name', ]:
@@ -202,17 +234,13 @@ def show_cfg_fields():
     OPT_INFO(os_str)
 
 
-def cfg_parser(argv, cfg, metric, dataset):
-    ret = True
+def cfg_parser(cfg, metric, dataset):
+    ret = False
     if len(cfg) != 0:
         _cfg_parser = CfgParser(cfg, metric, dataset)
         ret = _cfg_parser()
         if ret:
-            _cfg_parser.update(argv)
-        else:
-            ret = False
-    else:
-        ret = False
+            ret = _cfg_parser.update()
     return ret
 
 
@@ -235,8 +263,8 @@ def arg_parser(metric_dict, dataset_dict):
         show_cfg_fields()
 
     if argv.cfg:
-        ret = cfg_parser(argv, argv.cfg, metric_dict, dataset_dict)
-        return argv if ret else ret
+        ret = cfg_parser(argv.cfg, metric_dict, dataset_dict)
+        return ret
 
     return ret
 

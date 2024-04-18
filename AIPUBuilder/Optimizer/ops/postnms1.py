@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
@@ -95,8 +95,8 @@ def PostNms1_quantize(self, *args):
     sim_input.min, sim_input.max = 0, nor_box_scale * height
     nor_box_inh_scale, nor_box_inh_zerop, _, _, _ = get_linear_quant_params_from_tensor(
         sim_input, q_mode_activation, sim_input.qbits, False)
-    # nor_box_shift = 10 #TODO
-    nor_box_shift = self.attrs['scaling_bits'][0]
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 10])
+    nor_box_shift = extra_params[1]
     sim_input.min, sim_input.max = 0., nor_box_scale * width
     nor_box_inw_scale, nor_box_inw_zerop, _, _, _ = get_linear_quant_params_from_tensor(
         sim_input, q_mode_activation, sim_input.qbits, False)

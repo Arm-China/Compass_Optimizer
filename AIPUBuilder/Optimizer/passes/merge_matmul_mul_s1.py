@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
 
 
-def merge_matmul_mul_s1(graph, config):
+@passes_run
+def merge_matmul_mul(graph, config=None):
     # find matmul+scale(represented by operator: bn or mul) and fuse related nodes into Matmul (with additional param: fused_multiplier)
     end_idx = len(graph.nodes)
     node_idx = 0
@@ -64,9 +65,9 @@ def merge_matmul_mul_s1(graph, config):
                 if len(rn.inputs) > 1:
                     t = rn.inputs[0] if rn.inputs[0].pnode in snodes else rn.inputs[1]
                     rn.remove_input(t)
-                rn.type = OpType.Reshape
+                rn.type = OpType.Crop
                 rn.params.clear()
-                rn.params['shape'] = rn.outputs[0].ir_shape
+                rn.params['crops'] = [[0, i] for i in rn.outputs[0].ir_shape]
                 rn.constants.clear()
                 rn.placeholders.clear()
                 graph.init_networkx()

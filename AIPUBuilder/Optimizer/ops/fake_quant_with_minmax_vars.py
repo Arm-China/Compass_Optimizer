@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -32,17 +32,25 @@ def fake_quant_with_minmax_vars(self, *args):
         # inputs values are quantized into the quantization range ( [0; 2^num_bits - 1]
         # when narrow_range is false and [1; 2^num_bits - 1] when it is true)
         # and then de-quantized and output as floats in [min; max] interva
-        scale = ((1 << num_bits)-1)/(max_adj-min_adj)
+        tmp_t = PyTensor('fake_quant_tensor', TensorShape([1]))
+        tmp_t.min = min_adj
+        tmp_t.max = max_adj
+        tmp_t.qbits = num_bits
+        sign = False  # quantized range to [0; 2^num_bits - 1] or [1; 2^num_bits - 1]
+        qmode = 'per_tensor_asymmetric'
+        tmp_t.scale, tmp_t.zerop, tmp_t.qmin, tmp_t.qmax, tmp_t.dtype = get_linear_quant_params_from_tensor(tmp_t,
+                                                                                                            qmode,
+                                                                                                            tmp_t.qbits,
+                                                                                                            sign)
         if narrow_range:
-            qmin = 1
+            tmp_t.qmin = 1
         else:
-            qmin = 0
-        qmax = (1 << num_bits)-1
-        quan = linear_quantize_clip(inp, scale, 0, qmin, qmax)
-        out = linear_dequantize(quan, scale, 0)
-        out = torch.clamp(out, min_adj, max_adj)
-
+            tmp_t.qmin = 0
+        quan = linear_quantize_clip(inp, tmp_t.scale, tmp_t.zerop, tmp_t.qmin, tmp_t.qmax)
+        out = linear_dequantize(quan, tmp_t.scale, tmp_t.zerop)
+        out = torch.clamp(out, tmp_t.min, tmp_t.max)
         self.outputs[0].betensor = out
+        del tmp_t
     return self.outputs[0].betensor
 
 

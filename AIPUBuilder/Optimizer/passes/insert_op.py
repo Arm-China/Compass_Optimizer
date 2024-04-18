@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import OPT_INFO
@@ -154,8 +154,10 @@ class InsertCastOp(BaseInsertOp):
                 if output_dtype == spec_output_type:
                     candidates.append([spec.in_dtypes, 0.0])
                 backups.append([spec.in_dtypes, 0.0])
-            if len(candidates) < 1:
+            if len(candidates) < 1 and len(dtype_spec) > 0:
                 candidates = backups
+                OPT_WARN(f"layer '{node.children[0]}' asked output dtypes '{output_dtype}' not existed in lib's spec list: {dtype_spec}"
+                         f"\nyou may need to change this layer's quantization bits or add corresponding dtype spec support for this lib.")
             for i in range(len(candidates)):
                 #(matched, redundant, insufficient)
                 score = [0.0, 0.0, 0.0]
@@ -169,7 +171,7 @@ class InsertCastOp(BaseInsertOp):
                         dt = node.children[0].inputs[j].dtype
                         for cp in node.children[0].parents:
                             if cp.type == OpType.Cast and cp.additional and cp.outputs[0] == node.children[0].inputs[j]:
-                                dt = cp.params['to_dtype'] if cp != node else cp.inputs[0].dtype
+                                dt = cp.inputs[0].dtype
                                 break
 
                     dqmin, dqmax = dtype2range(dt)
@@ -213,7 +215,7 @@ class InsertCastOp(BaseInsertOp):
                                 if parent in self.inserted_cast_layers and parent.name not in unique_flags:
                                     unique_flags[parent.name] = True
                                 if parent.params['to_dtype'] != parent.inputs[0].dtype:
-                                    OPT_INFO(f"{parent.parents[0]}', cast its output '{parent.inputs[0].name}' "
+                                    OPT_INFO(f"'{parent.parents[0]}', cast its output '{parent.inputs[0].name}' "
                                              f"dtype from {parent.inputs[0].dtype} to {parent.params['to_dtype']} "
                                              f"due to lib's {n.children[0].type} spec by insert a cast layer.")
 
@@ -229,6 +231,17 @@ class InsertCastOp(BaseInsertOp):
                     parent = n.parents[idx]
                     if idx in ASYM2SYM_OP_DICT[n.type][0] and QuantMode.is_asymmetric(parent.attrs["q_mode_activation"]):
                         parent.attrs["q_mode_activation"] = ASYM2SYM_OP_DICT[n.type][1]
+
+            if n.type == OpType.MatMul:
+                """
+                16bits matmul only supports symmetric quantization inputs, and check_quantization_info pass has assured
+                16bits activation using symmetric quantization
+                """
+                for p in n.parents:
+                    act_bits = p.attrs['q_bits_activation']
+                    act_mode = p.attrs['q_mode_activation']
+                    if act_bits >= 16 and QuantMode.is_asymmetric(act_mode):
+                        p.attrs['q_mode_activation'] = QuantMode.to_symmetric(act_mode)
 
     def run(self):
         self.before_pass()

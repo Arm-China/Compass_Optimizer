@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -48,7 +48,7 @@ def lp_normalization_quantize(self, *args):
     method = self.get_param('method').lower()
     if method == 'l2':
         pre_shift = 0
-        scale_bits = torch.ceil(torch.log2(torch.tensor(do_scale))).item()
+        scale_bits = torch.ceil(torch.log2(do_scale)).item()
         input_bits, _ = range2bits(inp.qmin+inp.zerop, inp.qmax+inp.zerop, force_int=True)
         # always limit input*scale to int16
         if (input_bits + scale_bits) > 16:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -38,6 +38,9 @@ class Dtype(AutoName):
     ALIGNED_UINT4 = auto()
     ALIGNED_INT12 = auto()
     ALIGNED_UINT12 = auto()
+
+    def __repr__(self):
+        return self.name
 
 
 def dtype_string_name(dtype):
@@ -236,3 +239,4 @@ register_optype('Where')
 register_optype('YuvToRgb')
 register_optype('ZeroFraction')
 register_optype('DivMod')
+register_optype('RMSNorm')

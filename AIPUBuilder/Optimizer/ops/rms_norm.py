@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -14,8 +14,6 @@ register_optype('RMSNorm')
 def RMSNorm_quantize(self, *args):
     q_mode_weight = self.attrs["q_mode_weight"]
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization of activations")
     q_bits_weight = self.attrs["q_bits_weight"]
     q_bits_bias = self.attrs["q_bits_bias"]
     q_bits_activation = self.attrs["q_bits_activation"]
@@ -118,7 +116,7 @@ def RMSNorm(self, *args):
 
     if self.quantized:
         qmin, qmax = bits2range(out.qbits, is_signed=True)
-        normalized = (inp_betensor+int(inp.zerop)) * ngamma
+        normalized = (inp_betensor + inp.broadcast_zerop) * ngamma
         normalized = torch.clip((normalized+128) >> 8, qmin, qmax)
 
     else:

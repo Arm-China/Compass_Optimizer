@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import torch
+from typing import Union
 
 inverse_sqrt_table = [32767, 32515, 32268, 32026, 31790, 31558, 31332, 31111, 30894,
                       30682, 30474, 30270, 30070, 29874, 29682, 29494, 29309, 29127,
@@ -237,6 +238,33 @@ def lookup_lut_powerof2(inputs, lut, lut_in_bits, in_is_signed, lut_out_bits, ou
     return out
 
 
+def lookup_float_index_lut(t: torch.Tensor, lut: torch.Tensor, index_scale: float, index_offset: Union[float, int], mirror_mode: bool = False, value_offset_for_mirror_mode: Union[float, int] = 0.0) -> torch.Tensor:
+    def lookup_lut(x):
+        y = x
+        table = lut.flatten()
+        table_size = table.numel()
+        left_slope = table[1] - table[0]
+        right_slope = table[-1] - table[-2]
+        left_mask = x < 0
+        right_mask = x > (table_size-1)
+
+        y_left = torch.where(left_mask, table[0] - left_slope * (0 - x), x)
+        y_right = torch.where(right_mask, table[-1] + right_slope * (x - (table_size-1)), x)
+        index = torch.clamp(x, 0, table_size-1).floor().long()
+        lutp = torch.nn.functional.pad(table, (0, 1), value=table[-1])
+        y_middle = lutp[index] + (lutp[index+1] - lutp[index]) * (x - index)
+        y = torch.where(left_mask, y_left, y_middle)
+        y = torch.where(right_mask, y_right, y)
+        return y
+    x_t = t * index_scale - index_offset
+    if mirror_mode:
+        y_pos = lookup_lut(x_t)
+        y_neg = lookup_lut(x_t.negative()).negative()
+        return torch.where(x_t >= 0.0, y_pos, y_neg) - value_offset_for_mirror_mode
+    else:
+        return lookup_lut(x_t)
+
+
 def broadcasting_transform(x0, x1):
     from AIPUBuilder.Optimizer.logger import OPT_WARN
     # align axis
@@ -248,11 +276,51 @@ def broadcasting_transform(x0, x1):
     # check broadcast params
     for i in range(max_len):
         local_axis = max_len - i - 1
-        if (x0.shape[local_axis] == 1 and x1.shape[local_axis] % x0.shape[local_axis] == 0):
+        if x0.shape[local_axis] == 1 and x1.shape[local_axis] % x0.shape[local_axis] == 0:
             tile_a[local_axis] = x1.shape[local_axis]
-        elif (x1.shape[local_axis] == 1 and x0.shape[i] % x1.shape[local_axis] == 0):
+        elif x1.shape[local_axis] == 1 and x0.shape[i] % x1.shape[local_axis] == 0:
             tile_b[local_axis] = x0.shape[local_axis]
         elif x1.shape[local_axis] % x0.shape[local_axis] != 0 or x0.shape[local_axis] % x1.shape[local_axis] != 0:
             OPT_WARN('tensors are non-broadcastable')
     x0, x1 = x0.tile(tile_a), x1.tile(tile_b)
+
     return x0, x1
+
+
+def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    mantisa_bit = 16
+    #lut_bits = 9
+    vshape = f_vdata.shape
+    # limit input
+    f_vdata = (f_vdata < -126.9)*-126.9+f_vdata*(f_vdata >= -126.9)
+    f_vdata = (f_vdata > 126.9)*126.9+f_vdata*(f_vdata < 126.9)
+
+    exponent = f_vdata.floor()
+    mantisa = ((f_vdata - exponent)*((1 << mantisa_bit)-1)).long()
+    index = mantisa >> 7
+
+    interp_bit = mantisa & 0x7f
+
+    torch_pow2_f_lut = pow2_f_lut.to(f_vdata.device)
+    diff = torch_pow2_f_lut[index+1] - torch_pow2_f_lut[index]
+    post_lut = torch_pow2_f_lut[index] + (diff*interp_bit)*(2.0**-7)
+
+    pow2_factor = post_lut*(2.0**exponent)
+    pow2_fp24 = ((pow2_factor.to(torch.float32)).view(torch.int32) & 0xFFFFFF00).view(torch.float32)
+
+    return pow2_fp24.reshape(vshape)
+
+
+def x3_aiff_softmax_approximation(vx: torch.Tensor, axis, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    max_v, _ = vx.max(axis, keepdim=True)
+    f_vdata = (vx-max_v)*1.442695
+    yy = x3_aiff_exp_approximation(f_vdata, pow2_f_lut)
+    y_sum = yy.sum(axis, keepdim=True)
+    # convert to fp24
+    score = ((1/y_sum).view(torch.int) & 0xFFFFff00).view(torch.float32)
+    # convert yy to fp16
+    yy16 = yy.half()
+    score = yy16*score
+    # convert f32 softmax result to fp16 output
+    f16 = score.half()
+    return f16.reshape(vx.shape)

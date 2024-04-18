@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -76,6 +76,43 @@ def cosine_quantize(self, *args):
     trigonometric_quantize(self, torch.cos)
 
 
+@approx_register(OpType.Cosine)
+def cosine_approx(self, *args):
+    inp = self.inputs[0]
+    dev = inp.betensor.device
+    approx_params = self.get_attrs('approx_params', optional=True, default_value=[0])
+    method = int(approx_params[0] if len(approx_params) > 0 else 0)
+    min_compatible_zhouyi_target = self.attrs["min_compatible_zhouyi_target"].upper()
+    lut_items_in_bits = Target.aiff_lut_items_in_bits(min_compatible_zhouyi_target)
+    if 1 == method and Target.optimized_target_level(min_compatible_zhouyi_target) >= 2:
+        q_mode_activation = self.attrs["q_mode_activation"]
+        # use_dynamic_lut = len(extra_params) > 1 and extra_params[1] > 0
+        bak_min = inp.min
+        bak_max = inp.max
+        inp.min = 0
+        inp.max = 2 * torch.pi
+        index_scale, index_offset, _, _, _ = get_linear_quant_params_from_tensor(
+            inp, QuantMode.to_asymmetric(QuantMode.to_per_tensor(q_mode_activation)), lut_items_in_bits, False)
+        inp.min = bak_min
+        inp.max = bak_max
+        lut = linear_dequantize(torch.range(0, 2**lut_items_in_bits - 1, device=dev), index_scale, index_offset)
+        value_offset = 0
+        lut = torch.sin(lut) + value_offset
+        lut = to_fp24(lut)
+        self.constants["lut"] = PyTensor(self.name + "/plh_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        self.params['is_perf_mode'] = True
+        self.params['lut_mode'] = 'MIRROR'
+        self.params['index_scale_value'] = index_scale
+        self.params['index_scale_type'] = Dtype.FP32
+        self.params['index_offset_value'] = index_offset
+        self.params['index_offset_type'] = Dtype.FP32
+        self.params['value_offset_value'] = value_offset
+        self.params['value_offset_type'] = Dtype.FP32
+    else:
+        # not suit for aiff, need use tpc to implement a high accuracy version
+        self.params['is_perf_mode'] = False
+
+
 def trigonometric_forward(node, inp, lut):
     scale0 = node.params["scale_value"]
     shift0 = node.params["shift_value"]
@@ -113,5 +150,14 @@ def cosine(self, *args):
                 self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
             out.betensor = torch.reshape(y, inp.betensor.shape)
     else:
-        out.betensor = torch.cos(inp.betensor)
+        if self.approximated and "lut" in self.constants:
+            lut = self.constants["lut"].betensor
+            # cos(x) = sin(pi/2 + x)
+            inp_tensor = inp.betensor.float() + torch.pi / 2
+            inter = (inp_tensor * (1/(2*torch.pi))).int()
+            Fractional = inp_tensor - inter*2*torch.pi
+            out.betensor = lookup_float_index_lut(
+                Fractional, lut, self.params['index_scale_value'], self.params['index_offset_value'], mirror_mode=True, value_offset_for_mirror_mode=self.params['value_offset_value'])
+        else:
+            out.betensor = torch.cos(inp.betensor)
     return out.betensor

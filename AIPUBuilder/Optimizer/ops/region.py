@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -329,14 +329,14 @@ def quantize_region(self, *args):
     # update quantize precision for lut
     # [16, 32, 16, 16, 16, 16, 15] = [conf_sigmoid_shift, score_softmax_dtype_bits, anchor_dtype_bits,
     # conf_sigmoid_dtype_bits, bbox_xy_sigmoid_dtype_bits, bbox_wh_exp_dtype_bits, grid_shift]
-    scaling_bits = self.attrs['scaling_bits']
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 15, 32, 16, 16, 16, 16, 15])
     _quantize_params = {
-        'conf_sigmoid_shift': scaling_bits[0],
-        'score_softmax_dtype': [scaling_bits[1], False],  # uint32
-        'anchor_dtype': [scaling_bits[2], False],  # 'uint16',
-        'conf_sigmoid_dtype': [scaling_bits[3], False],  # 'uint16',
-        'bbox_xy_sigmoid_dtype': [scaling_bits[4], True],  # 'int16',
-        'bbox_wh_exp_dtype': [scaling_bits[5], False],  # 'uint16',
+        'conf_sigmoid_shift': extra_params[1],
+        'score_softmax_dtype': [extra_params[2], False],  # uint32
+        'anchor_dtype': [extra_params[3], False],  # 'uint16',
+        'conf_sigmoid_dtype': [extra_params[4], False],  # 'uint16',
+        'bbox_xy_sigmoid_dtype': [extra_params[5], True],  # 'int16',
+        'bbox_wh_exp_dtype': [extra_params[6], False],  # 'uint16',
     }
     for i, kv in enumerate(_quantize_params.items()):
         if i == 0:
@@ -361,7 +361,7 @@ def quantize_region(self, *args):
 
     # step 2: get quantized_grid_width and quantized_grid_height
     # grid_shift = 15
-    grid_shift = scaling_bits[6]
+    grid_shift = extra_params[7]
     grid_scale = 2 ** grid_shift
 
     self.params['grid_w_shift'] = grid_shift

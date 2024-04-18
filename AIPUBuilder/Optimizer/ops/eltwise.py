@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
-from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_activation_out_is_signed, apply_with_activation_quantize
+from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_activation_out_is_signed, \
+    apply_with_activation_quantize
 import torch
 
 
-def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, multiplier_bits, layer_type, layer_id='unknow'):
+def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, multiplier_bits, layer_type,
+                                      layer_id='unknow'):
     # ######################################################################################################
     # # former schema
     # clip_max = doscale_clip_max
@@ -71,22 +73,19 @@ def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, multipl
     doscale_clip_max = torch_tensor(doscale_clip_max, device=inp0.device)
     M0, _, N0, _ = get_scale_approximation_params(inp0.scale, mult_bits=cbits)
     M1, _, N1, _ = get_scale_approximation_params(inp1.scale, mult_bits=cbits)
-    cshift = 0
-    scale0 = 1
-    scale1 = 1
-    if N0 > N1:
-        cshift = N0
-        scale0 = M1 * (2.0 ** (N0 - N1))
-        scale1 = M0
-    else:
-        cshift = N1
-        scale0 = M1
-        scale1 = M0 * (2.0 ** (N1 - N0))
+    cshift = torch.zeros_like(N0)
+    scale0 = torch.ones_like(M0)
+    scale1 = torch.ones_like(scale0)
+    cshift = torch.where(N0 > N1, N0, N1)
+    diff0 = torch.max((cshift - N0), torch.zeros_like(cshift))
+    diff1 = torch.max((cshift - N1), torch.zeros_like(cshift))
+    scale0 = M1 * 2 ** diff1
+    scale1 = M0 * 2 ** diff0
     rscale = out.scale / (inp1.scale * inp0.scale)
-    rscale = rscale / (2.0**cshift)
-    max_shrink = max(scale0, scale1) * 1.0 / doscale_clip_max
+    rscale = rscale / (2.0 ** cshift)
+    max_shrink = torch.max(torch.max(scale0, scale1)) * 1.0 / doscale_clip_max
     if max_shrink > 1.0:
-        if min(scale0, scale1) / max_shrink >= 1.0:
+        if torch.min(torch.min(scale0, scale1)) / max_shrink >= 1.0:
             scale0 = scale0 / max_shrink
             scale1 = scale1 / max_shrink
             rscale = rscale * max_shrink
@@ -97,14 +96,20 @@ def calc_eltwise_add_like_scale_shift(inp0, inp1, out, doscale_clip_max, multipl
             rscale = rscale * max_shrink
             OPT_DEBUG(f"layer_id={layer_id}, layer_type={layer_type}, the input scales={(inp0.scale, inp1.scale)} "
                       f"are very disproportional and caused out of range scale value during quantization, please pay attention.")
-    scale0 = max(0, min(doscale_clip_max, scale0.round()))
-    scale1 = max(0, min(doscale_clip_max, scale1.round()))
+    one_t = torch_tensor(1, device=inp0.device)
+    zero_t = torch_tensor(0, device=inp0.device)
+    scale0 = torch.max(zero_t, torch.min(doscale_clip_max, torch.round(scale0)))
+    scale1 = torch.max(zero_t, torch.min(doscale_clip_max, torch.round(scale1)))
     do_scale, _, do_shift, _ = get_scale_approximation_params(rscale, mult_bits=multiplier_bits)
-    if do_shift < 0:
-        do_scale = max(1, min(doscale_clip_max, do_scale * (2.0 ** abs(do_shift))))
-        do_shift = 0
+    shift_less0_mask = do_shift < 0
+    do_scale[shift_less0_mask] = torch.max(one_t, torch.min(doscale_clip_max,
+                                                            do_scale[shift_less0_mask] * (
+                                                                torch.pow(2, (do_shift[shift_less0_mask]).abs()))))
+    do_shift[shift_less0_mask] = 0
+
     plh_scale = inp1.scale * inp0.scale
-    return scale0, scale1, do_scale, do_shift, range2dtype(0, do_scale)[1], range2dtype(-1, do_shift)[1], plh_scale
+    return (scale0, scale1, do_scale, do_shift, range2dtype(0, do_scale.max().item())[1],
+            range2dtype(-1, do_shift.max().item())[1], plh_scale)
     ######################################################################################################
 
 
@@ -114,8 +119,6 @@ def eltwise_quantizes(self, *args):
     method = self.get_param("method").upper()
     q_mode_activation = self.attrs["q_mode_activation"]
     multiplier_bits = self.attrs['multiplier_bits']
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Eltwise currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
     act_type = self.get_param('with_activation', optional=True, default_value='none').lower()
     if act_type == 'none':
@@ -123,10 +126,8 @@ def eltwise_quantizes(self, *args):
     else:
         out_signed = with_activation_out_is_signed(self) or self.force_dtype_int
     if inp0.qinvariant != inp1.qinvariant:
-        OPT_WARN(
-            'one input is quantize invariant and other one input is not, which may cause accuracy issue. layer_id=%s, %s' % (
-                self.attrs['layer_id'], self.name),
-            workflow_name='quantize', op_name=str(self.type))
+        OPT_WARN(f"{self} one input is quantize invariant and other one input is not, which may cause accuracy issue.",
+                 workflow_name='quantize')
 
     if inp0.qinvariant and inp1.qinvariant:
         out.scale = 1.0
@@ -143,40 +144,59 @@ def eltwise_quantizes(self, *args):
 
     if method in {"ADD", "SUB", "MAX", "MIN", "NONE"}:
         # due to aiff don't support uint16 max 65535,so we use INT16 replace UINT16
-        _, clip_max = dtype2range(Dtype.INT16)
+        _, clip_max = dtype2range(Dtype.INT16) if 'clip_max_bits' not in self.attrs else bits2range(
+            self.attrs['clip_max_bits'], True)
         scale0, scale1, do_scale, do_shift, do_scale_type, do_shift_type, _ = calc_eltwise_add_like_scale_shift(
-            inp0, inp1, out, clip_max, multiplier_bits, self.type, self.attrs["layer_id"])
+            inp0, inp1, out, torch_tensor(clip_max, inp0.device), multiplier_bits, self.type, self.attrs["layer_id"])
 
         bs_threshold = float(self.get_attrs('unify_scales_for_multi_inputs_operator_threshold',
                                             optional=True, default_value=1.0))
-        if (max(inp0.scale, inp1.scale) / (min(inp0.scale, inp1.scale) + OPT_EPSILON)) <= bs_threshold and abs(inp0.zerop - inp1.zerop) <= OPT_EPSILON:
+        if all((torch.maximum(inp0.scale, inp1.scale) / (
+                torch.minimum(inp0.scale, inp1.scale) + OPT_EPSILON)) <= bs_threshold) and all(
+                (inp0.zerop - inp1.zerop).abs() <= OPT_EPSILON):
             if method in {"ADD", }:
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
                     out.scale / inp0.scale, mult_bits=multiplier_bits, force_shift_positive=self.force_shift_positive)
             else:
-                do_scale = 1
-                do_shift = 0
-            scale0 = 1
-            scale1 = 1
+                do_scale = torch_tensor(1, device=inp0.device)
+                do_shift = torch_tensor(0, device=inp0.device)
+            scale0 = torch_tensor(1, device=inp0.device)
+            scale1 = torch_tensor(1, device=inp0.device)
             self.attrs['need_align_scales'] = False
-            OPT_DEBUG("layer_id=%s, %s, %s : this layer does not need to align input branches' scale/zerop" %
-                      (self.attrs['layer_id'], str(self.type), self.name))
+            OPT_DEBUG(f"{self} this layer does not need to align input branches' scale/zerop.")
             self.attrs['optimization_info']['unify_scales_for_multi_inputs_operator'] = True
 
-        self.params["shift_value"] = int(do_shift)
-        self.params["shift_type"] = do_shift_type
-        self.params["scale_value"] = [int(do_scale), int(scale0), int(scale1)]
-        self.params["scale_type"] = [do_scale_type, Dtype.UINT16, Dtype.UINT16]
+        scale_name = 'scale' if is_torch_tensor_with_multi_data(scale0) else 'scale_value'
+        shift_name = 'shift' if is_torch_tensor_with_multi_data(do_shift) else 'shift_value'
+        key_axis_shape = out.ir_shape[out.key_axis] if out.key_axis is not None else 1
+        if key_axis_shape > 1:
+            scale0 = torch.full([key_axis_shape], scale0.item()).to(
+                inp0.device) if not is_torch_tensor_with_multi_data(scale0) else scale0
+            scale1 = torch.full([key_axis_shape], scale1.item()).to(
+                inp1.device) if not is_torch_tensor_with_multi_data(scale1) else scale1
+            do_scale = torch.full([key_axis_shape], do_scale.item()).to(
+                out.device) if not is_torch_tensor_with_multi_data(do_scale) else do_scale
+
+        do_scales = torch.stack([do_scale.to(dtype2torch_type(Dtype.UINT16)), scale0, scale1], dim=0) \
+            if is_torch_tensor_with_multi_data(scale0) else [do_scale.int().item(), scale0.int().item(), scale1.int().item()]
+        self.set_ir_field(scale_name, do_scales, Dtype.UINT16)
+        self.set_ir_field(shift_name, do_shift, do_shift_type)
+        if not is_torch_tensor_with_multi_data(scale0):
+            self.params["scale_type"] = [Dtype.UINT16, Dtype.UINT16, Dtype.UINT16]
+            self.params["shift_type"] = do_shift_type
 
     elif method == "MUL":
         local_rescale = out.scale / (inp0.scale * inp1.scale)
         do_scale, do_scale_type, do_shift, do_shift_type = \
             get_scale_approximation_params(local_rescale, mult_bits=multiplier_bits,
                                            force_shift_positive=self.force_shift_positive)
-        self.params["shift_value"] = int(do_shift)
-        self.params["shift_type"] = do_shift_type
-        self.params["scale_value"] = int(do_scale)
-        self.params["scale_type"] = do_scale_type
+        doscale_name = 'scale' if is_torch_tensor_with_multi_data(do_scale) else 'scale_value'
+        doshift_name = 'shift' if is_torch_tensor_with_multi_data(do_shift) else 'shift_value'
+        self.set_ir_field(doscale_name, do_scale, do_scale_type)
+        self.set_ir_field(doshift_name, do_shift, do_shift_type)
+        if not is_torch_tensor_with_multi_data(do_scale):
+            self.params["shift_type"] = do_shift_type
+            self.params["scale_type"] = do_scale_type
 
 
 @op_register(OpType.Eltwise)
@@ -210,13 +230,15 @@ def eltwise(self, *args):
     x1 = inp1.betensor.to(torch.int64) if self.quantized else inp1.betensor.float()
     if method in {"ADD", "SUB", "MAX", "MIN"}:
         if self.quantized:
-            scale, scale0, scale1 = self.params["scale_value"]
-            x0 = (x0 + inp0.zerop) * scale0
-            x1 = (x1 + inp1.zerop) * scale1
+            scales = self.get_ir_field(['scale_value', 'scale'])
+            scale0, scale1 = scales[1], scales[2]
+            # deduce ensure out.key_axis is the same with inp0.key_axis or inp1.key_axis when inp0.key_axis/inp1.key_axis is not None
+            x0 = linear_requantize(x0 + inp0.broadcast_zerop, scale0, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
+            x1 = linear_requantize(x1 + inp1.broadcast_zerop, scale1, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
     elif method in {"MUL"}:
         if self.quantized:
-            x0 = x0 + inp0.zerop
-            x1 = x1 + inp1.zerop
+            x0 = x0 + inp0.broadcast_zerop
+            x1 = x1 + inp1.broadcast_zerop
     x0shape = list(x0.shape)
     x1shape = list(x1.shape)
     x0dims = len(x0shape)
@@ -227,25 +249,14 @@ def eltwise(self, *args):
 
     bk_scale = None
     if self.quantized:
-        if 'scale_value' in self.params:
-            bk_scale = self.params['scale_value']
-            if method in {"ADD", "SUB", "MAX", "MIN"}:
-                self.params['scale_value'] = bk_scale[0]
-        elif "scale" in self.constants:
-            bk_scale = self.constants["scale"].betensor
-            if method in {"ADD", "SUB", "MAX", "MIN"}:
-                self.constants['scale'].betensor = bk_scale[0]
-
-    # top_type_original = self.attrs['layer_top_type_original'][0]
-    # original_top_dtype = str2dtype(top_type_original)
-    # is_original_top_float = is_float(original_top_dtype)
-    # if True == is_original_top_float :
+        bk_scale = self.get_ir_field(['scale_value', 'scale'])
+        if method in {"ADD", "SUB", "MAX", "MIN"}:
+            scale_name = 'scale' if is_torch_tensor_with_multi_data(bk_scale[0]) else 'scale_value'
+            self.set_ir_field(scale_name, bk_scale[0])
     out.betensor = apply_with_activation(self, x, *args)
-    if bk_scale is not None:
-        if 'scale_value' in self.params:
-            self.params['scale_value'] = bk_scale
-        elif'scale' in self.constants:
-            self.constants['scale'] = bk_scale
+    if bk_scale is not None and method in {"ADD", "SUB", "MAX", "MIN"}:
+        scale_name = 'scale' if is_torch_tensor_with_multi_data(bk_scale[0]) else 'scale_value'
+        self.set_ir_field(scale_name, bk_scale)
     return out.betensor
 
 

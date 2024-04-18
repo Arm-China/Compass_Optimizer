@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.framework import *
 import torch
 import torchvision
-
 
 register_optype('PyramidROIAlign')
 
@@ -395,6 +394,7 @@ def local_roi_align(node, nor_box, feature_list):
                     data_q = (fourpoint_sum+top+bottom).long() >> qvalue
 
                     resize_feature[boxidx, idxh, idxw, :] = data_q
+        resize_feature = torch.clamp(resize_feature, node.outputs[0].qmin, node.outputs[0].qmax)
     else:
         resize_feature = torch.zeros((nor_box.shape[1], resize_height_, resize_width_, channel_), device=dev)
         # for batchidx in range(feature.shape[0]):

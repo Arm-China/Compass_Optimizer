@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -30,7 +30,8 @@ def constant_quantize(self, *args):
     inp_quantize(self, *args)
     w = self.constants["weights"]
     out = self.outputs[0]
-    out.set_qinvariant()
+    if not torch.equal(w.betensor, w.betensor.new_zeros(w.betensor.shape)):
+        out.set_qinvariant()
     w.scale = out.scale
     w.zerop = out.zerop
     w.qbits = out.qbits
@@ -38,4 +39,4 @@ def constant_quantize(self, *args):
     w.qmin = out.qmin
     w.qmax = out.qmax
     w.qinvariant = out.qinvariant
-    w.betensor = linear_quantize_clip(w.betensor, w.scale, w.zerop, w.qmin, w.qmax, w.key_axis)
+    w.betensor = linear_quantize_clip(w.betensor, out.broadcast_scale, out.broadcast_zerop, w.qmin, w.qmax)

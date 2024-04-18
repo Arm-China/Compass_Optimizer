@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import time
 import os
 import sys
+import functools
 
 from AIPUBuilder.Optimizer.version import __OPT_VERSION__, __OPT_NAME__
 from AIPUBuilder.Optimizer.logger import OPT_DEBUG, OPT_ERROR, OPT_INFO, OPT_WARN, OPT_FATAL
@@ -77,7 +78,7 @@ def OPT_END(quant_sum=None):
 
 def opt_workflow_register(func):
     def wrapper(*args, **kargs):
-        if not (opt_log_manager.opt_workflow_footprint_ in ['metric'] and func.__name__ in ['quant_metric', 'float_metric']):
+        if not(func.__name__ in ['metric'] and args[0].validation_dataloader is None):
             opt_log_manager.opt_workflow_footprint_ = func.__name__
             opt_log_manager.opt_workflow_list.append(func.__name__)
             OPT_INFO(f"[{func.__name__}] is running.")

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -11,8 +11,7 @@ def input_node(self, *args):
     if self.quantized:
         for o in self.outputs:
             if not o.is_qinvariant():
-                o.betensor = linear_quantize_clip(
-                    o.betensor, o.scale, o.zerop, o.qmin, o.qmax, o.key_axis)
+                o.betensor = linear_quantize_clip(o.betensor, o.broadcast_scale, o.broadcast_zerop, o.qmin, o.qmax)
     # Batch dimension does not exist in some speech models
     # The Batch dimension was expanded in dataset before and deleted here
     batch_size_in_IR = self.get_attrs("batch_size_in_IR", optional=True, default_value=1)

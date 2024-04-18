@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -49,7 +49,7 @@ class SphereFaceMetric(OptBaseMetric):
         thd = []
         thres_list = np.arange(-1.0, 1.0, 0.005)
         predicts = np.array(list(map(lambda line: line.strip().split(), self.predicts)))
-        for (train, test) in self.KFold(n=6000, n_folds=10):
+        for (train, test) in self.KFold(n=len(predicts), n_folds=10):
             acc_list = []
             for thres in thres_list:
                 acc_list.append(self.eval_acc(thres, predicts[train]))

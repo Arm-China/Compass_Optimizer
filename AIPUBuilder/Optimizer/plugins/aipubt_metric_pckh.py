@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -27,8 +27,8 @@ class PCKhMetric(OptBaseMetric):
         for idx, heatmap in enumerate(pred[1].cpu().numpy()):
             kps = []
             # post process
-            scale = target['scale'][idx] * 200
-            center = target['center'][idx]
+            scale = target['scale'][idx].cpu().numpy() * 200
+            center = target['center'][idx].cpu().numpy()
             for i in range(heatmap.shape[-1]):
                 hmap = gaussian_filter(heatmap[:, :, i], sigma=0.5)
                 hmap[hmap < self.hmap_thres] = 0

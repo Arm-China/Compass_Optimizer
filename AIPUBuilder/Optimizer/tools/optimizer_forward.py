@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import os
 from AIPUBuilder.Optimizer.plugins import *
@@ -37,11 +37,13 @@ class OptForward(object):
 
         for node in self.optimizer.g.nodes:
             node.attrs['layer_id'] = str(node.attrs.get('layer_id', -1))
-            key_axes = node.get_param('key_axis', optional=True, default_value=[None] * len(node.outputs))
+            key_axes = node.get_param('activation_quantization_axis',
+                                      optional=True, default_value=[None] * len(node.outputs))
+            key_axes = [None if isinstance(ka, str) and ka.lower() == 'none' else ka for ka in key_axes]
             for oi, ot in enumerate(node.outputs):
                 ot.key_axis = key_axes[oi]
         if not hasattr(self.optimizer.g, 'compat_quantized_model'):  # gsim output IR or opt output IR or self-define IR
-            self.optimizer.deduce_quantization_infos(self.optimizer.g)
+            QuantizeGraph.deduce_quantization_infos(self.optimizer.g)
         elif self.optimizer.g.compat_quantized_model:
             OPT_ERROR(f"OptForward only uses Compass IR to inference output, not compat_quantized_model=true IR.")
         else:  # compat_quantized_model=False parser output float IR
@@ -90,7 +92,8 @@ class OptForward(object):
                 else:
                     # keep the ir_dtype
                     o_data = o.betensor.cpu().numpy().astype(dtype2nptype(o.ir_dtype))
-                o_data = o_data.reshape(o.ir_shape)
+                if len(o.ir_shape) <= 1:
+                    o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
 
         return output_data

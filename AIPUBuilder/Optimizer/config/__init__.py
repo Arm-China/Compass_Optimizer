@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from . parser import (arg_parser,
+                      CfgParser,
                       get_info_from_graph,
                       filter_valid_properties,
                       fields_to_str,

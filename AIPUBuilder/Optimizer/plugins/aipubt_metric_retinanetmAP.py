@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -8,6 +8,7 @@ from AIPUBuilder.Optimizer.plugins.aipubt_metric_mAP import BasemAPMetric
 import numpy as np
 import torch
 from collections import defaultdict
+from torchvision.ops import nms
 
 
 @register_plugin(PluginType.Metric, '1.0')
@@ -16,18 +17,18 @@ class retinanetmAP(BasemAPMetric):
         https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/retinanet
     """
 
-    def __init__(self, *args):
-        self.ratios = [1.0, 2.0, 0.5]
+    def __init__(self, ratios=[1.0, 2.0, 0.5], threshold=0.5, top_n=1000, nms_thres=0.95, detections=300):
+        self.ratios = ratios
         self.scales = [4 * 2 ** (i / 3) for i in range(3)]
         self.angles = [-np.pi / 6, 0, np.pi / 6]
         self.anchors = {}
         self.rotated_bbox = None
 
-        self.threshold = 0.5
-        self.top_n = 1000
-        self.nms_thres = 0.95
-        self.detections = 300
-        super().__init__(*args)
+        self.threshold = threshold
+        self.top_n = top_n
+        self.nms_thres = nms_thres
+        self.detections = detections
+        super().__init__()
 
     def __call__(self, pred, target):
         batch = pred[0].shape[0]
@@ -221,3 +222,143 @@ class retinanetmAP(BasemAPMetric):
 
     def report(self):
         return "retinanet_onnx mAP accuracy is %f" % (self.compute())
+
+
+@register_plugin(PluginType.Metric, '1.0')
+class efficientdetmAP(retinanetmAP):
+    """
+        https://github.com/xuannianz/EfficientDet/tree/master
+    """
+
+    def __init__(self, image_size=512, pyramid_levels=[3, 4, 5, 6, 7], ratios=[1.0, 0.5, 2.0], threshold=0.05, top_n=1000, nms_thres=0.5, detections=300):
+        super().__init__()
+        self.pyramid_levels = pyramid_levels
+        self.sizes = [2 ** (x + 2) for x in self.pyramid_levels]
+        self.strides = [2 ** x for x in self.pyramid_levels]
+        self.ratios = ratios
+        self.scales = [2 ** (i / 3) for i in range(3)]
+
+        self.image_size = int(image_size)
+        self.anchors = self.generate_anchors([self.image_size, self.image_size])
+
+        self.rotated_bbox = None
+
+        self.threshold = threshold
+        self.top_n = top_n
+        self.nms_thres = nms_thres
+        self.detections = detections
+
+    def __call__(self, pred, target):
+        batch = pred[0].shape[0]
+
+        targets_list = []
+        for b in range(batch):
+            targets = {}
+            for k, v in target.items():
+                targets.update({k: v[b].numpy()})
+            targets_list.append(targets)
+        score_list, boxes_list, label_id_list = self.decode(pred[0], pred[1], self.top_n)
+        for i in range(batch):
+            # Perform non-maximum suppression
+            predict = defaultdict()
+            predict.update({'label_index': label_id_list[i]})
+            predict.update({'bbox': boxes_list[i].numpy()})
+            predict.update({'confidence': score_list[i]})
+            predict.update({'image_name': targets_list[i]['image_name']})
+
+            BasemAPMetric.extract_obj_all_class(predict, self.predicts)
+            BasemAPMetric.extract_obj_all_class(targets_list[i], self.targets)
+
+    def generate_anchors(self, image_shape):
+        def anchors_for_shape(base_size=16, ratios=None, scales=None):
+            num_anchors = len(ratios) * len(scales)
+            anchors = np.zeros((num_anchors, 4))
+            # anchors[:, 2:] = base_size * np.tile(np.repeat(scales, len(ratios))[None], (2, 1)).T
+            anchors[:, 2:] = base_size * np.tile(scales, (2, len(ratios))).T
+            areas = anchors[:, 2] * anchors[:, 3]
+            anchors[:, 2] = np.sqrt(areas / np.tile(ratios, len(scales)))
+            anchors[:, 3] = anchors[:, 2] * np.tile(ratios, len(scales))
+            anchors[:, 0::2] -= np.tile(anchors[:, 2] * 0.5, (2, 1)).T
+            anchors[:, 1::2] -= np.tile(anchors[:, 3] * 0.5, (2, 1)).T
+            return anchors
+
+        def shift(shape, stride, anchors):
+            shift_x = (np.arange(0, shape[1]) + 0.5) * stride
+            shift_y = (np.arange(0, shape[0]) + 0.5) * stride
+
+            shift_x, shift_y = np.meshgrid(shift_x, shift_y)
+
+            shifts = np.vstack((
+                shift_x.ravel(), shift_y.ravel(),
+                shift_x.ravel(), shift_y.ravel()
+            )).transpose()
+
+            shape_0 = anchors.shape[0]
+            shape_1 = shifts.shape[0]
+            shifts = shifts.reshape((1, shape_1, 4)).transpose((1, 0, 2))
+            anchors = anchors.reshape((1, shape_0, 4)) + shifts
+            anchors = anchors.reshape((shape_1 * shape_0, 4))
+            return anchors
+
+        all_anchors = np.zeros((0, 4), dtype=np.float32)
+        for idx, p in enumerate(self.pyramid_levels):
+            anchors = anchors_for_shape(self.sizes[idx], self.ratios, self.scales)
+            shape = (np.array(image_shape) + 2 ** p - 1) // (2 ** p)
+            shifted_anchors = shift(shape, self.strides[idx], anchors)
+            all_anchors = np.append(all_anchors, shifted_anchors, axis=0)
+        return np.expand_dims(all_anchors, axis=0)
+
+    def decode(self, box_head, cls_head, top_n=1000):
+
+        batch_size = box_head.size()[0]
+        device = cls_head.device
+
+        out_scores = torch.zeros((batch_size, top_n), device=device)
+        out_boxes = torch.zeros((batch_size, top_n, 4), device=device)
+        out_classes = torch.zeros((batch_size, top_n), device=device)
+
+        for batch in range(batch_size):
+            boxes = self.getbox(box_head[batch])[0]
+            classes = cls_head[batch].contiguous()
+            scores = torch.max(classes, axis=1)[0]
+            labels = torch.argmax(classes, axis=1)
+
+            keep = (scores >= self.threshold).nonzero()[:, 0]
+            _boxes = torch.index_select(boxes, 0, keep)
+            _scores = torch.index_select(scores, 0, keep).type(_boxes.type())
+
+            nms_keep = nms(_boxes, _scores, self.nms_thres)
+            keep = torch.index_select(keep, 0, nms_keep)
+
+            # get topk
+            _scores = torch.index_select(scores, 0, keep)
+            scores, top_indices = torch.topk(_scores, min(top_n, keep.size()[0]), dim=0)
+            indices = torch.index_select(keep, 0, top_indices)
+            labels = torch.index_select(labels, 0, indices)
+            boxes = torch.index_select(boxes, 0, indices)
+
+            out_scores[batch, :scores.size()[0]] = scores
+            out_boxes[batch, :boxes.size()[0], :] = boxes / self.image_size
+            out_classes[batch, :labels.size()[0]] = labels
+
+        return out_scores, out_boxes, out_classes
+
+    def getbox(self, boxes):
+        cxa = (self.anchors[..., 0] + self.anchors[..., 2]) / 2
+        cya = (self.anchors[..., 1] + self.anchors[..., 3]) / 2
+        wa = self.anchors[..., 2] - self.anchors[..., 0]
+        ha = self.anchors[..., 3] - self.anchors[..., 1]
+        ty, tx, th, tw = boxes[..., 0], boxes[..., 1], boxes[..., 2], boxes[..., 3]
+
+        w = torch.exp(tw) * wa
+        h = torch.exp(th) * ha
+        cy = ty * ha + cya
+        cx = tx * wa + cxa
+        ymin = torch.clamp(cy - h / 2., 0, self.image_size)
+        xmin = torch.clamp(cx - w / 2., 0, self.image_size)
+        ymax = torch.clamp(cy + h / 2., 0, self.image_size)
+        xmax = torch.clamp(cx + w / 2., 0, self.image_size)
+        return torch.stack([xmin, ymin, xmax, ymax], dim=-1)
+
+    def report(self):
+        return "mAP accuracy is %f" % (self.compute())

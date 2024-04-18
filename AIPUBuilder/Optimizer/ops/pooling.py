@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.framework import *
@@ -37,13 +37,14 @@ def pooling(self, *args):
     ceil_mode = local_ceil_mode
 
     # to calculate output shape and extra padding needed when ceil_mode=true
+    on = self.outputs[0].ir_shape[0] if len(self.inputs[0].ir_shape) == 4 else 1
+    oc = self.outputs[0].ir_shape[3] if len(self.inputs[0].ir_shape) == 4 else self.outputs[0].ir_shape[2]
     oh = self.outputs[0].ir_shape[1] if len(self.inputs[0].ir_shape) == 4 else 1
     extra_ph = (oh - 1) * stride[0] + dilation[0] * (kernel_size[0] - 1) + \
         1 - inp.shape[1] - padding[2] - padding[3]
     ow = self.outputs[0].ir_shape[2] if len(self.inputs[0].ir_shape) == 4 else self.outputs[0].ir_shape[1]
     extra_pw = (ow - 1) * stride[1] + dilation[1] * (kernel_size[1] - 1) + \
         1 - inp.shape[2] - padding[0] - padding[1]
-
     if extra_pw + padding[1] >= kernel_size[1] and ceil_mode == True:
         OPT_WARN(
             'ceil_mode=True cause total padding width exceed kernel_width size(%d>=%d). Result maybe untrustworthy.' % (
@@ -55,6 +56,7 @@ def pooling(self, *args):
                 extra_ph + padding[3], kernel_size[0]))
 
     inp = nhwc2nchw(inp)
+    trans_key_axis = [0, 3, 1, 2].index(self.inputs[0].key_axis) if self.inputs[0].key_axis else None
     pmethod = self.get_param('method').upper()
     if pmethod == 'MAX':
         pvalue = torch.finfo(torch.float32).min if not self.quantized else self.inputs[0].qmin
@@ -66,57 +68,53 @@ def pooling(self, *args):
         out.betensor = nchw2nhwc(y)
     elif pmethod == 'AVG':
         pvalue = 0
-        inp2 = torch.nn.functional.pad(
-            (inp + self.inputs[0].zerop) if self.quantized else inp, padding, value=pvalue)
+        inp_zp = self.inputs[0].broadcast_zerop
+        inp_add_zp = inp + (nhwc2nchw(inp_zp) if is_torch_tensor_with_multi_data(inp_zp) else inp_zp)
+        inp2 = torch.nn.functional.pad(inp_add_zp if self.quantized else inp, padding, value=pvalue)
 
         if dilation[0] > 1 or dilation[1] > 1:  # only tensorflow support dilation
             n, c, h, w = inp2.shape
             kh, kw = kernel_size
             sh, sw = stride
             dh, dw = dilation
-
-            dpb = math.ceil(h / dh) * dh - h
-            dpr = math.ceil(w / dw) * dw - w
-            inp_bk = torch.clone(inp2)
-            inp2 = torch.nn.functional.pad(inp2, (0, dpr, 0, dpb), value=pvalue)
-
-            nn, nc, nh, nw = inp2.shape
-            inp2 = inp2.view(nn, nc, nh // dh, dh, nw // dw, dw)
-            inp2 = inp2.permute(3, 5, 0, 1, 2, 4).contiguous()
-            inp2 = inp2.view(nn * dw * dh, nc, nh // dh, nw // dw)
-
-            y_sum = torch.nn.functional.avg_pool2d(inp2, kernel_size=(kh, kw), stride=(1, 1), padding=0,
-                                                   count_include_pad=False, ceil_mode=ceil_mode, divisor_override=1)
-
-            inp_n, inp_c, inp_h, inp_w = inp2.shape
-            out_n, out_c, out_h, out_w = y_sum.shape
-            y_area = torch.zeros_like(y_sum, device=inp.device)
-
+            startX = torch.arange(ow) * sw
+            startY = torch.arange(oh) * sh
+            endY = startY + (kh - 1) * dh + 1
+            endX = startX + (kw - 1) * dw + 1
+            y_sum = torch.zeros([on, oc, oh, ow], device=inp2.device)
+            y_area = torch.zeros_like(y_sum, device=inp2.device)
+            padding_bottom = padding_right = 0
+            ceil_mode = self.get_param('ceil_mode')
+            if ceil_mode:
+                padding_right = max(0, endX.max() - w)
+                padding_bottom = max(0, endY.max() - h)
+                padding_diff = (0, padding_right, 0, padding_bottom)
+                inp2 = torch.nn.functional.pad(inp2, padding_diff, value=0)
+            for r_idx in range(oh):
+                for c_idx in range(ow):
+                    h_step = torch.arange(startY[r_idx], endY[r_idx], dh, device=inp2.device)
+                    w_step = torch.arange(startX[c_idx], endX[c_idx], dw, device=inp2.device)
+                    pool_value = inp2[:, :, startY[r_idx]:endY[r_idx]:dh, startX[c_idx]:endX[c_idx]:dw]
+                    poolsum = torch.sum(pool_value, dim=[2, 3])
+                    y_sum[:, :, r_idx, c_idx] = poolsum
+                    #padding = [pad_left, pad_right, pad_top, pad_bottom]
+                    h_count = torch.nonzero(torch.bitwise_and(
+                        h_step >= padding[2], h_step < (inp2.shape[2] - padding_bottom - padding[3])))
+                    w_count = torch.nonzero(torch.bitwise_and(
+                        w_step >= padding[0], w_step < (inp2.shape[3] - padding_right - padding[1])))
+                    w_count = w_count.shape[0]
+                    h_count = h_count.shape[0]
+                    y_area[:, :, r_idx, c_idx] = (1 if (h_count * w_count) == 0 else h_count * w_count)
             if count_include_pad:
-                y_area = kernel_size[0] * kernel_size[1]
-            else:
-                h_start = (y_area + torch.arange(out_h, device=inp.device).reshape(out_h, 1)) * 1 - 0
-                h_end = torch.min(h_start + kernel_size[0], y_area + inp_h)
-                h_start = torch.max(h_start, y_area)
-                w_start = (y_area + torch.arange(out_w, device=inp.device).reshape(1, out_w)) * 1 - 0
-                w_end = torch.min(w_start + kernel_size[1], y_area + inp_w)
-                w_start = torch.max(w_start, y_area)
-
-                y_area = torch.multiply(h_end - h_start, w_end - w_start)
+                y_area = kh * kw
             if self.quantized:
                 y_sum = torch.clamp(y_sum, -2 ** 31, 2 ** 31)
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
                     1. / y_area, mult_bits=8, force_shift_positive=False)
-                y = linear_requantize(y_sum, do_scale, do_shift, self.outputs[0].zerop, out.qmin, out.qmax)
+                y = linear_requantize(y_sum, do_scale, do_shift,
+                                      self.outputs[0].zerop, out.qmin, out.qmax)
             else:
                 y = y_sum / y_area
-
-            cn, cc, ch, cw = y.shape
-            y = y.view(dh, dw, cn // (dh * dw), cc, ch, cw)
-            y = y.permute(2, 3, 4, 0, 5, 1).contiguous()
-            y = y.view(cn // (dw * dh), cc, ch * dh, cw * dw)
-            y = y[:, :, 0:ch * dh - dpb, 0:cw * dw - dpr]
-
         else:
 
             y_sum = torch.nn.functional.avg_pool2d(inp2,
@@ -143,7 +141,9 @@ def pooling(self, *args):
                 y_sum = torch.clamp(y_sum, -2 ** 31, 2 ** 31)
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
                     1. / y_area, mult_bits=8, force_shift_positive=False)
-                y = linear_requantize(y_sum, do_scale, do_shift, self.outputs[0].zerop, out.qmin, out.qmax)
+                output_zp = nhwc2nchw(self.outputs[0].broadcast_zerop) if is_torch_tensor_with_multi_data(
+                    self.outputs[0].zerop) else self.outputs[0].zerop
+                y = linear_requantize(y_sum, do_scale, do_shift, output_zp, out.qmin, out.qmax)
             else:
                 y = y_sum / y_area
 
@@ -155,7 +155,7 @@ def pooling(self, *args):
         padding_value = -self.inputs[0].zerop[0] if self.quantized else 0
         zerop = self.inputs[0].zerop if self.quantized else 0
         inp = torch.nn.functional.pad(inp, padding, value=padding_value)
-        inp += zerop
+        inp += (nhwc2nchw(zerop) if is_torch_tensor_with_multi_data(zerop) else zerop)
         batch = inp.shape[0]
         _, out_h, out_w, channel = self.outputs[0].ir_shape
         inp_h, inp_w = inp.shape[2], inp.shape[3]
@@ -181,16 +181,17 @@ def pooling(self, *args):
                 pool_value = feature[:, :, startY[r_idx]:endY[r_idx]:dilation[0], startX[c_idx]:endX[c_idx]:dilation[1]]
                 poolsum = torch.sum(pool_value, dim=[2, 3])  # [1,32]
                 if self.quantized:
-                    shift = self.params["shift_value"]
-                    scale = self.params["scale_value"]
+                    shift = self.get_ir_field(["shift_value", "shift"])
+                    scale = self.get_ir_field(["scale_value", "scale"])
                     act_qmin, act_qmax = bits2range(32, False)
                     poolsum = torch.clamp(poolsum, act_qmin, act_qmax)
                     if pmethod == "L1":
-                        pool_output = linear_requantize(poolsum, scale, shift, out.zerop, out.qmin, out.qmax)
+                        pool_output = linear_requantize(poolsum, scale, shift, out.zerop,
+                                                        out.qmin, out.qmax, trans_key_axis)
                     else:  # L2
                         pmin, pmax = dtype2range(Dtype.UINT16)
                         sqrt_lut = self.constants['sqrt_lut'].betensor
-                        poolsum = linear_requantize(poolsum, scale, shift, 0, pmin, pmax).long()
+                        poolsum = linear_requantize(poolsum, scale, shift, 0, pmin, pmax, trans_key_axis).long()
                         poolsum2 = torch.reshape(poolsum, (-1,))
                         poolsqrt = lookup_lut_powerof2(poolsum2, sqrt_lut, 16, False, dtype2bits(
                             self.constants["sqrt_lut"].dtype), is_signed(self.constants["sqrt_lut"].dtype))
@@ -223,8 +224,6 @@ def pooling(self, *args):
 @quant_register(OpType.Pooling)
 def pooling_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization of activations")
     q_bits_activation = self.attrs["q_bits_activation"]
 
     pmethod = self.get_param('method').upper()
@@ -250,7 +249,6 @@ def pooling_quantize(self, *args):
         placeholders.scale, placeholders.zerop, placeholders.qmin, placeholders.qmax, placeholders.dtype = \
             get_linear_quant_params_from_tensor(
                 placeholders, QuantMode.to_symmetric(q_mode_activation), 16, is_signed=False)
-
         out.qbits = q_bits_activation
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
             out, q_mode_activation, q_bits_activation, is_signed=False or self.force_dtype_int)

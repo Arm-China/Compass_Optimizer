@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import os
 import re
 from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_INFO, OPT_WARN
-from AIPUBuilder.Optimizer.utils import *
-from AIPUBuilder.Optimizer.framework import QUANTIZE_METRIC_DICT, QUANTIZE_DATASET_DICT, OpType
+from AIPUBuilder.Optimizer.framework import (QUANTIZE_METRIC_DICT,
+                                             QUANTIZE_DATASET_DICT,
+                                             OpType, PyNode)
+from AIPUBuilder.Optimizer.utils import string_to_base_type, QuantMode, AIFF_AHEAD_SHIFT_OP
 
 DEFAULT_FIELDS = {}
 HIDDEN_FIELDS = {}
@@ -365,6 +367,47 @@ class MetricField(BaseField):
     def message():
         return (f"A metric plugin name for measure model's accuracy. It supports multi-metric and uses ',' to seperate. "
                 f"Now Optimizer supports metric plugins: {MetricField._metric_plugins()}.")
+
+
+@field_register('eval_optimized_model', 'default')
+class EvalOptimizedModelField(BaseField):
+    # whether run evaluation on optimized (quant/mix-quantization) model
+    @staticmethod
+    def default():
+        return 'True'
+
+    @staticmethod
+    def parse(e):
+        return isinstance(e, bool), e
+
+    @staticmethod
+    def error(e):
+        return f"Require the 'eval_optimized_model' field must be in bool type, now is {type(e)} type. default value=True"
+
+    @staticmethod
+    def message():
+        return f"Whether run evaluation on optimized model."
+
+
+@field_register('skip_optimization', 'default')
+class SkipOptimizationField(BaseField):
+    # whether skip the optimize workflow(statistic, quantize, serialize)
+    @staticmethod
+    def default():
+        return 'false'
+
+    @staticmethod
+    def parse(e):
+        return isinstance(e, bool), e
+
+    @staticmethod
+    def error(e):
+        return f"Require the 'skip_optimization' field must be in bool type, now is {type(e)} type. default value=True"
+
+    @staticmethod
+    def message():
+        return (f"Whether skip the optimization workflow, and the optimization workflow mainly "
+                f"includes the statistic, quantize and serialize process.")
 
 
 @field_register('eval_original_model', 'default')
@@ -895,7 +938,7 @@ class QuantizeMethodForActivationField(BaseField):
     # quantization method for activations like 'per_tensor_symmetric_full_range, per_tensor_asymmetric'
     @staticmethod
     def _activation_quantize_method():
-        return list(filter(QuantMode.is_per_tensor, QuantMode.mode_names()))
+        return list(filter(lambda aqm: aqm != 'per_channel_asymmetric' and not QuantMode.is_per_block(aqm), QuantMode.mode_names()))
 
     @staticmethod
     def default():
@@ -919,6 +962,27 @@ class QuantizeMethodForActivationField(BaseField):
     def message():
         _activation_qmethod = QuantizeMethodForActivationField._activation_quantize_method()
         return f"Activation quantization method. Now Optimizer supports quantzation method: {_activation_qmethod}. {BaseField.per_node_cfg_usage}"
+
+
+@field_register('weight_block_size', 'default')
+class WeightBlockSizeField(BaseField):
+    # quantization block size for weights under per-block quantization
+
+    @staticmethod
+    def default():
+        return '256'
+
+    @staticmethod
+    def parse(wb):
+        return BaseField._re_parse(wb, r'\d+')
+
+    @staticmethod
+    def error(wb):
+        return f"Required the unsigned integer 'weight_block_size' field, now is {wb}, default value=256."
+
+    @staticmethod
+    def message():
+        return f"Block size (unsigned interger) for quantizating weight data under per-block quantization. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('weight_bits', 'default')
@@ -1124,14 +1188,15 @@ class CastDtypesForLibField(BaseField):
 class MinZhouyiTarget(BaseField):
     @staticmethod
     def _support_target():
-        return ['Z2', 'Z3', 'X1', 'X2', 'X3']
+        return ['Z1', 'Z2', 'Z3', 'X1', 'X2', 'X3']
 
     @staticmethod
     def default():
-        return 'Z2'
+        return 'X2'
 
     @staticmethod
-    def parse(us):
+    def parse(target):
+        us = target.split('_')[0].strip().upper()
         support_target_ = MinZhouyiTarget._support_target()
         return str(us).upper() in support_target_, us
 
@@ -1390,30 +1455,16 @@ class UnifyScales4MultiInputsOP(BaseField):
 
     @staticmethod
     def parse(sqs):
-        if '' == sqs:
-            return True, {}
-        elif re.match(r'^\s*\[(\s*\(\s*[a-zA-Z_0-9]+\s*,\s*\d+\s*,\s*\d+((\.\d+)|\.)?\s*,\s*((max)|(min)|(avg)|(out))\s*,?\s*\)\s*,?\s*)+\]\s*$', str(sqs).lower().strip()):
-            r = {}
-            s = [x.lower().strip() for x in re.split(r',|\[|\]|\(|\)|\s+', str(sqs).lower().strip()) if x.lower().strip()]
-            for i in range(0, len(s), 4):
-                op_name = s[i]
-                depth = int(s[i+1])
-                thres = float(s[i+2])
-                method = s[i+3]
-                for k, v in OpType.__dict__.items():
-                    if str(k).lower().strip() == op_name:
-                        r[v] = (depth, thres, method)
-            return True, r
-        else:
-            return False, {}
+        pattern = r'|\s*\[(\s*\(\s*[a-zA-Z_0-9]+\s*,\s*\d+\s*,\s*\d+((\.\d+)|\.)?\s*,\s*((max)|(min)|(avg)|(out)|(skip))\s*,?\s*\)\s*,?\s*)+\]\s*'
+        return BaseField._re_parse(sqs, pattern)
 
     @staticmethod
     def error(sqs):
         return (f"Require the 'unify_scales_for_multi_inputs_operators' field must be like [(operator_type, search_depth, threshold, method), ...], "
                 f"where 'operator_type' is valid operator type name, 'search_depth' is max search depth for speeding up (0 means no limits), 'threshold' means "
                 f"ignoring the branch scales' difference when max(branch_scales) / min(branch_scales) <= threshold, 'method' defines the strategy "
-                f"for choosing the unified scale and currently support 'max' (maximum scale of input branches), 'min' (minimum scale of input branches), 'avg' (mean scale of input branches), 'out' (scale of this layer's 1st output)."
-                f"e.g. '[(Concat, 20, 1.05, min)]', '[(ScatterND, 20, 1.05, min)]', '[(Concat, 20, 1.05, min), (ScatterND, 20, 1.05, min)]'. "
+                f"for choosing the unified scale and currently support 'max' (maximum scale of input branches), 'min' (minimum scale of input branches), 'avg' (mean scale of input branches), 'out' (scale of this layer's 1st output), 'skip'(skip unifying scales of input branches for related layers)."
+                f"e.g. '[(Concat, 20, 1.05, min)]', '[(ScatterND, 20, 1.05, min)]', '[(Concat, 20, 1.05, min), (ScatterND, 20, 1.05, min)]'. {BaseField.per_node_cfg_usage}"
                 f"Now is: {sqs}")
 
     @staticmethod
@@ -1423,8 +1474,8 @@ class UnifyScales4MultiInputsOP(BaseField):
                 f"Must be like [(operator_type, search_depth, threshold, method), ...], "
                 f"where 'operator_type' is valid operator type name, 'search_depth' is max search depth for speeding up (0 means no limits), 'threshold' means "
                 f"ignoring the branch scales' difference when max(branch_scales) / min(branch_scales) <= threshold, 'method' defines the strategy "
-                f"for choosing the unified scale and currently support 'max' (maximum scale of input branches), 'min' (minimum scale of input branches), 'avg' (mean scale of input branches), 'out' (scale of this layer's 1st output)."
-                f"e.g. '[(Concat, 20, 1.05, min)]', '[(ScatterND, 20, 1.05, min)]', '[(Concat, 20, 1.05, min), (ScatterND, 20, 1.05, min)]'. ")
+                f"for choosing the unified scale and currently support 'max' (maximum scale of input branches), 'min' (minimum scale of input branches), 'avg' (mean scale of input branches), 'out' (scale of this layer's 1st output), 'skip'(skip unifying scales of input branches for related layers)."
+                f"e.g. '[(Concat, 20, 1.05, min)]', '[(ScatterND, 20, 1.05, min)]', '[(Concat, 20, 1.05, min), (ScatterND, 20, 1.05, min)]'. {BaseField.per_node_cfg_usage}")
 
 
 @field_register('with_winograd', 'default')
@@ -1638,118 +1689,6 @@ class FeaturemapSplitsSramSizeField(BaseField):
         return f"Maximum allowed sram size for reducing memory footprint by tiling featuremaps. Now Optimizer supports sram size: {_ssize[0]}~{_ssize[-1]} k."
 
 
-@field_register('scaling_bits', 'default')
-class ScalingBitsField(BaseField):
-    '''
-    decodebox: [box_bits, box_num_perclass_bits, total_class_num_bits, label_perclass_bits],
-    Interp: [interp_shift],
-    LRN: [lut_out_bits],
-    NMS: [iou_thresh_shift, box_shift, areas_shift, inter_shift],
-    Postnms1: [nor_box_shift],
-    PRELU: [negative_slope_shift],
-    Region: [conf_sigmoid_shift, score_softmax_dtype_bits, anchor_dtype_bits, conf_sigmoid_dtype_bits,
-            bbox_xy_sigmoid_dtype_bits, bbox_wh_exp_dtype_bits, grid_shift],
-    Resize:[interp_shift],
-    RioAlign: [quant_bits, spatial_shift],
-    ROIPooling: [index_precision],
-    Softmax: [max_value_scaling_bits, adjust_q],
-    '''
-    @staticmethod
-    def _scaling_bits_default():
-        return "{ \
-                  DecodeBox: [16, 16, 16, 16], \
-                  Interp: [13], \
-                  LRN: [16], \
-                  NMS: [8, 15, 13, 13], \
-                  PostNms1: [10], \
-                  PRELU: [12], \
-                  Region: [15, 32, 16, 16, 16, 16, 15], \
-                  Resize: [13], \
-                  RoiAlign: [12, 10], \
-                  ROIPooling: [16], \
-                  Softmax: [20, 1], \
-                  TopK: [0], \
-                }".replace(' ', '')
-
-    @staticmethod
-    def default():
-        return ScalingBitsField._scaling_bits_default()
-
-    @staticmethod
-    def message():
-        _sbd = ScalingBitsField._scaling_bits_default()
-        return (f"The OPs, like {_sbd} has implicit quantization parameters, "
-                f"and you can set these parameters by 'scaling_bits' fields.")
-
-    @staticmethod
-    def _match(scaling_bits):
-        scaling_bits = scaling_bits.replace(' ', '')
-        check = "^\{((\w+:\[((\-|\+)?\d+(\.\d+)?,?)*\])*,?)*\}$"
-        cpattern = re.compile(check)
-        cmatch = cpattern.match(scaling_bits)
-        return cmatch, cpattern
-
-    @staticmethod
-    def parse(scaling_bits):
-        cmatch, _ = ScalingBitsField._match(scaling_bits)
-        return cmatch is not None, scaling_bits
-
-    @staticmethod
-    def _get_scaling_bits(scaling_bits):
-        scaling_bits_dict = {}
-        scaling_bits = scaling_bits.replace(' ', '')
-        cmatch, cpattern = ScalingBitsField._match(scaling_bits)
-        # example: gm_str = '{resize:[10], nms:[1,2,2]}'
-        gm_str = cmatch.group()
-        # delete {}
-        gm_str = gm_str[1:-1]
-        # pad ',' to end if end is ']', so we can use '],' to split.
-        gm_str = gm_str+',' if gm_str[-1] == ']' else gm_str
-        split_gms = gm_str.split('],')
-        split_gms = [s for s in split_gms if s != '']
-        for sgms in split_gms:
-            key, values = sgms.split(':')
-            if len(values) > 1:
-                bits = [eval(b) for b in re.findall('[+-]?\d+', values)]
-                scaling_bits_dict.update({key.lower(): bits})
-        return scaling_bits_dict
-
-    @staticmethod
-    def error(scaling_bits):
-        msg = ''
-        if scaling_bits.count('{') != scaling_bits.count('}') or scaling_bits.count('[') != scaling_bits.count(']'):
-            msg += "The num of '{' or '[' is not same to the num of '}' or ']'."
-        elif not ScalingBitsField.parse(scaling_bits)[0]:
-            msg += f"Please check the 'scaling_bits' field format, which should be like a dict format: " \
-                   f"scaling_bits={{key:[value], key1:[value1]}}, " \
-                   f"and 'key' should be op_type or a method in Activation Op; " \
-                   f"'value' should be one integer/float or a set of integer/float using ',' to seperate."
-        else:
-            pass
-        msg += " Now scaling_bits=%s" % scaling_bits
-        return msg
-
-    @staticmethod
-    def _update_to_node_attr(node, scaling_bits):
-        default_scaling_bits = ScalingBitsField._get_scaling_bits(
-            ScalingBitsField._scaling_bits_default())
-        parsed_scaling_bits = ScalingBitsField._get_scaling_bits(scaling_bits)
-        all_scaling_bits = {**default_scaling_bits, **parsed_scaling_bits}
-        if str(node.type)[7:].lower() in all_scaling_bits:
-            scaling_bits_key = str(node.type)[7:].lower()
-            if scaling_bits_key in default_scaling_bits and scaling_bits_key in parsed_scaling_bits:
-                if len(default_scaling_bits[scaling_bits_key]) != len(parsed_scaling_bits[scaling_bits_key]):
-                    OPT_WARN(f"({node}) is set risky length of scaling_bits, "
-                             f"which is default length(={len(default_scaling_bits[scaling_bits_key])}) != "
-                             f"configured length(={len(parsed_scaling_bits[scaling_bits_key])}).", log_once=True)
-            node.attrs['scaling_bits'] = all_scaling_bits[scaling_bits_key]
-        elif 'method' in node.params and node.params['method'].lower() in all_scaling_bits:
-            scaling_bits_key = node.params['method'].lower()
-            node.attrs['scaling_bits'] = all_scaling_bits[scaling_bits_key]
-        else:
-            pass
-
-
 @field_register('trigger_float_op', 'default')
 class TriggerFloatOpField(BaseField):
     @staticmethod
@@ -1856,31 +1795,6 @@ class SimilarityDataNumField(BaseField):
     @staticmethod
     def message():
         return f"The batches amount for checking similarity."
-
-
-@field_register('run_mode', 'hidden')
-class RunModeField(BaseField):
-    @staticmethod
-    def _run_mode():
-        return ['float_ir_forward', 'quant_ir_forward', 'mixed_ir_forward', 'default']
-
-    @staticmethod
-    def default():
-        return 'default'
-
-    @staticmethod
-    def parse(rm):
-        _rmode = RunModeField._run_mode()
-        return isinstance(rm, str) and rm.lower() in _rmode, rm
-
-    @staticmethod
-    def error(rm):
-        _rmode = RunModeField._run_mode()
-        return f"Required string type, and only support {_rmode}, default value=default."
-
-    @staticmethod
-    def message():
-        return f"Run mode for Optimizer."
 
 
 @field_register('write_similarity_to_ir', 'hidden')
@@ -2162,11 +2076,11 @@ class ActivationPerChannelMinElementsField(BaseField):
                 f"to avoid statistical instability caused by too few elements.")
 
 
-@field_register('enable_activation_perchannel', 'hidden')
-class EnableActivationPerChannelField(BaseField):
+@field_register('compat_quantized_model_simplify_dequantize_quantize', 'default')
+class CompatQuantizedModelSimplifyDequantizeQuantizeField(BaseField):
     @staticmethod
     def default():
-        return 'False'
+        return 'True'
 
     @staticmethod
     def parse(eap):
@@ -2174,12 +2088,33 @@ class EnableActivationPerChannelField(BaseField):
 
     @staticmethod
     def error(eap):
-        return (f"Require the bool 'enable_activation_perchannel' field, "
-                f"now is {eap}, default value= {EnableActivationPerChannelField.default()}.")
+        return (f"Require the bool 'compat_quantized_model_simplify_dequantize_quantize' field, "
+                f"now is {eap}, default value= {CompatQuantizedModelSimplifyDequantizeQuantizeField.default()}.")
 
     @staticmethod
     def message():
-        return (f"Whether enable experimental perchannel quantization for activation tensors.")
+        return (f"Whether enable to simplify the dequantize and quantize, and merge the dequantized and quantize to qnn op in qat model.")
+
+
+@field_register('regularize_activation_perchannel_scales', 'hidden')
+class RegularizeActivationPerchannelScalesField(BaseField):
+    @staticmethod
+    def default():
+        return 'disable'
+
+    @staticmethod
+    def parse(uaps):
+        _pattern = r'(disable)|(enable)'
+        return BaseField._re_parse(uaps, _pattern)
+
+    @staticmethod
+    def error(uaps):
+        return (f"Require the 'regularize_activation_perchannel_scales' field == 'disable' or 'enable'. "
+                f"{BaseField.per_node_cfg_usage}.")
+
+    @staticmethod
+    def message():
+        return f"Whether enable to regularize activation per-channel scales for activation tensors in case of outliers."
 
 
 @field_register('enable_pass_merge_matmul_mul', 'default')
@@ -2200,6 +2135,126 @@ class PassMergeMatmulMul(BaseField):
     @staticmethod
     def message():
         return (f"Whether enable pass: merge Matmul Mul, as the constant scale factor in Mul operator can be fused into the quantization scale of the output tensor of preceding Matmul operator if possible.")
+
+
+@field_register('enable_pass_convert_resize_to_convolution', 'default')
+class PassConvertResizeToConvolution(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return BaseField._re_parse(eap, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'enable_pass_convert_resize_to_convolution' field, "
+                f"now is {eap}, default value= {PassConvertResizeToConvolution.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: convert resize to convolution function, the resize meets the condition:"
+                f"resize.method == bilinear, and in_c <= 1 when upsampling or in_c <= 8 when downsampling.")
+
+
+@field_register('enable_pass_decompose_nonmonotonic_activations', 'default')
+class PassDecomposeNonmonoticAct(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return BaseField._re_parse(eap, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'enable_pass_decompose_nonmonotonic_activations' field, "
+                f"now is {eap}, default value= {PassDecomposeNonmonoticAct.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: decompose nonmonotonic activation functions, will decompose large featuremap (>= 2M) nomonotonic activation functions (gelu(x) = x * Φ(x), silu(x) = x * sigmoid(x), swish(x) = x * sigmoid(alpha*x), hardswish(x) = x * hardsigmoid(x), mish(x) = x * Tanh(Softplus(x)), ) but in smaller lut size during quantization.")
+
+
+@field_register('enable_pass_tune_op_complicated_activations', 'default')
+class PassTuneAct(BaseField):
+    @staticmethod
+    def default():
+        return '[0][0]'
+
+    @staticmethod
+    def parse(eap):
+        rparams = r'\s*\[{}(,{})*\]\s*'.format(BaseField.rint, BaseField.rfloat)
+        eparams = r'({})+'.format(rparams)
+        return BaseField._re_parse(eap, eparams)
+
+    @staticmethod
+    def error(eap):
+        return PassTuneAct.message() + f" now is {eap}"
+
+    @staticmethod
+    def message():
+        description = '''will tune the implicit approximation or quantization parameters (the automatically set value is usually good enough) for complicated activations (currently support: silu, gelu,swish), with format '[quant_method, extra_param1, extra_param2, ...][approx_method, approx_param1, approx_param2, ...]',
+        where 'quant_method' and 'approx_method' are integers represent to different implementations and 'extra_param1', 'extra_param2', ..., 'extra_paramN', 'approx_param1', 'approx_param2', ..., 'approx_paramN' are corresponding float value parameters.
+        Currently support:
+        'quant_method=0', default quantized implementation, no extra parameters needed;
+        'approx_method=0', default float implementation, no extra parameters needed;
+        'approx_method=1', when triggered as float operator, will use a lut based fast approximation algorithm, 'extra_param1=use_dynamic_lut' is an integer (default value is 1) controls whether to use a dynamic lut, when 'use_dynamic_lut=1' means yes (need calibration dataset), and when 'use_dynamic_lut=0' means no (will use a static lut).
+        '''
+        return (f"This pass (tune_op_complicated_activations) {description} {BaseField.per_node_cfg_usage}")
+
+
+@field_register('enable_pass_tune_op_softmax', 'default')
+class PassTuneSoftmax(BaseField):
+    @staticmethod
+    def default():
+        return '[0][0]'
+
+    @staticmethod
+    def parse(eap):
+        rparams = r'\s*\[{}(,{})*\]\s*'.format(BaseField.rint, BaseField.rfloat)
+        eparams = r'({})+'.format(rparams)
+        return BaseField._re_parse(eap, eparams)
+
+    @staticmethod
+    def error(eap):
+        return PassTuneSoftmax.message() + f" now is {eap}"
+
+    @staticmethod
+    def message():
+        description = '''will tune the implicit approximation or quantization parameters (the automatically set value is usually good enough) for softmax, with format '[quant_method, extra_param1, extra_param2, ...][approx_method, approx_param1, approx_param2, ...]',
+        where 'quant_method' and 'approx_method' are integers represent to different implementations and 'extra_param1', 'extra_param2', ..., 'extra_paramN', 'approx_param1', 'approx_param2', ..., 'approx_paramN' are corresponding float value parameters.
+        Currently support:
+        'quant_method=0', will automatically choose from 'quant_method=1' and 'quant_method=2';
+        'quant_method=1', when quantized, use a 'fast_exp' quantization method to speed up computation, 'extra_param1=adjust_q' can further tune the quantization, where 'adjust_q' is an unsigned interger (suggest value is 1) and should be in [0,1,8,9,10,11,12,13,14,15], this method will force the output values of softmax be like 2^N, which may affect the quantization accuracy especially under cases when strict ranking is necessary (like detection post-process flow);
+        'quant_method=2', when quantized, use a normal single 'lut' to represents exp function, 'extra_param1=lut_value_bit_width' can further tune the quantization, where 'lut_value_bit_width' is an unsigned interger (suggest value is 20).
+        'approx_method=0', default float implementation, no extra parameters needed;
+        'approx_method=1', when triggered as float operator, will use a lut based fast approximation algorithm to calculate exp.
+        '''
+        return (f"This pass (tune_op_softmax) {description} {BaseField.per_node_cfg_usage}")
+
+
+@field_register('enable_pass_deeply_set_unquantifiable', 'default')
+class PassDeeplySetUnquantifiable(BaseField):
+    @staticmethod
+    def default():
+        return 'false'
+
+    @staticmethod
+    def parse(eap):
+        return BaseField._re_parse(eap, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'enable_pass_deeply_set_unquantifiable' field, "
+                f"now is {eap}, default value= {PassDeeplySetUnquantifiable.default()}.")
+
+    @staticmethod
+    def message():
+        return f"when enable this pass, the unquantifiable=true will penetrate the op like reshape/transpose, which original unquantifiable=false." \
+               f"this pass possibility eliminates the quantize/dequantize operators."
 
 
 ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}

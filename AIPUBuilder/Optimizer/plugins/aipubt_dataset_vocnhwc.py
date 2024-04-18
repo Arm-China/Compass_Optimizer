@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import numpy as np
 import torch
@@ -46,7 +46,7 @@ class VOCNHWCDataset(Dataset):
             raw_label = self.label[idx]
             image_name = idx
             label_idx = raw_label[0]
-            confidence = raw_label[-1]
+            ori_img_shape = raw_label[-1] if len(raw_label) > 5 else [1]
             bbox = np.stack(
                 (raw_label[1], raw_label[2], raw_label[3], raw_label[4]), -1)
 
@@ -54,6 +54,7 @@ class VOCNHWCDataset(Dataset):
                 'image_name': np.array(image_name),
                 'label_index': np.array(label_idx),
                 'bbox': bbox,
+                'ori_img_shape': ori_img_shape
             })
         return sample
 
@@ -77,10 +78,13 @@ class VOCNHWCDataset(Dataset):
             image_name = sample[1]['image_name']
             label_index = sample[1]['label_index']
             bbox = sample[1]['bbox']
+            ori_img_shape = sample[1]['ori_img_shape']
             image_list.append(torch.tensor(image_name))
             label_list.append(torch.tensor(label_index))
             bbox_list.append(torch.tensor(bbox))
+            ori_img_shape_list.append(torch.tensor(ori_img_shape))
         batch_label.update({'image_name': image_list})
         batch_label.update({'label_index': label_list})
         batch_label.update({'bbox': bbox_list})
+        batch_label.update({'ori_img_shape': ori_img_shape_list})
         return batch_data, batch_label

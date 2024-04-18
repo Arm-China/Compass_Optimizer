@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -48,12 +48,15 @@ _tensor_default_property = {
     "qbits": None, "qmin": None,
     "qmax": None, "qinvariant": False,
     "dtype": None,
+    # per-block
+    "block_size": None,
     # per-channel
     "key_axis": 0,
     "key_axis_g": 1,
     "key_axis_bs": None,
     # source IR info
     "ir_shape": None, "ir_dtype": None,
+    "ir_range": None,
     # producer node
     'pnode': None,
     # statistic property
@@ -143,8 +146,39 @@ class PyTensor:
             self.dtype = torch_type2dtype(self.betensor.dtype) if dtype is None else dtype
         if opt_use_cuda():
             self.betensor = self.betensor.cuda()
+            self.assigned_device = self.betensor.device
+        self.fit_dtype()
         self.ir_shape = TensorShape(self.betensor.shape)
+        self.block_size = None
         self.attrs = dict()
+
+    def fit_dtype(self, dtype: Union[Dtype, None] = None):
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
+        from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
+        if dtype is not None:
+            self.dtype = dtype
+
+        if self.dtype is None:
+            # no restricts
+            pass
+        elif is_float(self.dtype):
+            if self.dtype in [Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
+                self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
+            else:
+                #self.betensor = to_fp24(self.betensor) if self.dtype == Dtype.FP24 else self.betensor
+                OPT_ERROR(f'unsupported dtype "{self.dtype}" when calling fit_dtype function on tensor "{self.name}".')
+        else:
+            nan_mask = torch.isnan(self.betensor)
+            if nan_mask.any():
+                OPT_WARN(
+                    f'tensor "{self.name}" contains NaN values and will be converted to zeros in fit_dtype() function.')
+                self.betensor = torch.where(nan_mask, torch.zeros_like(self.betensor), self.betensor)
+            qmin, qmax = dtype2range(self.dtype)
+            self.betensor = torch.clamp(self.betensor, qmin, qmax).to(dtype2torch_type(self.dtype))
+            if self.ir_dtype is not None and is_float(self.ir_dtype) and not self.qinvariant:
+                # many torch api does not implement for none float dtypes
+                self.betensor = self.betensor.float()
 
     def __repr__(self):
         import torch
@@ -177,6 +211,8 @@ class PyTensor:
                 t.__setattr__(k, None)
             else:
                 t.__setattr__(k, copy.deepcopy(v))
+        for k, v in self.attrs.items():
+            t.attrs[k] = copy.deepcopy(v)
         return t
 
     def statistic(self,
@@ -341,8 +377,8 @@ class PyTensor:
         """
         # key_axis_shape = [] # per-tensor, scale=torch.tensor(2.0)
         key_axis_shape = [-1]  # per-tensor, scale=torch.tensor([2.0])
-        if self.key_axis is not None:  # pylint: disable=no-member
-            key_axis_shape = [1] * self.ir_shape.dim()
+        if self.key_axis is not None and len(self.ir_shape) > 0:  # pylint: disable=no-member
+            key_axis_shape = [1] * len(self.ir_shape)
             key_axis_shape[self.key_axis] = -1  # pylint: disable=no-member
         return key_axis_shape
 
@@ -356,7 +392,7 @@ class PyTensor:
             return
         one_t = torch.ones_like(self.scale)
         zero_t = torch.zeros_like(self.zerop)
-        if torch.equal(self.scale, one_t) and torch.equal(self.zerop, zero_t):
+        if (self.scale == one_t).all() and (self.zerop == zero_t).all():
             self.qinvariant = True
 
     def is_qinvariant(self):
@@ -367,16 +403,18 @@ class PyTensor:
         ret = self.qinvariant
         one_t = torch.ones_like(self.scale)
         zero_t = torch.zeros_like(self.zerop)
-        ret = ret and torch.equal(self.scale, one_t) and torch.equal(self.zerop, zero_t)
+        ret = ret and (self.scale == one_t).all() and (self.zerop == zero_t).all()
         return ret
 
     def is_perchannel_scales(self):
         import torch
-        return True if isinstance(self.scale, torch.Tensor) and self.scale.numel() > 1 else False
+        from AIPUBuilder.Optimizer.utils import is_torch_tensor_with_multi_data
+        return True if is_torch_tensor_with_multi_data(self.scale) else False
 
     def is_perchannel_zerops(self):
         import torch
-        return True if isinstance(self.zerop, torch.Tensor) and self.zerop.numel() > 1 else False
+        from AIPUBuilder.Optimizer.utils import is_torch_tensor_with_multi_data
+        return True if is_torch_tensor_with_multi_data(self.zerop) else False
 
     def is_perchannel_quantization(self):
         return True if self.key_axis is not None else False  # pylint: disable=no-member
@@ -385,7 +423,7 @@ class PyTensor:
     def scale(self):
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if self._scale is not None:
-            self._scale = torch_tensor(self._scale, device=self.betensor.device)
+            self._scale = torch_tensor(self._scale, device=self.device)
             self._scale = self._scale.reshape([-1]).float()
         return self._scale  # pylint: disable=no-member
 
@@ -394,17 +432,17 @@ class PyTensor:
         import torch
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if isinstance(scale, torch.Tensor):
-            self._scale = scale.reshape([-1]).float()
+            self._scale = scale.reshape([-1]).float().to(self.device)
         elif scale is None:
             self._scale = None
         else:
-            self.scale = torch_tensor(scale, device=self.betensor.device)
+            self.scale = torch_tensor(scale, device=self.device)
 
     @property
     def zerop(self):
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if self._zerop is not None:
-            self._zerop = torch_tensor(self._zerop, device=self.betensor.device)
+            self._zerop = torch_tensor(self._zerop, device=self.device)
             self._zerop = self._zerop.reshape([-1])
         return self._zerop  # pylint: disable=no-member
 
@@ -413,15 +451,20 @@ class PyTensor:
         import torch
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if isinstance(zerop, torch.Tensor):
-            self._zerop = zerop.reshape([-1]).int()
+            self._zerop = zerop.reshape([-1]).int().to(self.device)
         elif zerop is None:
             self._zerop = zerop
         else:
-            self.zerop = torch_tensor(zerop, device=self.betensor.device)
+            self.zerop = torch_tensor(zerop, device=self.device)
 
     @property
     def broadcast_scale(self):
-        return self.scale.reshape(self.key_axis_broadcast_shape()) if self.scale is not None else self.scale  # pylint: disable=no-member
+        if self.block_size is not None and len(self.ir_shape) > 0:
+            bshape = list(self.ir_shape)
+            bshape[-1] = int(self.ir_shape[-1] / self.block_size)
+            return self.scale.flatten().reshape(bshape).repeat_interleave(self.block_size, dim=-1)
+        else:
+            return self.scale.reshape(self.key_axis_broadcast_shape()) if self.scale is not None else self.scale  # pylint: disable=no-member
 
     @broadcast_scale.setter
     def broadcast_scale(self, broadcast_scale):
@@ -429,7 +472,12 @@ class PyTensor:
 
     @property
     def broadcast_zerop(self):
-        return self.zerop.reshape(self.key_axis_broadcast_shape()) if self.zerop is not None else self.zerop  # pylint: disable=no-member
+        if self.block_size is not None and len(self.ir_shape) > 0:
+            bshape = list(self.ir_shape)
+            bshape[-1] = int(self.ir_shape[-1] / self.block_size)
+            return self.zerop.flatten().reshape(bshape).repeat_interleave(self.block_size, dim=-1)
+        else:
+            return self.zerop.reshape(self.key_axis_broadcast_shape()) if self.zerop is not None else self.zerop  # pylint: disable=no-member
 
     @broadcast_zerop.setter
     def broadcast_zerop(self, broadcast_zerop):  # same as self.zerop = zp

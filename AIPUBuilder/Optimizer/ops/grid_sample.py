@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -33,7 +33,22 @@ def PixelAtGrid(feature, n, c, y, x, h, w, resize_height, resize_width, padding_
     return out
 
 
-def quant_grid_sample(inp0, inp1, method, padding_mode, align_corners, do_scale, shifts):
+def GsDenormalize(grid,  length, align_corners):
+    if align_corners:  # [-1, 1] to [0, length - 1]
+        return ((grid + 1) / 2. * (length - 1))
+    else:  # [-1, 1] to [-0.5, length - 0.5]
+        return (((grid + 1) * length - 1) / 2.)
+
+
+def grid_clamp(x, x_min, x_max, clip_xmin, clip_xmax):
+    less_mask = x < x_min  # torch.bitwise_or(x < x_min, x>x_max)
+    greater_mask = x > x_max
+    x[less_mask] = clip_xmin
+    x[greater_mask] = clip_xmax
+    return x
+
+
+def quant_grid_sample(self, inp0, inp1, method, padding_mode, align_corners, do_scale, shifts):
     feature = inp0.betensor.int()
     grid = inp1.betensor.int()
     feature_batch = feature.shape[0]
@@ -47,40 +62,52 @@ def quant_grid_sample(inp0, inp1, method, padding_mode, align_corners, do_scale,
 
     grid += int(inp1.zerop)
     feature_zp = int(inp0.zerop)
-    act_qmin, act_qmax = -2**31, 2**31-1
-    shift_0 = shifts[0]
-    do_shift = shifts[1]
-    shift_diff = do_shift - shift_0
+    q16_qmin, q16_qmax = -2**15, 2**15-1
+    do_scale0, do_scale1 = do_scale
+    do_shift0, do_shift1 = shifts
+    gridx_shift = self.params['coordinate_x_shift']
+    gridy_shift = self.params['coordinate_y_shift']
+
+    if align_corners:
+        x_min = 0
+        x_max = offset_w * (2**gridx_shift)
+        y_min = 0
+        y_max = offset_h * (2**gridy_shift)
+    else:
+        x_min = -2**(gridx_shift-1)
+        x_max = feature_width * (2**gridx_shift) - 2**(gridx_shift-1)
+        y_min = -2**(gridy_shift-1)
+        y_max = feature_height * (2**gridy_shift) - 2**(gridy_shift-1)
 
     quant_output = torch.zeros((feature_batch, resize_height, resize_width,
-                               feature_channel), device=inp0.betensor.device)
+                                feature_channel), device=inp0.betensor.device)
     for n in range(feature_batch):
         qgrid_x = grid[n, :, :, 0].reshape(-1,)
         qgrid_y = grid[n, :, :, 1].reshape(-1,)
-        if align_corners:
-            q_ix = ((qgrid_x * do_scale) >> shift_0) * offset_w + offset_w * 2 ** (shift_diff)
-            q_iy = ((qgrid_y * do_scale) >> shift_0) * offset_h + offset_h * 2 ** (shift_diff)
-        else:
-            q_ix = ((qgrid_x * do_scale) >> shift_0) * feature_width + \
-                offset_w * 2 ** (shift_diff)
-            q_iy = ((qgrid_y * do_scale) >> shift_0) * feature_height + \
-                offset_h * 2 ** (shift_diff)
 
+        q_ix = (qgrid_x * do_scale0 >> do_shift0) + offset_w * (2**(gridx_shift-1))
+        q_iy = (qgrid_y * do_scale1 >> do_shift1) + offset_h * (2**(gridy_shift-1))
+        q_ix = torch.clamp(q_ix, q16_qmin, q16_qmax)
+        q_iy = torch.clamp(q_iy, q16_qmin, q16_qmax)
         if method == 'nearest':
-            q_ix += 2 ** (shift_diff)
-            q_iy += 2 ** (shift_diff)
-            left_x = (q_ix >> (shift_diff+1)).long()
-            top_y = (q_iy >> (shift_diff+1)).long()
+            q_ix += 2 ** (gridx_shift-1)
+            q_iy += 2 ** (gridy_shift-1)
+            q_ix = torch.clamp(q_ix, q16_qmin, q16_qmax)
+            q_iy = torch.clamp(q_iy, q16_qmin, q16_qmax)
+            left_x = (q_ix >> gridx_shift).long()
+            top_y = (q_iy >> gridy_shift).long()
             quant_output[n, :, :, :] = PixelAtGrid(feature, n, feature_channel, top_y, left_x,
                                                    feature_height, feature_width, resize_height, resize_width, padding_mode, feature_zp)
         else:
-            left_x = (q_ix >> (shift_diff+1)).long()
-            top_y = (q_iy >> (shift_diff+1)).long()
+            if padding_mode == 'border':
+                q_ix = grid_clamp(q_ix, x_min, x_max, 0, offset_w * (2**gridx_shift))
+                q_iy = grid_clamp(q_iy, y_min, y_max, 0, offset_h * (2**gridy_shift))
+            left_x = (q_ix.long() >> gridx_shift).long()
+            top_y = (q_iy.long() >> gridy_shift).long()
             right_x = left_x + 1
             bottom_y = top_y + 1
-
-            x_terp = q_ix - left_x * 2 ** (shift_diff+1)
-            y_terp = q_iy - top_y * 2 ** (shift_diff+1)
+            x_terp = q_ix - left_x * 2 ** (gridx_shift)
+            y_terp = q_iy - top_y * 2 ** (gridy_shift)
             x_terp = x_terp.reshape(resize_height, resize_width, 1)
             y_terp = y_terp.reshape(resize_height, resize_width, 1)
 
@@ -93,9 +120,74 @@ def quant_grid_sample(inp0, inp1, method, padding_mode, align_corners, do_scale,
             bottom_right = PixelAtGrid(feature, n, feature_channel, bottom_y, right_x, feature_height,
                                        feature_width, resize_height, resize_width, padding_mode, feature_zp)
 
-            top = top_left + (((top_right - top_left) * x_terp) >> (shift_diff+1))
-            bottom = bottom_left + (((bottom_right - bottom_left) * x_terp) >> (shift_diff+1))
-            quant_output[n, :, :, :] = (top + (((bottom - top) * y_terp) >> (shift_diff+1)))
+            top = top_left + (((top_right - top_left) * x_terp).long() >> (gridx_shift))
+            bottom = bottom_left + (((bottom_right - bottom_left) * x_terp).long() >> gridx_shift)
+            quant_output[n, :, :, :] = (top + (((bottom - top) * y_terp).long() >> gridy_shift))
+    return quant_output
+
+
+def quant_grid_sample_lookup(self, inp0, inp1, method, padding_mode, align_corners, do_scale, shifts):
+    feature = inp0.betensor.int()
+    grid = inp1.betensor.int()
+    feature_batch = feature.shape[0]
+    feature_height = feature.shape[1]
+    feature_width = feature.shape[2]
+    feature_channel = feature.shape[3]
+    resize_height = grid.shape[1]
+    resize_width = grid.shape[2]
+    offset_w = (feature_width-1)
+    offset_h = (feature_height-1)
+    feature_zp = int(inp0.zerop)
+
+    act_qmin, act_qmax = -2**31, 2**31-1
+    luty = self.constants["luty"] .betensor
+    lutx = self.constants["lutx"] .betensor
+    gridx_shift = self.params['coordinate_x_shift']
+    gridy_shift = self.params['coordinate_y_shift']
+
+    quant_output = torch.zeros((feature_batch, resize_height, resize_width,
+                                feature_channel), device=inp0.betensor.device)
+    for n in range(feature_batch):
+        qgrid_x = grid[n, :, :, 0].reshape(-1,)
+        qgrid_y = grid[n, :, :, 1].reshape(-1,)
+
+        lut_in_bits = 8
+        in_is_signed = True
+        out_is_signed = True
+        q_ix = lookup_lut_powerof2(qgrid_x, lutx, lut_in_bits, in_is_signed,
+                                   dtype2bits(self.constants["lutx"].dtype), out_is_signed)
+        q_iy = lookup_lut_powerof2(qgrid_y, luty, lut_in_bits, in_is_signed,
+                                   dtype2bits(self.constants["luty"].dtype), out_is_signed)
+        if method == 'nearest':
+            quant_output[n, :, :, :] = PixelAtGrid(feature, n, feature_channel, q_iy.int(), q_ix.int(),
+                                                   feature_height, feature_width, resize_height, resize_width, padding_mode, feature_zp)
+        else:
+            x_terp_lut = self.constants["x_terp"].betensor
+            y_terp_lut = self.constants["y_terp"].betensor
+            left_x = q_ix
+            top_y = q_iy
+            right_x = left_x + 1
+            bottom_y = top_y + 1
+            x_terp = lookup_lut_powerof2(qgrid_x, x_terp_lut, lut_in_bits, in_is_signed,
+                                         dtype2bits(self.constants["x_terp"].dtype), False)
+            y_terp = lookup_lut_powerof2(qgrid_y, y_terp_lut, lut_in_bits, in_is_signed,
+                                         dtype2bits(self.constants["y_terp"].dtype), False)
+
+            x_terp = x_terp.reshape(resize_height, resize_width, 1)
+            y_terp = y_terp.reshape(resize_height, resize_width, 1)
+
+            top_left = PixelAtGrid(feature, n, feature_channel, top_y, left_x, feature_height,
+                                   feature_width, resize_height, resize_width, padding_mode, feature_zp)
+            top_right = PixelAtGrid(feature, n, feature_channel, top_y, right_x, feature_height,
+                                    feature_width, resize_height, resize_width, padding_mode, feature_zp)
+            bottom_left = PixelAtGrid(feature, n, feature_channel, bottom_y, left_x, feature_height,
+                                      feature_width, resize_height, resize_width, padding_mode, feature_zp)
+            bottom_right = PixelAtGrid(feature, n, feature_channel, bottom_y, right_x, feature_height,
+                                       feature_width, resize_height, resize_width, padding_mode, feature_zp)
+
+            top = top_left + (((top_right - top_left) * x_terp) >> (gridx_shift))
+            bottom = bottom_left + (((bottom_right - bottom_left) * x_terp) >> gridx_shift)
+            quant_output[n, :, :, :] = (top + (((bottom - top) * y_terp) >> gridy_shift))
     return quant_output
 
 
@@ -127,21 +219,34 @@ def gridsample(self, *args):
     if self.quantized:
         shifts = self.get_param('shift_value')
         do_scale = self.get_param('scale_value')
-        output = quant_grid_sample(feature,
-                                   grid,
-                                   method,
-                                   padding_mode,
-                                   align_corners,
-                                   do_scale,
-                                   shifts
-                                   )
+        grid_bits = dtype2bits(self.inputs[1].dtype)
+        if grid_bits <= 8:
+            # currently 8bit quantization will not be used
+            output = quant_grid_sample_lookup(self,
+                                              feature,
+                                              grid,
+                                              method,
+                                              padding_mode,
+                                              align_corners,
+                                              do_scale,
+                                              shifts
+                                              )
+        else:
+            output = quant_grid_sample(self,
+                                       feature,
+                                       grid,
+                                       method,
+                                       padding_mode,
+                                       align_corners,
+                                       do_scale,
+                                       shifts
+                                       )
         self.outputs[0].betensor = torch.clamp(output, out.qmin, out.qmax)
     else:
         feature_t = nhwc2nchw(feature.betensor)
         output = torch.nn.functional.grid_sample(
             feature_t.double(), grid.betensor.double(), mode=method, padding_mode=padding_mode, align_corners=align_corners)
         self.outputs[0].betensor = nchw2nhwc(output)
-
     return self.outputs[0].betensor
 
 
@@ -153,33 +258,98 @@ def gridsample_quantize(self, *args):
         OPT_FATAL("Currently not support per-channel quantization of activations")
     q_bits_activation = self.attrs["q_bits_activation"]
 
-    pre_shift = 0
+    self.outputs[0].dtype = self.inputs[0].dtype
+    self.outputs[0].scale = self.inputs[0].scale
+    self.outputs[0].zerop = self.inputs[0].zerop
+    self.outputs[0].qbits = self.inputs[0].qbits
+    self.outputs[0].qinvariant = self.inputs[0].qinvariant
+    self.outputs[0].qmin, self.outputs[0].qmax = dtype2range(self.outputs[0].dtype)
 
-    inp = self.inputs[0]
-    inp1 = self.inputs[1]
-    out = self.outputs[0]
-    out.dtype = inp.dtype
-    out.scale = inp.scale
-    out.zerop = inp.zerop
-    out.qbits = inp.qbits
-    out.qinvariant = inp.qinvariant
-    out.qmin, out.qmax = dtype2range(out.dtype)
+    method = self.get_param('method').lower()  # BILINEAR/NEAREST
+    padding_mode = self.get_param('padding_mode').lower()  # ZEROS/BORDER/REFLECTION
+    align_corners = self.get_param('align_corners')
+    feature_height = self.inputs[0].ir_shape[1]
+    feature_width = self.inputs[0].ir_shape[2]
 
-    total_scale = 1./inp1.scale
-    doscale, doscale_type, doshift, doshift_type = get_scale_approximation_params(
-        total_scale, 14, force_shift_positive=self.force_shift_positive)
+    _SUPPORTED_METHOD = ['nearest', 'bilinear']
+    _SUPPORTED_PADDING_MODE = ['zeros', 'border']
+    if method not in _SUPPORTED_METHOD:
+        OPT_FATAL('layerid=%s, gridsample  method only support %s, but now method=%s' %
+                  (self.attrs['layer_id'], str(_SUPPORTED_METHOD), method))
+    if padding_mode not in _SUPPORTED_PADDING_MODE:
+        OPT_FATAL('layerid=%s, gridsample  padding_mode only support %s, but now padding_mode=%s' %
+                  (self.attrs['layer_id'], str(_SUPPORTED_PADDING_MODE), padding_mode))
 
-    doscale = int(doscale)
-    doshift1 = int(doshift)
-    feature_size = max(inp.ir_shape[1], inp.ir_shape[2])
-    feature_bits = math.ceil(math.log2(feature_size))
-    scale_bits = math.ceil(math.log2(doscale))
-    inp1_bits = inp1.qbits + (1 if inp1.zerop or not is_signed(inp1.dtype) else 0)
-    placehold0_shift_bits = scale_bits + inp1_bits + feature_bits - 30
-    placehold1_shift_bits = feature_bits + doshift - 30
-    pre_shift = max(0, placehold0_shift_bits, placehold1_shift_bits)
+    iqmin, iqmax = dtype2range(self.inputs[1].dtype)
+    grid_bits = dtype2bits(self.inputs[1].dtype)
+    steps = iqmax - iqmin + 1
+    grid_f_range = linear_dequantize(torch.linspace(iqmin, iqmax, steps=steps,
+                                                    device=self.inputs[1].betensor.device), self.inputs[1].scale, self.inputs[1].zerop)
+    gridx_range = GsDenormalize(grid_f_range,  feature_width,  align_corners)
+    gridy_range = GsDenormalize(grid_f_range,  feature_height,  align_corners)
+    gridx_range_bits,  _ = range2bits(gridx_range.min(), gridx_range.max(), force_int=True)
+    gridy_range_bits,  _ = range2bits(gridy_range.min(), gridy_range.max(), force_int=True)
+    if gridx_range_bits > 16 or gridy_range_bits > 16:
+        OPT_WARN('layer_id=%s,GridSample Op grid coordinates may exceed range -32768,32767],  which causes accuracy problems, Please Check!' %
+                 (str(self.attrs['layer_id'])))
+    # currently 8bit quantization will not be used
+    if grid_bits <= 8:
+        if method == 'nearest':
+            gridx_range = torch.round(gridx_range)
+            gridy_range = torch.round(gridy_range)
+        if padding_mode == 'border':
+            x_min = -0.5
+            x_max = feature_width - 0.5
+            y_min = -0.5
+            y_max = feature_height - 0.5
+            if align_corners:
+                x_min = 0.
+                x_max = feature_width - 1.
+                y_min = 0.
+                y_max = feature_height - 1.
+            gridx_range = grid_clamp(gridx_range, x_min, x_max, 0, feature_width-1)
+            gridy_range = grid_clamp(gridy_range, y_min, y_max, 0, feature_height-1)
+        if method.upper() == 'nearest':
+            lutx = gridx_range.int()
+            luty = gridy_range.int()
+        else:  # 'bilinear':
+            lutx = torch.floor(gridx_range).int()
+            luty = torch.floor(gridy_range).int()
+            x_terp = ((gridx_range - lutx).float() * 1024).int()
+            y_terp = ((gridy_range - luty).float() * 1024).int()
+            self.constants["x_terp"] = PyTensor(
+                self.name+"/x_terp", x_terp.cpu().numpy().astype(dtype2nptype(bits2dtype(16, False))))
+            self.constants["y_terp"] = PyTensor(
+                self.name+"/y_terp", y_terp.cpu().numpy().astype(dtype2nptype(bits2dtype(16, False))))
 
-    self.params['scale_value'] = int(doscale)
-    self.params['scale_type'] = doscale_type
-    self.params['shift_value'] = [int(pre_shift), int(doshift)]
-    self.params['shift_type'] = [doshift_type, doshift_type]
+        self.constants["lutx"] = PyTensor(
+            self.name+"/lutx", lutx.cpu().numpy().astype(dtype2nptype(bits2dtype(16, True))))
+        self.constants["luty"] = PyTensor(
+            self.name+"/luty", luty.cpu().numpy().astype(dtype2nptype(bits2dtype(16, True))))
+        self.params['scale_value'] = [int(1), int(1)]
+        self.params['scale_type'] = [Dtype.UINT8, Dtype.UINT8]
+        self.params['shift_value'] = [int(0), int(0)]
+        self.params['shift_type'] = [Dtype.INT8, Dtype.INT8]
+        self.params['coordinate_x_shift'] = 10
+        self.params['coordinate_y_shift'] = 10
+
+    else:
+        mulpliter_gridx = 16 - gridx_range_bits
+        mulpliter_gridy = 16 - gridy_range_bits
+        if align_corners:
+            feature_height = feature_height - 1
+            feature_width = feature_width - 1
+        gridx_scale = (2**mulpliter_gridx) * feature_width / self.inputs[1].scale / 2
+        gridy_scale = (2**mulpliter_gridy) * feature_height / self.inputs[1].scale / 2
+        gridx_doscale, gridx_doscale_type, gridx_doshift, gridx_doshift_type = get_scale_approximation_params(
+            gridx_scale, 15, force_shift_positive=self.force_shift_positive)
+        gridy_doscale, gridy_doscale_type, gridy_doshift, gridy_doshift_type = get_scale_approximation_params(
+            gridy_scale, 15, force_shift_positive=self.force_shift_positive)
+
+        self.params['scale_value'] = [int(gridx_doscale), int(gridy_doscale)]
+        self.params['scale_type'] = [gridx_doscale_type, gridy_doscale_type]
+        self.params['shift_value'] = [int(gridx_doshift), int(gridy_doshift)]
+        self.params['shift_type'] = [gridx_doshift_type, gridy_doshift_type]
+
+        self.params['coordinate_x_shift'] = mulpliter_gridx
+        self.params['coordinate_y_shift'] = mulpliter_gridy

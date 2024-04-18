@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -156,7 +156,8 @@ def LRN_quantize(self, *args):
     lut.max = lut.betensor.max().item()
     # lut output bits fixed to 16bits
     # lut_out_bits = 16
-    lut_out_bits = self.attrs['scaling_bits'][0]
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 16])
+    lut_out_bits = extra_params[1]
     lut.qbits = lut_out_bits
     lut.scale, lut.zerop, lut.qmin, lut.qmax, lut.dtype = get_qinfo_from_tensor(lut,
                                                                                 QuantMode.to_symmetric(

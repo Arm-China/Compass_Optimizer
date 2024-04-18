@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -31,9 +31,13 @@ def maxpoolingwithArgmax(self, *args):
     func = torch.nn.MaxPool2d(kernel_size=(kh, kw), stride=(sh, sw), padding=0,
                               dilation=(dh, dw), return_indices=True, ceil_mode=ceil_mode)
     value, indics = func(input_data)
+
+    invalid_pad_mask = value == -2.**31
     current_outh, current_outw = value.shape[2:4]
     pad_h = h + pt + pb
     pad_w = w + pl + pr
+    value[invalid_pad_mask] = 0
+    indics[invalid_pad_mask] = -(pad_h*pad_w*c*n+2)
     if current_outh < out_h or current_outw < out_w:
         auto_pad_h = out_h - current_outh
         auto_pad_w = out_w - current_outw

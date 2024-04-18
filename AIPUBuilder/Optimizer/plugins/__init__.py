@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 # for built in dataset
 from . import aipubt_dataset_numpy
@@ -29,6 +29,9 @@ from . import aipubt_dataset_tusimple
 from . import aipubt_dataset_numpymultiinputNCHW
 from . import aipubt_dataset_tensorfromnumpymultiinput
 from . import aipubt_dataset_stable_diffusion_unet
+from . import aipubt_dataset_bevformer
+from . import aipubt_dataset_llama2
+
 # for built in metric
 from . import aipubt_metric_CosDistance
 from . import aipubt_metric_MaskRcnnCOCOmAP
@@ -46,6 +49,7 @@ from . import aipubt_metric_EachCosDistance
 from . import aipubt_metric_IWSLT_BLEU_2_gram
 from . import aipubt_metric_Ocr
 from . import aipubt_metric_CosDistance_with_seqlen
+from . import aipubt_metric_fcos_mAP
 from . import aipubt_metric_facebox
 from . import aipubt_metric_centerface
 from . import aipubt_metric_lightface
@@ -63,7 +67,13 @@ from . import aipubt_metric_f1mesure
 from . import aipubt_metric_MaxAbsError_with_seqlen
 from . import aipubt_metric_roc
 from . import aipubt_metric_imdb
+from . import aipubt_metric_LMHead
 
+try:
+    from AIPUBuilder.Optimizer.plugins.aipubt_metric_bevformer import BEVFormerMetric
+except Exception as e:
+    from AIPUBuilder.Optimizer.logger import OPT_DEBUG
+    OPT_DEBUG(f"import bevformermetric failed")
 
 # for built in op
 from . import aipubt_op_tile

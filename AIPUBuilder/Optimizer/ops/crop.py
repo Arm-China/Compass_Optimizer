@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -30,6 +30,7 @@ def crop(self, *args):
             c[0] += x.shape[c_id]
         if c[1] < 0:
             c[1] += x.shape[c_id]
+        c[1] = min(x.shape[c_id], c[1])
         if c[1] > x.shape[c_id] or c[0] > x.shape[c_id]-1:
             OPT_ERROR('layer_id=%s,Crop Op %d-dimension index is illegal, crop index is %s, and input shape is %s, Please Check!' %
                       (str(self.attrs['layer_id']), c_id, str(crops), str(x.shape)))
@@ -52,7 +53,7 @@ def crop_quantize(self, *args):
     out.zerop = inp.zerop
     out.qbits = inp.qbits
     out.qinvariant = inp.qinvariant
-    if out.key_axis is not None:
+    if out.key_axis is not None and is_torch_tensor_with_multi_data(out.scale):
         crops = self.get_param('crops')[out.key_axis]
         out.scale = out.scale[crops[0]:crops[1]]
         out.zerop = out.zerop[crops[0]:crops[1]]

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-from AIPUBuilder.Optimizer.utils import dtype2str, str2dtype, is_float, dtype2torch_type
+from AIPUBuilder.Optimizer.utils import dtype2str, str2dtype, is_float, dtype2torch_type, OP_ONLY_CHANGE_SHAPE
 
 
-def set_unquantifiable(graph):
+def set_unquantifiable(graph, config=None):
     def _check_lib_impl():
         has_float = False
         for inp in node.inputs:
@@ -60,11 +60,24 @@ def set_unquantifiable(graph):
         else:
             node.attrs['trigger_float_op'] = 'disable'
 
-    """
-    if constant op is not unquantifiable and its layer_top_type_original is float type, but 
-    its children nodes have unquantifiable==true, constant op would be setted params['unquantifiable']=true.
-    """
+    if config.enable_pass_deeply_set_unquantifiable:
+        visited = []
+        for n in graph.nodes:
+            if n not in visited:
+                visited.append(n)
+                if not n.params['unquantifiable']:
+                    continue
+                for child in n.children:
+                    # [OpType.Reshape, OpType.Transpose]:
+                    if not child.params['unquantifiable'] and child.type in OP_ONLY_CHANGE_SHAPE:
+                        child.params['unquantifiable'] = True
+                        child.attrs['trigger_float_op'] = n.attrs['trigger_float_op']
+
     for n in graph.nodes:
+        """
+        if constant op is not unquantifiable and its layer_top_type_original is float type, but its children nodes
+        have unquantifiable==true, constant op would be setted params['unquantifiable']=true.
+        """
         if n.type in [OpType.Constant] and not n.params['unquantifiable']:
             top_type_original = n.attrs['layer_top_type_original'][0]
             original_top_dtype = str2dtype(top_type_original)
@@ -78,3 +91,18 @@ def set_unquantifiable(graph):
                         node.attrs['weight_only_quantization'] = True
                     n.attrs['trigger_float_op'] = cn.attrs['trigger_float_op']
                     break
+
+        """
+        when trigger_float_op is enable for compass FloatIR, one node(like ArgMinMax op) has float input dtype and int
+        output dtype, and its child node(like Reshape op) has int input and output. the node's unquantifiable is true,
+        and its child node's unquantifiable is false (when set_unquantifiabel, has_float == false).
+        when the edge of two ops is qinvariant == true, unquantifiable==true node and unquantifiable==false would not
+        insert the quantized op. so avoid the above situation, we change the child node's unquantifiable to true.
+        """
+        unquantifiable = n.params['unquantifiable']
+        for inp in n.inputs:
+            inp_producer_unquantifiable = inp.pnode.params['unquantifiable']
+            if inp.qinvariant and inp_producer_unquantifiable and not unquantifiable:
+                n.params['unquantifiable'] = True
+                n.attrs['trigger_float_op'] = inp.pnode.attrs['trigger_float_op']
+                break

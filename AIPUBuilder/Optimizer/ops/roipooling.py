@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -96,7 +96,8 @@ def roipooling_quantize(self, *args):
     out.qbits = inp.qbits
     out.qinvariant = inp.qinvariant
     # index_precision_ = 16 #fixed ?
-    index_precision_ = self.attrs['scaling_bits'][0]
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 16])
+    index_precision_ = extra_params[1]
     resize_height_, resize_width_ = out.betensor.shape[1:3]
     feature_height_, feature_width_ = inp.betensor.shape[1:3]
 

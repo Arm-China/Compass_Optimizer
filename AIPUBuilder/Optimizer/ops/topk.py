@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
 from AIPUBuilder.Optimizer.utils import *
+import math
 
 # IR
 # layer_type=TopKV2
@@ -55,8 +56,18 @@ def topk(self, *args):
     axis = self.get_param('axis')
     largest = self.get_param('largest', optional=True, default_value=True)
     issorted = self.get_param('sorted', optional=True, default_value=True)
-    select_index = self.get_param('select_index', optional=True, default_value='last').lower()
     axis = axis if axis >= 0 else self.outputs[0].betensor.ndim+axis
+
+    if 'select_index' not in self.params:
+        if 'extra_params' not in self.attrs:
+            select_index = 'last'
+        else:
+            extra_params = self.attrs['extra_params']
+            smethod = int(extra_params[1] if len(extra_params) > 1 else -1)
+            select_index = 'last' if smethod < 0 else 'first'
+        self.params['select_index'] = select_index
+    else:
+        select_index = self.get_param('select_index')
 
     out1 = torch.zeros_like(self.outputs[0].betensor, dtype=torch.float64)
     out2 = torch.zeros_like(self.outputs[1].betensor, dtype=torch.int64)
@@ -84,6 +95,11 @@ def topk(self, *args):
         recover_out1 = torch.transpose(transp_out[1], axis, -1)
 
         [out1, out2] = recover_out0, recover_out1
+
+    index_max = self.inputs[0].ir_shape[axis]
+    out1_bits = min(32, max(16, math.log2(index_max)))
+    self.outputs[1].dtype = bits2dtype(out1_bits, self.force_dtype_int)
+
     self.outputs[0].betensor = out1
     self.outputs[1].betensor = out2
     return [out1, out2]
@@ -129,11 +145,11 @@ def topk_quantize(self, *args):
     out.zerop = 0
     axis = self.get_param('axis')
     index_max = inp.ir_shape[axis]
-    if index_max < 256:  # assure at least 16bit indice
-        index_max = 256
-    out.qbits, out.dtype = range2dtype(0, index_max, force_int=self.force_dtype_int)
+    out.qbits = min(32, max(16, math.log2(index_max)))
+    out.dtype = bits2dtype(out.qbits, self.force_dtype_int)
     out.qinvariant = True
 
-    scaling_bits = self.attrs['scaling_bits']
-    smethod = int(scaling_bits[0] if len(scaling_bits) > 0 else -1)
-    self.params['select_index'] = 'last' if smethod < 0 else 'first'
+    if 'select_index' not in self.params:
+        extra_params = self.attrs['extra_params']
+        smethod = int(extra_params[1] if len(extra_params) > 1 else -1)
+        self.params['select_index'] = 'last' if smethod < 0 else 'first'

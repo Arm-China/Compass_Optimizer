@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import *
@@ -510,9 +510,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
                     slice.params['end'] = [crop_end_pos[0], crop_end_pos[1]]
                 slice.params['upper_bound'] = True
                 slice.attrs.update(parent.attrs.clone())
-                slice.attrs['quantization_info'][slice_outp_tensor_name] = parent.attrs['quantization_info'][
-                    parent.outputs[0].name]
-                del slice.attrs['quantization_info'][parent.outputs[0].name]
                 # x direction offset update
                 crop_begin_pos[1] = crop_begin_pos[1] + all_work_items_in[0, item_y, item_x, 1].int().item()
                 inserted_op_list.append(slice)
@@ -651,10 +648,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
                         crops[1][1] = crop_end_pos[1]
                         crop.attrs['batch_size_in_IR'] = 0
                         crop.params['crops'] = crops
-
-                crop.attrs['quantization_info'][crop_outp_tensor_name] = parent.attrs['quantization_info'][
-                    parent.outputs[0].name]
-                del crop.attrs['quantization_info'][parent.outputs[0].name]
                 # x direction offset update
                 crop_begin_pos[1] = crop_begin_pos[1] + all_work_items_in[0, item_y, item_x, 1].int().item()
                 inserted_op_list.append(crop)
@@ -722,9 +715,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
 
                     slice.params['upper_bound'] = True
                     slice.attrs.update(parent.attrs.clone())
-                    slice.attrs['quantization_info'][slice_outp_tensor_name] = parent.attrs['quantization_info'][
-                        parent.outputs[0].name]
-                    del slice.attrs['quantization_info'][parent.outputs[0].name]
                     # x direction offset update
                     crop_begin_pos[i] = crop_begin_pos[i] + all_work_items_in[0, item_y, item_x, i].int().item()
                     inserted_op_list.append(slice)
@@ -760,9 +750,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
         for k, v in replaced_node.params.items():
             part.params[k] = copy.deepcopy(v)
         part.attrs.update(replaced_node.attrs.clone())
-        part.attrs['quantization_info'][new_outp_tensor_name] = replaced_node.attrs['quantization_info'][
-            replaced_node.outputs[0].name]
-        del part.attrs['quantization_info'][replaced_node.outputs[0].name]
         for k, v in replaced_node.constants.items():
             part.constants[k] = replaced_node.constants[k]
         # padding need update
@@ -814,9 +801,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
         for k, v in replaced_node.params.items():
             part.params[k] = copy.deepcopy(v)
         part.attrs.update(replaced_node.attrs.clone())
-        part.attrs['quantization_info'][new_outp_tensor_name] = replaced_node.attrs['quantization_info'][
-            replaced_node.outputs[0].name]
-        del part.attrs['quantization_info'][replaced_node.outputs[0].name]
         # replaced_node.params['method'] == 'PRELU' need split constants
         # partition constants negative_slope
         if 'method' in replaced_node.params and replaced_node.params['method'] == 'PRELU':
@@ -879,9 +863,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
             for k, v in replaced_node.params.items():
                 part.params[k] = copy.deepcopy(v)
             part.attrs.update(replaced_node.attrs.clone())
-            part.attrs['quantization_info'][new_outp_tensor_name] = replaced_node.attrs['quantization_info'][
-                replaced_node.outputs[0].name]
-            del part.attrs['quantization_info'][replaced_node.outputs[0].name]
             # partition constants weight
             for k, v in replaced_node.constants.items():
                 newshape = (w,)
@@ -928,9 +909,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
         for k, v in replaced_node.params.items():
             part.params[k] = copy.deepcopy(v)
         part.attrs.update(replaced_node.attrs.clone())
-        part.attrs['quantization_info'][new_outp_tensor_name] = replaced_node.attrs['quantization_info'][
-            replaced_node.outputs[0].name]
-        del part.attrs['quantization_info'][replaced_node.outputs[0].name]
         for k, v in replaced_node.constants.items():
             part.constants[k] = replaced_node.constants[k]
         inserted_op_list.append(part)
@@ -975,9 +953,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
         part.attrs.update(replaced_node.attrs.clone())
         for i in range(len(replaced_node.placeholders)):
             part.placeholders.append(replaced_node.placeholders[i].clone(replaced_node.placeholders[i].name))
-        part.attrs['quantization_info'][new_outp_tensor_name] = replaced_node.attrs['quantization_info'][
-            replaced_node.outputs[0].name]
-        del part.attrs['quantization_info'][replaced_node.outputs[0].name]
 
         inserted_op_list.append(part)
         return inputs
@@ -1239,10 +1214,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
                         # sub_concat_op_list.append(concat)
                         # set  default value
                         concat.attrs.update(current_node.attrs.clone())
-                        concat.attrs['quantization_info'][new_outp_tensor_name] = \
-                            current_node.attrs['quantization_info'][current_node.outputs[0].name]
-                        del concat.attrs['quantization_info'][current_node.outputs[0].name]
-
                 else:
                     concat_name = current_node.name + '_item0' + 'to' + str(parts_num_y * parts_num_x) + "_merge"
                     # new concat op
@@ -1320,9 +1291,6 @@ def featuremap_partition_for_data_parallel(graph, item_num, ratio, sram_size, ti
                     inserted_op_list.append(concat)
                     # set  default value
                     concat.attrs.update(current_node.attrs.clone())
-                    concat.attrs['quantization_info'][new_outp_tensor_name] = current_node.attrs['quantization_info'][
-                        current_node.outputs[0].name]
-                    del concat.attrs['quantization_info'][current_node.outputs[0].name]
                     # add h dir concat input
                     concat_h.add_input(new_outp_tensor)
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 
 from enum import Enum, unique
@@ -7,12 +7,15 @@ from enum import Enum, unique
 __all__ = [
     'OP_DICT',
     'QUANT_OP_DICT',
+    'APPROX_OP_DICT',
     'ALL_OPT_OP_DICT',
     'ALL_OPT_QUANT_OP_DICT',
+    'ALL_OPT_APPROX_OP_DICT',
     'QUANTIZE_DATASET_DICT',
     'QUANTIZE_METRIC_DICT',
     'op_register',
     'quant_register',
+    'approx_register',
     'PluginType',
     'register_plugin',
     'traverse_opt_plugins',
@@ -21,9 +24,11 @@ __all__ = [
 
 OP_DICT = dict()
 QUANT_OP_DICT = dict()
+APPROX_OP_DICT = dict()
 
 ALL_OPT_OP_DICT = dict()  # {optype: {version: [mfun, is_plugin]}}, which version is float, is_plugin is bool
 ALL_OPT_QUANT_OP_DICT = dict()  # {optype: {version: [mfun, is_plugin]}}, which version is float, is_plugin is bool
+ALL_OPT_APPROX_OP_DICT = dict()
 
 QUANTIZE_DATASET_DICT = dict()
 QUANTIZE_METRIC_DICT = dict()
@@ -183,6 +188,30 @@ def quant_register(optypes, version=1.0, *args):
             return ret
         is_plugin = is_plugin_op(get_file_name())
         _register(optypes, version, mfunc, ALL_OPT_QUANT_OP_DICT, QUANT_OP_DICT, is_plugin, 'quantize register')
+        return mfunc
+    return dec
+
+
+def approx_register(optypes, version=1.0, *args):
+    from AIPUBuilder.Optimizer.logger import OPT_ERROR
+    global APPROX_OP_DICT
+    if not isinstance(optypes, (tuple, list)):
+        optypes = [optypes]
+
+    def dec(func):
+        def mfunc(self, *args, **kwargs):
+            try:
+                unquantifiable = self.get_param('unquantifiable', optional=True, default_value=False)
+                if self.approximated or (not unquantifiable):
+                    return
+                ret = func(self, *args, **kwargs)
+                self.approximated = True
+            except Exception as e:
+                OPT_ERROR(f"{self}: error message: {e.__repr__()}")
+                raise e
+            return ret
+        is_plugin = is_plugin_op(get_file_name())
+        _register(optypes, version, mfunc, ALL_OPT_APPROX_OP_DICT, APPROX_OP_DICT, is_plugin, 'approximate register')
         return mfunc
     return dec
 

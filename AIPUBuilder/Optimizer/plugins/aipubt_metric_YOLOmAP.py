@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -336,35 +336,44 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
     score_threshold=0.25, iou_threshold=0.45
     """
 
-    def __init__(self, input_size=416, score_threshold=0.25, iou_threshold=0.45, layout='nhwc'):
+    def __init__(self, input_size=416, score_threshold=0.25, iou_threshold=0.45, layout='nhwc', tiny=False, letterbox=False):
         super().__init__()
         self.anchors = np.array([[[12., 16.], [19., 36.], [40., 28.]],
                                  [[36., 75.], [76., 55.], [72., 146.]],
                                  [[142., 110.], [192., 243.], [459., 401.]]]
                                 )
         self.strides = [8, 16, 32]
+        self.featuremap_size_list = [52, 26, 13]
+        if tiny:
+
+            self.anchors = np.array([[[23., 27.], [37., 58.], [81., 82.]],
+                                     [[81., 82.], [135., 169.], [344., 319.]]]
+                                    )
+            self.strides = self.strides[1:]
+            self.featuremap_size_list = self.featuremap_size_list[1:]
         self.input_size = float(input_size)  # 416
         self.score_threshold = float(score_threshold)  # 0.25
         self.iou_threshold = float(iou_threshold)  # 0.45
         self.method = 'nms'
         self.sigma = 0.3
         self.layout = layout
+        self.out_num = 2 if tiny else 3
+        self.letterbox = letterbox
 
     def __call__(self, pred, target):
         """
         #pred:[concat0(batch,52,52,3,85), concat1(batch,26,26,3,85), concat2(batch,13,13,3,85)]
         #target:[labels_index, bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, [height, width]]
         """
-        assert len(pred) == 3, OPT_FATAL(
+        assert len(pred) == self.out_num, OPT_FATAL(
             'please check the outputs number(should be 3) in Yolov4_onnx model')
         try:
             _pred = []
-            featuremap_size_list = [52, 26, 13]
             for idx, pd in enumerate(sorted(pred, key=lambda x: x.size(), reverse=True)):
                 if self.layout == 'nchw':
-                    if pd.dim == 4:
-                        pd = pd.transpose(0, 2, 3, 1)
-                _pred.append(pd.reshape(-1, featuremap_size_list[idx], featuremap_size_list[idx], 3, 85))
+                    if pd.dim() == 4:
+                        pd = np.transpose(pd, (0, 2, 3, 1))
+                _pred.append(pd.reshape(-1, self.featuremap_size_list[idx], self.featuremap_size_list[idx], 3, 85))
             pred = _pred
         except:
             OPT_FATAL('output tensor can not be reshape into certain shape')
@@ -388,6 +397,8 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
             pred_bbox = self.postprocess_bbbox(pred_single)
             pred_bbox = self.filter_boxes(pred_bbox, org_img_shape)
             pred_bbox = self.nms(pred_bbox)
+            if self.letterbox:
+                pred_bbox = self.letterbox_recover(pred_bbox, target['ori_img_shape'][b].cpu().numpy())
             pred_bbox_list.append(pred_bbox)
 
         self.process_predict(batch, pred_bbox_list, target)
@@ -480,6 +491,17 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
 
         return np.concatenate([coors, scores[..., np.newaxis], classes[..., np.newaxis]], axis=-1)
 
+    def letterbox_recover(self, pred_bbox, image_shape):
+        image_shape = image_shape[::-1]
+        new_shape = np.round(image_shape * np.min(self.input_size/image_shape))
+        offset = (self.input_size - new_shape)/2.
+        scale = self.input_size/new_shape
+        ret = []
+        for pred in pred_bbox:
+            pred[:4] = ((pred[:4].reshape(2, 2) - offset) * scale).flatten()
+            ret.append(pred)
+        return ret
+
     def nms(self, bboxes):
         """
         param bboxes: (xmin, ymin, xmax, ymax, score, class)
@@ -516,6 +538,31 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
 
 
 @register_plugin(PluginType.Metric, '1.0')
+class YOLOV4torchmAPMetric(YOLOV4OnnxmAPMetric):
+    def postprocess_bbbox(self, pred_bbox):
+        for i, pred in enumerate(pred_bbox):
+            conv_shape = pred.shape
+            output_size = conv_shape[1]
+            conv_raw_dxdy = pred[..., 0:2]
+            conv_raw_dwdh = pred[..., 2:4]
+            xy_grid = np.meshgrid(np.arange(output_size),
+                                  np.arange(output_size))
+            xy_grid = np.expand_dims(np.stack(xy_grid, axis=-1), axis=2)
+
+            xy_grid = np.tile(np.expand_dims(xy_grid, axis=0), [1, 1, 1, 3, 1])
+            xy_grid = xy_grid.astype(float)
+            pred_xy = special.expit(conv_raw_dxdy) + xy_grid
+            pred_wh = (np.exp(conv_raw_dwdh) * self.anchors[i] / self.strides[i])
+            pred[..., 0:4] = np.concatenate([pred_xy, pred_wh], axis=-1) / output_size * self.input_size
+            pred[..., 4:] = special.expit(pred[..., 4:])
+
+        pred_bbox = [np.reshape(x, (-1, np.shape(x)[-1]))
+                     for x in pred_bbox]  # [[1,13,13,3,85]] -->[1*13*13*3,85]
+        pred_bbox = np.concatenate(pred_bbox, axis=0)
+        return pred_bbox
+
+
+@register_plugin(PluginType.Metric, '1.0')
 class YOLOV4tflitemAPMetric(YOLOV4OnnxmAPMetric):
     """
     This YOLOV4tflitemAPMetric is used for the metric of yolov4_tflite model in Optimizer.
@@ -531,16 +578,17 @@ class YOLOV4tflitemAPMetric(YOLOV4OnnxmAPMetric):
         """
         assert len(pred) == 2, OPT_FATAL(
             'please check the outputs number(should be 2) in Yolov4_tflite model')
+        pred = sorted(pred, key=lambda x: x.size(), reverse=False)
         batch = pred[0].shape[0]
         box_num = pred[0].shape[1]
 
         pred_bbox_list = []
-        targets_list = []
+        # targets_list = []
         for b in range(batch):
-            targets = {}
-            for k, v in target.items():
-                targets.update({k: v[b].numpy()})
-            targets_list.append(targets)
+            # targets = {}
+            # for k, v in target.items():
+            #     targets.update({k: v[b].numpy()})
+            # targets_list.append(targets)
             pred_box = pred[0][b].cpu().numpy().reshape(-1, 4)
             score = np.ones((box_num, 1))
             class_score = pred[1][b].cpu().numpy().reshape(-1, 80)
@@ -550,7 +598,7 @@ class YOLOV4tflitemAPMetric(YOLOV4OnnxmAPMetric):
             pred_bbox = self.nms(pred_bbox)
             pred_bbox_list.append(pred_bbox)
 
-        self.process_predict(batch, pred_bbox_list, targets_list)
+        self.process_predict(batch, pred_bbox_list, target)
 
     def reset(self):
         super().reset()

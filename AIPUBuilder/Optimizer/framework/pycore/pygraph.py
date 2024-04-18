@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -509,10 +509,20 @@ class PyGraph:
         from AIPUBuilder.Optimizer.framework.pycore.pyir import serialize_graph_to_ir
         serialize_graph_to_ir(self, ir_txt, ir_bin)
 
+    def enable_fit_dtype(self, flag: bool):
+        for node in self.nodes:
+            node.enable_fit_dtype = flag
+
     @classmethod
     def parse(cls, ir_txt, ir_bin):
         from AIPUBuilder.Optimizer.framework.pycore.pyir import parse_graph_from_ir
         g = parse_graph_from_ir(ir_txt, ir_bin)
+        return g
+
+    @classmethod
+    def parse_without_weight(cls, ir_txt):
+        from AIPUBuilder.Optimizer.framework.pycore.pyir import parse_graph_from_ir_without_weight
+        g = parse_graph_from_ir_without_weight(ir_txt)
         return g
 
     def __repr__(self):

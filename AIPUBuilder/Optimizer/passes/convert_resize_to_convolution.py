@@ -261,7 +261,7 @@ class BilinearResizeSubgraph(OptSubgraph):
             split_out_list = []
             for i in range(i_c):
                 split_out_list.append([f"{base_name}_split_{i}", [1, int(ResH/o_scale),
-                                      int(ResW/o_scale), o_scale * o_scale], conv_output_quantization])
+                                                                  int(ResW/o_scale), o_scale * o_scale], conv_output_quantization])
 
             s_dim_t = []
             for i in range(i_c):
@@ -351,7 +351,8 @@ def _resize_to_convolution(g, resize_node):
     resize_to_conv_handler.build_subgraph(resize_node)
 
 
-def convert_resize_to_convolution(graph):
+@passes_run
+def convert_resize_to_convolution(graph, config=None):
     nodes = graph.nodes
     for n in nodes:
         if not criteria(n):

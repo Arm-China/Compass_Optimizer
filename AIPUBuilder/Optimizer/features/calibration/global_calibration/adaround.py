@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_DEBUG, OPT_WARN
@@ -91,6 +91,9 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
     # prevent deleting intermediate tensors
     g.ref_count_tensors = {}
 
+    # prevent from fit_dtype which will cause backward issues
+    g.enable_fit_dtype(False)
+
     qg = g.clone()
     qg.clear_tensor_quantization_attrs()
     for n in qg.nodes:
@@ -105,17 +108,19 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
     vdataloader = copy.deepcopy(cdataloader)
     cached_float_tensors = {}
     # collect all inputs tensors into cached dict firstly
-    for i, sample in enumerate(vdataloader):
-        if i >= max(1, batches):
-            break
-        inp_data, _ = sample
-        g.feed_inputs_data(inp_data)
-        for inp in g.input_tensors:
-            t = inp.betensor.clone().detach()
-            if inp.name not in cached_float_tensors.keys():
-                cached_float_tensors[inp.name] = t
-            else:
-                cached_float_tensors[inp.name] = torch.cat((cached_float_tensors[inp.name], t), dim=0)
+    with tqdm(vdataloader, desc='adaround', file=sys.stdout, consumer=g) as pbar:
+        # for i, sample in enumerate(vdataloader):
+        for i, sample in enumerate(pbar):
+            if i >= max(1, batches):
+                break
+            inp_data, _ = sample
+            g.feed_inputs_data(inp_data)
+            for inp in g.input_tensors:
+                t = inp.betensor.clone().detach()
+                if inp.name not in cached_float_tensors.keys():
+                    cached_float_tensors[inp.name] = t
+                else:
+                    cached_float_tensors[inp.name] = torch.cat((cached_float_tensors[inp.name], t), dim=0)
     sample_num = 0
     for key, val in cached_float_tensors.items():
         psize = int(math.ceil(val.shape[0] * 1.0 / batch_size) * batch_size - val.shape[0])
@@ -299,3 +304,4 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                     t.betensor = torch.zeros(ss, device=t.betensor.device)
             reset_layer_tensors(n)
             reset_layer_tensors(qn)
+    g.enable_fit_dtype(True)

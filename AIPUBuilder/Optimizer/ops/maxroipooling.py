@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -80,9 +80,9 @@ def maxroipooling(self, *args):
         # but opt need match general cases test, so workaround like this
         spatial_scale_int16 = [spatial_scale_value[0], spatial_scale_value[1]]
         half_value = 1 << 15
-        rois = rois.long()
+        rois = rois.long() + self.inputs[1].zerop
         for i in range(rois_box.shape[0]):
-            batch_index = rois_box[i, :, 0]
+            batch_index = rois_box[i, :, 0] + self.inputs[1].zerop
             for boxidx in range(rois.shape[1]):
                 batch_idx = batch_index[boxidx].int()
                 # rois is origin size, feature map size is reduced by 1/16, origin size=224, feature size=224/16/=14

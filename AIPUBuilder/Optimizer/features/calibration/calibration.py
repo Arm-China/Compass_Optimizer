@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.logger import *
+from AIPUBuilder.Optimizer.framework import *
 from . local_calibration import *
 from . global_calibration import *
 import torch
@@ -66,3 +67,22 @@ def apply_global_calibration(g, cdataloader, strategy):
                 OPT_ERROR(f"call mvn_correction_global_calibration failed: {e}")
         else:
             pass
+
+
+def statistic_and_calibration(t: PyTensor, node_attrs: dict, is_constant_tensor: bool):
+    from AIPUBuilder.Optimizer.config import CalibrationStrategyField
+    dv = ((float('-inf'), float('inf')), '')
+    tcmd = [x for x in re.split(
+        r',|\(|\)', node_attrs['trim_infinity_before_statistic'].strip()) if x.lower().strip()]
+    trim_inf = dv if len(tcmd) < 3 else ((float(tcmd[1]), float(tcmd[2])), str(tcmd[0]))
+
+    qstrategy = node_attrs['q_strategy_weight'] if is_constant_tensor else node_attrs['q_strategy_activation']
+    qmethod = node_attrs['q_mode_weight'] if is_constant_tensor else node_attrs['q_mode_activation']
+    r = CalibrationStrategyField._need_statistic_info(qstrategy)
+    histc_bins = None if not r['histc'] else node_attrs["histc_bins"]
+    statistic_std_mean = r['std_mean']
+    t.statistic(running_statistic_momentum=1.0, key_axis=t.key_axis, key_axis_g=t.key_axis_g,
+                histc_bins=histc_bins, statistic_std_mean=statistic_std_mean,
+                trim_infinity=trim_inf,
+                reset=True)
+    apply_calibration_strategy(t, qstrategy, qmethod)

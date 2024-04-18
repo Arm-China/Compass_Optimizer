@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -17,6 +17,9 @@ def stridedslice(self, *args):
     strides = self.get_param('strides')
     begin = self.get_param('begin')
     end = self.get_param('end')
+    real_shape = list(x.shape)
+    for i in range(len(end)):
+        end[i] = min(real_shape[i], end[i])
     upper_bond = self.get_param('upper_bound', optional=True, default_value=False)
     input_shape = self.inputs[0].ir_shape
     for i in range(len(begin)):

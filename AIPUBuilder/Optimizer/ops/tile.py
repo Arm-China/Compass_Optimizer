@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -30,3 +30,12 @@ def tile_quantize(self, *args):
     out.qinvariant = inp.qinvariant
     out.qmin = inp.qmin
     out.qmax = inp.qmax
+
+    if out.key_axis is not None:
+        ka = out.key_axis
+        if inp.key_axis is not None:
+            rep = self.params['repeats'][ka]
+        else:
+            rep = out.ir_shape[ka]
+        out.scale = inp.scale.repeat(rep)
+        out.zerop = inp.zerop.repeat(rep)

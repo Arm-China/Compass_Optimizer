@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -25,5 +25,5 @@ def dequantize_quant(self, *args):
 def dequantize_forward(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
-    out.betensor = linear_dequantize(inp.betensor, inp.scale, inp.zerop)
+    out.betensor = linear_dequantize(inp.betensor, inp.broadcast_scale, inp.broadcast_zerop)
     return out.betensor

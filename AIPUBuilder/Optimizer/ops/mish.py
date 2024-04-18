@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -14,9 +14,10 @@ register_optype('MISH')
 
 
 def mish_func(inp):
-    softplus = torch.log(1 + torch.exp(inp.double()))
-    output = inp * torch.tanh(softplus)
-    return output.float()
+    # softplus = torch.log(1 + torch.exp(inp.double()))
+    # output = inp * torch.tanh(softplus)
+    # return output.float()
+    return torch.nn.functional.mish(inp.float())
 
 
 @quant_register(OpType.MISH)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import torch
 from AIPUBuilder.Optimizer.framework import *
@@ -410,9 +410,14 @@ def range2bits(vmin, vmax, force_int=False):
 
 
 def dtype2range(dtype):
-    bits = dtype2bits(dtype)
-    signed = is_signed(dtype)
-    qmin, qmax = bits2range(bits, signed)
+    if is_float(dtype):
+        import numpy as np
+        np_dtype = dtype2nptype(dtype)
+        qmin, qmax = np.finfo(np_dtype).min.item(), np.finfo(np_dtype).max.item()
+    else:
+        bits = dtype2bits(dtype)
+        signed = is_signed(dtype)
+        qmin, qmax = bits2range(bits, signed)
     return qmin, qmax
 
 
@@ -501,3 +506,8 @@ def dtype2torch_type(tp):
         Dtype.ALIGNED_UINT12: torch.int16,
     }
     return th_dict[tp]
+
+
+def to_fp24(a: torch.Tensor):
+    mask = torch.tensor(0xFFFFFF00, device=a.device).int()
+    return (a.float().view(torch.int32) & mask).view(torch.float32)

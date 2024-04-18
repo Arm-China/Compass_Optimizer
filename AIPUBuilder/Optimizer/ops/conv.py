@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.ops.convwinograd import *
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
-from AIPUBuilder.Optimizer.features import apply_calibration_strategy
 from AIPUBuilder.Optimizer.ops.activation import (apply_with_activation,
                                                   with_activation_out_is_signed,
                                                   apply_with_activation_quantize,
@@ -17,9 +16,9 @@ import importlib
 
 
 def _conv2d_torch_impl(self, *args):
-    inp = self.inputs[0].betensor.float()
-    weights = self.constants['weights'].betensor.clone().float()
-    bias = self.constants['biases'].betensor.clone().float()
+    inp = self.inputs[0].betensor.double()
+    weights = self.constants['weights'].betensor.clone().double()
+    bias = self.constants['biases'].betensor.clone().double()
     stride = (self.get_param("stride_y"), self.get_param("stride_x"))
     dilation = (self.get_param('dilation_y'), self.get_param('dilation_x'))
     padding = (self.get_param('pad_left'), self.get_param('pad_right'),
@@ -59,8 +58,7 @@ def conv2d(self, *args):
     ky = self.get_param('kernel_y')
     kx = self.get_param('kernel_x')
 
-    self.aasrb = self.get_param('remain_shift',
-                                optional=True, default_value=None)
+    self.aasrb = self.get_param('remain_shift', optional=True, default_value=None)
 
     if not torch.cuda.is_available() and (ih >= 2048 and iw >= 2048) and (ky == 1 and kx == 1):
         OPT_DEBUG(f"when ih>=2048, iw>=2048 and ky==1, kw==1 with cpu device forward, we will use tf.nn.conv2d to execute.")
@@ -125,11 +123,12 @@ def linear_op_quantize(self, *args):
     inp_scale = inp.scale
     '''it is not convenient to import whitelist of act perchannel, so we put its to quant_tool_utils, as ABSORB_INPUT_SCALE_OP.'''
     if self.type in ABSORB_INPUT_SCALE_OP and inp.is_perchannel_scales():
-        OPT_INFO(f"{self} will absorbs input scale to weight in linear_op_quantize.", log_once=True)
+        from AIPUBuilder.Optimizer.features import statistic_and_calibration
+        OPT_DEBUG(f"{self} will absorbs input scale to weight in linear_op_quantize.", log_once=True)
         w.betensor /= inp_scale
-        w.statistic(1.0, w.key_axis, reset=True)
         inp_scale = 1.0
-        apply_calibration_strategy(w, self.attrs['q_strategy_weight'], q_mode_weight)
+        w.qbits = q_bits_weight
+        statistic_and_calibration(w, self.attrs, is_constant_tensor=True)
 
     if group > 1 or QuantMode.is_per_channel(q_mode_weight):
         if QuantMode.is_per_channel(q_mode_weight):
@@ -181,7 +180,10 @@ def linear_op_quantize(self, *args):
         b.dtype = bits2dtype(b.qbits, is_signed=True)
         b.qinvariant = False
 
+    bk_inp_scale = self.inputs[0].scale
+    self.inputs[0].scale = inp_scale
     apply_with_activation_quantize(self, out.qinvariant, *args)
+    self.inputs[0].scale = bk_inp_scale
 
 
 def clear_lower_bits_for_bias(self, *args, grouped=False, dim=-1):

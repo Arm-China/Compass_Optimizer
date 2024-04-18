@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import torch
 import numpy as np
@@ -296,16 +296,15 @@ def quantize_decodebox(self, *args):
     # prepare params
     in_score = self.inputs[0]
     in_bbox = self.inputs[1]
-    dev = in_score.betensor.device
     q_mode_out = self.attrs['q_mode_activation']
-    # scaling_bits default value = [16,16,16,16], and can find in _default_qbits_list
-    scaling_bits = self.attrs['scaling_bits']
+
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 16, 16, 16, 16])
     if QuantMode.is_per_channel(q_mode_out) == True:
         OPT_ERROR(self.type + " currently Not support per-channel quantization")
 
     # box, box_num_perClass, total_class_num, score, label_perClass
     # _default_qbits_list = [16, 16, 16, in_score.qbits, 16]
-    _default_qbits_list = scaling_bits[:-1] + [in_score.qbits] + scaling_bits[-1:]
+    _default_qbits_list = extra_params[1:-1] + [in_score.qbits] + extra_params[-1:]
     q_bits_activation = self.attrs['q_bits_activation']
     _qbits_list = [max(default_bits, q_bits_activation) for default_bits in _default_qbits_list]
     _qbits_list[3] = in_score.qbits

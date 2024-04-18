@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_DEBUG, OPT_WARN
@@ -160,6 +160,9 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
                 return fmin.item(), fmax.item()
     # prevent deleting intermediate tensors
     g.ref_count_tensors = {}
+
+    # prevent from fit_dtype which will cause backward issues
+    g.enable_fit_dtype(False)
 
     qg = g.clone()
     qg.clear_tensor_quantization_attrs()
@@ -364,3 +367,4 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
                         ss = list(t.shape)
                     t.betensor = torch.zeros(ss, device=t.betensor.device)
             reset_layer_tensors(n)
+    g.enable_fit_dtype(True)

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.conv import *
 from AIPUBuilder.Optimizer.ops.activation import apply_with_activation
@@ -11,9 +11,9 @@ import torch.nn as nn
 
 @op_register(OpType.FullyConnected)
 def fc(self, *args):
-    inp = self.inputs[0].betensor.float()
-    bias = self.constants["biases"].betensor.clone().float()
-    weights = self.constants["weights"].betensor.clone().float()
+    inp = self.inputs[0].betensor.double()
+    bias = self.constants["biases"].betensor.clone().double()
+    weights = self.constants["weights"].betensor.clone().double()
     aasrb = self.get_param('remain_shift',
                            optional=True, default_value=None)
 

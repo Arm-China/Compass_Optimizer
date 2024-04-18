@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -211,7 +211,7 @@ def lookupsparse(self, *args):
             repeat_size = [params_sum.shape[ax] // weights_sum.shape[ax] for ax in range(params_sum.dim())]
             weights_sum = weights_sum.repeat(repeat_size)
             zeros_tensor = torch.zeros_like(params_sum, device=params_sum.device).int()
-            output = torch.where(weights_sum != 0, torch.trunc(params_sum/weights_sum).int(), zeros_tensor)
+            output = torch.where(weights_sum != 0, torch.trunc(params_sum.double()/weights_sum).int(), zeros_tensor)
             out.betensor = linear_requantize(output, 1, do_shift-preshift0+preshift1,
                                              out.zerop, out.qmin, out.qmax).int()
         else:

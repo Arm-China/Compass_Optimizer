@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.conv import *
 from AIPUBuilder.Optimizer.utils import *
@@ -34,10 +34,8 @@ def deconv2d(self, *args):
     bias = self.constants['biases'].betensor.clone().float()
     if self.quantized:
         inp += self.inputs[0].zerop
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
+        w_zp = self.constants["weights"].broadcast_zerop
+        weights += w_zp
         # pass inputs'zp as padding value to torch.convtranspose is inconvenient
         # so bias will release inputs'zp out of it first, and inp should add its zp firstly.
         bias -= compute_input_zp_mul_reduce_weight(self.inputs[0].zerop, weights).repeat(self.get_param('group'))

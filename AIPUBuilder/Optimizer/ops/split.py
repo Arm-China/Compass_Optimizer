@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -38,3 +38,6 @@ def split_quantize(self, *args):
         out.zerop = inp.zerop
         out.qbits = inp.qbits
         out.qinvariant = inp.qinvariant
+
+        if out.key_axis != inp.key_axis:
+            OPT_ERROR(f"split input and out[{i}] key_axis is difference")

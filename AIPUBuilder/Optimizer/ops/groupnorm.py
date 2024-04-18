@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -197,8 +197,8 @@ def groupnorm(self, *args):
                 mean_chunks.append(t_mean)
                 ngamma_chunks.append(t_ngamma)
         else:
-            t_mean = torch.mean(t.float(), dim=axis, keepdim=True)
-            t_var = torch.mean((t.float() - t_mean)**2, dim=axis, keepdim=True)
+            t_mean = torch.mean(t.double(), dim=axis, keepdim=True)
+            t_var = torch.mean((t.double() - t_mean)**2, dim=axis, keepdim=True)
             t_std = torch.pow(t_var + eps, 0.5)
             if torch.count_nonzero(t_std) != t_std.numel():
                 OPT_WARN('type=%s, input std contain zero value, please check the axis or set epsilon nonzero value' % (str(self.type)))

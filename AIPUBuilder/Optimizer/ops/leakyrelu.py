@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
@@ -52,9 +52,6 @@ def leakyrelu_quantize(self, *args):
     out = self.outputs[0]
 
     q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
-
     q_bits_activation = self.attrs["q_bits_activation"]
     multiplier_bits = self.attrs['multiplier_bits']
     out.qinvariant = False
@@ -70,7 +67,10 @@ def leakyrelu_quantize(self, *args):
     self.params['negative_slope_type'] = range2dtype(
         0, negative_slope)[1] if negative_slope > 0 else range2dtype(negative_slope, 0)[1]
 
-    self.params["shift_value"] = int(do_shift)
-    self.params["shift_type"] = do_shift_type
-    self.params["scale_value"] = int(do_scale)
-    self.params["scale_type"] = do_scale_type
+    doscale_name = 'scale' if is_torch_tensor_with_multi_data(do_scale) else 'scale_value'
+    doshift_name = 'shift' if is_torch_tensor_with_multi_data(do_shift) else 'shift_value'
+    self.set_ir_field(doscale_name, do_scale, do_scale_type)
+    self.set_ir_field(doshift_name, do_shift, do_shift_type)
+    if not is_torch_tensor_with_multi_data(do_scale):
+        self.params["shift_type"] = do_shift_type
+        self.params["scale_type"] = do_scale_type

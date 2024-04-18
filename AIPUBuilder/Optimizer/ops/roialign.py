@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_WARN
 from AIPUBuilder.Optimizer.utils import *
@@ -524,9 +524,10 @@ def roialign_quantize(self, *args):
     if QuantMode.is_per_channel(q_mode_activation) == True:
         OPT_FATAL("Currently not support per-channel quantization")
     q_bits_activation = self.attrs["q_bits_activation"]
-    scaling_bits = self.attrs['scaling_bits']  # [quant_bit=12, spatial_shift=10]
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[
+                                  0, 12, 10])  # [quant_bit=12, spatial_shift=10]
     # quant_bits = 12
-    quant_bits = scaling_bits[0]
+    quant_bits = extra_params[1]
 
     inp = self.inputs[0]
     out = self.outputs[0]
@@ -605,7 +606,7 @@ def roialign_quantize(self, *args):
     out.qinvariant = inp.qinvariant
 
     # spatial_shift = 10
-    spatial_shift = scaling_bits[1]
+    spatial_shift = extra_params[2]
     spatial_scale = 2 ** spatial_shift
     spatial_y, spatial_x = self.get_param('spatial_scale_value')
     spatial_x_scale = torch.round(torch.tensor(spatial_x * spatial_scale)).int()

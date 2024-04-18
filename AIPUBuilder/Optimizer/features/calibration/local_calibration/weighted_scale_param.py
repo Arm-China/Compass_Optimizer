@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import cosine_distance
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -177,35 +177,36 @@ class QuantizeGraph(PyGraph):
 
     def save_statistic_info(self, statistic_info_fname):
         import pickle
+        import torch
         from AIPUBuilder.Optimizer.logger import OPT_WARN
         from AIPUBuilder.Optimizer.utils.files_utils import make_path
 
         def get_value(t_param):
-            return t_param.cpu().contiguous().numpy() if t_param is not None else t_param
+            return t_param.cpu().contiguous().numpy() if isinstance(t_param, torch.Tensor) else t_param
 
         statistic_info = {}
         for n in self.nodes:
             statistic_info[n.name] = {}
             for o in n.outputs:
                 statistic_info[n.name][o.name] = {
-                    "extrema_min": o.extrema_min,
-                    "extrema_max": o.extrema_max,
-                    "running_min": o.running_min,
-                    "running_max": o.running_max,
-                    "running_mean": o.running_mean,
-                    "running_std": o.running_std,
-                    "running_mad": o.running_mad,
+                    "extrema_min": get_value(o.extrema_min),
+                    "extrema_max": get_value(o.extrema_max),
+                    "running_min": get_value(o.running_min),
+                    "running_max": get_value(o.running_max),
+                    "running_mean": get_value(o.running_mean),
+                    "running_std": get_value(o.running_std),
+                    "running_mad": get_value(o.running_mad),
                     "running_histc": get_value(o.running_histc),
                 }
             for _, v in n.constants.items():
                 statistic_info[n.name][v.name] = {
-                    "extrema_min": v.extrema_min,
-                    "extrema_max": v.extrema_max,
-                    "running_min": v.running_min,
-                    "running_max": v.running_max,
-                    "running_mean": v.running_mean,
-                    "running_std": v.running_std,
-                    "running_mad": v.running_mad,
+                    "extrema_min": get_value(v.extrema_min),
+                    "extrema_max": get_value(v.extrema_max),
+                    "running_min": get_value(v.running_min),
+                    "running_max": get_value(v.running_max),
+                    "running_mean": get_value(v.running_mean),
+                    "running_std": get_value(v.running_std),
+                    "running_mad": get_value(v.running_mad),
                     "running_histc": get_value(v.running_histc),
                     "extrema_min_key_axis": get_value(v.extrema_min_key_axis),
                     "extrema_max_key_axis": get_value(v.extrema_max_key_axis),
@@ -218,13 +219,13 @@ class QuantizeGraph(PyGraph):
                 }
             for p in n.placeholders:
                 statistic_info[n.name][p.name] = {
-                    "extrema_min": p.extrema_min,
-                    "extrema_max": p.extrema_max,
-                    "running_min": p.running_min,
-                    "running_max": p.running_max,
-                    "running_mean": p.running_mean,
-                    "running_std": p.running_std,
-                    "running_mad": p.running_mad,
+                    "extrema_min": get_value(p.extrema_min),
+                    "extrema_max": get_value(p.extrema_max),
+                    "running_min": get_value(p.running_min),
+                    "running_max": get_value(p.running_max),
+                    "running_mean": get_value(p.running_mean),
+                    "running_std": get_value(p.running_std),
+                    "running_mad": get_value(p.running_mad),
                     "running_histc": get_value(p.running_histc),
                 }
         statistic_info_fname = make_path(statistic_info_fname)
@@ -508,10 +509,7 @@ class QuantizeGraph(PyGraph):
                         dummy_op.add_output(atensor)
                         idx = n.remove_input(parent_out_tensor)
                         n.add_input(atensor, idx)
-                        dummy_op.attrs.update(n.attrs.clone())
-                        if 'quantization_info' in n.attrs:
-                            dummy_op.attrs['quantization_info'] = {}
-                            dummy_op.attrs['quantization_info'][atensor_name] = current_parent.attrs['quantization_info'][parent_out_tensor.name]
+                        dummy_op.attrs.update(current_parent.attrs.clone())
                         dummy_op.attrs['layer_id'] = '0' + str(current_parent.attrs['layer_id'])
                         self.nodes.insert(node_idx, dummy_op)
                         # update graph network relations and related variables
@@ -522,3 +520,70 @@ class QuantizeGraph(PyGraph):
                         cast_count_num += 1
                 node_idx += 1
         return inserted_op_list
+
+    @staticmethod
+    def deduce_quantization_infos(graph):
+        from AIPUBuilder.Optimizer.utils import is_float, dtype2range, dtype2bits
+        from AIPUBuilder.Optimizer.framework import OpType, get_tensor_default_property
+        from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_WARN
+
+        def _deduce_quantization_info_to_tensor_from_ir(node, updated_fields):
+            in_out_tensors = [*node.inputs, *node.outputs]
+            key_axes = node.get_param('activation_quantization_axis',
+                                      optional=True, default_value=[None]*len(node.outputs))
+            key_axes = [None if isinstance(ka, str) and ka.lower() == 'none' else ka for ka in key_axes]
+            for t in in_out_tensors:
+                if is_float(t.dtype):
+                    continue
+                o_dtype = t.dtype
+                if t.ir_range is None:
+                    qmin, qmax = dtype2range(o_dtype)
+                else:
+                    qmin, qmax = t.ir_range[0], t.ir_range[1]
+                qbits = dtype2bits(o_dtype)
+                key_axis = key_axes[node.outputs.index(t)] if t in node.outputs else None
+                quantization_infos = {
+                    'qmin': qmin,
+                    'qmax': qmax,
+                    'qbits': qbits,
+                }
+                for field in updated_fields:
+                    if field in quantization_infos.keys():
+                        t.__setattr__(field, quantization_infos[field])
+                    if t in node.outputs:
+                        t.key_axis = key_axis
+
+        if graph is None:
+            OPT_ERROR(f"please check the graph(==None) before deduce quantization information.")
+            return None
+
+        for node in graph.nodes:
+            node.quantized = True
+            if node.type in [OpType.Quantize]:
+                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
+                continue
+
+            if node.get_param('unquantifiable', optional=True, default_value=False):
+                node.quantized = False
+                if node.get_param('is_perf_mode', optional=True, default_value=False):
+                    node.approximated = True
+            else:
+                dtypes = [t.dtype for t in (list(node.outputs) + list(node.inputs))]
+                with_lut = False
+                constants_name = node.constants.keys()
+                for name in constants_name:
+                    if 'lut' in name:
+                        with_lut = True
+                        if is_float(node.constants[name].dtype):
+                            OPT_WARN(
+                                f"{node},constant[{name}] dtype is float, currently set node.quantized = True.")
+                        break
+                    else:
+                        dtypes.append(node.constants[name].dtype)
+                if not with_lut:
+                    for dt in dtypes:
+                        if is_float(dt):
+                            node.quantized = False
+                            break
+            if node.quantized:
+                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())

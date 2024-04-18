@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 import torch
 import numpy as np
@@ -64,6 +64,7 @@ class OptMaster(object):
         self.fake_quant_scopes = []
         self.op_need_cast_dtypes_for_lib = set()
         self.batch_size_in_IR = 1
+        self.g.enable_fit_dtype(True)
 
     def prepare(self, argv):
         """prepare the calibration and validation dataset, the metric method, and config.json
@@ -202,6 +203,7 @@ class OptMaster(object):
             if node.type == OpType.BatchNorm and 'q_bits_weight' not in properties:
                 node.attrs['q_bits_weight'] = 16
             init_attrs('q_bits_bias', self.hparams.bias_bits.get(node))
+            init_attrs('weight_block_size', self.hparams.weight_block_size.get(node))
             init_attrs('q_strategy_activation', self.hparams.calibration_strategy_for_activation.get(node))
             init_attrs('q_strategy_weight', self.hparams.calibration_strategy_for_weight.get(node))
             init_attrs('q_strategy_bias', self.hparams.calibration_strategy_for_weight.get(node))
@@ -209,6 +211,9 @@ class OptMaster(object):
             init_attrs('histc_bins', self.hparams.histc_bins.get(node))
             init_attrs('debug_fake_quantize', False)
             init_attrs('activation_perchannel_min_elements', self.hparams.activation_perchannel_min_elements)
+            init_attrs('regularize_activation_perchannel_scales',
+                       self.hparams.regularize_activation_perchannel_scales.get(node))
+
             if node.type in [OpType.Resize, OpType.Interp, ]:
                 init_attrs('resize_degrade_to_nearest', self.hparams.resize_degrade_to_nearest.get(node))
             if node.type in [OpType.Convolution, OpType.DepthwiseConv, OpType.ConvTranspose, OpType.Convolution3D,
@@ -231,17 +236,11 @@ class OptMaster(object):
             if node.type == OpType.Concat:
                 init_attrs('unify_scales_for_multi_inputs_operator_threshold',
                            self.hparams.unify_scales_for_concat_threshold)
+            init_attrs('unify_scales_for_multi_inputs_operators',
+                       self.hparams.unify_scales_for_multi_inputs_operators.get(node))
             node.attrs['optimization_info'] = {}
             node.attrs['batch_size_in_IR'] = self.batch_size_in_IR
             node.attrs['calculate_running_time'] = False
-
-            # update the scaling_bits to corresponding ops
-            # from AIPUBuilder.Optimizer.cfg_parser import ScalingBits
-            file_configured_scaling_bits = properties['scaling_bits'] if 'scaling_bits' in properties else None
-            if file_configured_scaling_bits is None:
-                ScalingBitsField._update_to_node_attr(node, self.hparams.scaling_bits)
-            else:
-                node.attrs['scaling_bits'] = properties['scaling_bits']
 
             # check if each op exists in registered dict
             from AIPUBuilder.Optimizer.framework import OP_DICT, QUANT_OP_DICT
@@ -256,8 +255,9 @@ class OptMaster(object):
         # do a forward to check graph firstly and init placeholders,
         # force each op to be able to handle all zero inputs.
         inputs = []
-        if self.hparams.run_mode != 'quant_ir_forward' and \
-           ((hasattr(self.g, 'compat_quantized_model') and not self.g.compat_quantized_model) or not hasattr(self.g, 'compat_quantized_model')):
+        if not (self.hparams.skip_optimization and self.hparams.eval_optimized_model) and \
+                ((hasattr(self.g, 'compat_quantized_model') and not self.g.compat_quantized_model) or not hasattr(
+                    self.g, 'compat_quantized_model')):
             for inp in self.g.input_tensors:
                 shape = list(inp.ir_shape)
                 dtype = inp.dtype
@@ -292,7 +292,7 @@ class OptMaster(object):
                 if is_original_top_float:
                     node.attrs['layer_top_type_original'][0] = dtype2str(Dtype.INT32)
 
-    def optimize(self):
+    def opt_optimize(self):
         self.graph_optimize_stage1()
         self.statistic()
         self.graph_optimize_stage2()
@@ -371,9 +371,12 @@ class OptMaster(object):
         #  insert pad op for avgpool when count_include_pad=ceil_mode=True zp!=0
         self.g.quantgraph.insert_pad_op_ahead(
             condition_func=lambda node, parent_node, edge_tensor: node.type in OP_NEED_ADD_PAD_AVOID_ASYNC_DIVIDE and
-            node.get_param('ceil_mode', optional=True, default_value=False) == True and
-            node.get_param('count_include_pad', optional=True, default_value=False) == True and
-            node.get_param('method') == 'AVG' and node.outputs[0].zerop != 0)
+            node.get_param('ceil_mode', optional=True,
+                           default_value=False) == True and
+            node.get_param('count_include_pad', optional=True,
+                           default_value=False) == True and
+            node.get_param('method') == 'AVG' and node.outputs[
+                0].zerop != 0)
 
         ################################################################
         # transform useless op to lightweight reshape op
@@ -492,33 +495,52 @@ class OptMaster(object):
 
         for n in self.g.nodes:
             if n.attrs['q_strategy_weight'].lower().strip() == 'in_ir':
-                if 'weights_range' in n.params:
-                    weights_range = n.get_param('weights_range')
+                if 'weights' in n.constants and n.constants['weights'].ir_range is not None:
                     w = n.constants['weights']
-                    w.extrema_min = weights_range[0]
-                    w.extrema_max = weights_range[1]
-                    if None != w.extrema_min_key_axis:
-                        w.extrema_min_key_axis = w.extrema_min * torch.ones_like(w.extrema_min_key_axis)
-                        w.extrema_max_key_axis = w.extrema_max * torch.ones_like(w.extrema_max_key_axis)
-                if 'biases_range' in n.params:
-                    biases_range = n.get_param('biases_range')
+                    weights_range = construct_torch_tensor(w.ir_range, device=w.betensor.device)
+                    if None != w.extrema_min_key_axis and weights_range.numel() == w.extrema_min_key_axis.numel()*2:
+                        w.extrema_min_key_axis = weights_range[0]
+                        w.extrema_max_key_axis = weights_range[1]
+                        w.extrema_min = w.extrema_min_key_axis.min()
+                        w.extrema_max = w.extrema_max_key_axis.max()
+                    else:
+                        w.extrema_min = weights_range[0]
+                        w.extrema_max = weights_range[1]
+                        if None != w.extrema_min_key_axis:
+                            w.extrema_min_key_axis = w.extrema_min * torch.ones_like(w.extrema_min_key_axis)
+                            w.extrema_max_key_axis = w.extrema_max * torch.ones_like(w.extrema_max_key_axis)
+                if 'biases' in n.constants and n.constants['biases'].ir_range is not None:
                     b = n.constants['biases']
-                    b.extrema_min = biases_range[0]
-                    b.extrema_max = biases_range[1]
-                    if None != b.extrema_min_key_axis:
-                        b.extrema_min_key_axis = b.extrema_min * torch.ones_like(b.extrema_min_key_axis)
-                        b.extrema_max_key_axis = b.extrema_max * torch.ones_like(b.extrema_max_key_axis)
+                    biases_range = construct_torch_tensor(b.ir_range, device=b.betensor.device)
+                    if None != b.extrema_min_key_axis and biases_range.numel() == b.extrema_min_key_axis.numel()*2:
+                        b.extrema_min_key_axis = biases_range[0]
+                        b.extrema_max_key_axis = biases_range[1]
+                        b.extrema_min = b.extrema_min_key_axis.min()
+                        b.extrema_max = b.extrema_max_key_axis.max()
+                    else:
+                        b.extrema_min = biases_range[0]
+                        b.extrema_max = biases_range[1]
+                        if None != b.extrema_min_key_axis:
+                            b.extrema_min_key_axis = b.extrema_min * torch.ones_like(b.extrema_min_key_axis)
+                            b.extrema_max_key_axis = b.extrema_max * torch.ones_like(b.extrema_max_key_axis)
             if n.attrs['q_strategy_activation'].lower().strip() == 'in_ir':
                 for k, t in enumerate(n.outputs):
-                    if 'layer_top_range' in n.params:
-                        t.extrema_min = n.get_param('layer_top_range')[k][0]
-                        t.extrema_max = n.get_param('layer_top_range')[k][1]
-                        if None != t.extrema_min_key_axis:
-                            t.extrema_min_key_axis = t.extrema_min * torch.ones_like(t.extrema_min_key_axis)
-                            t.extrema_max_key_axis = t.extrema_max * torch.ones_like(t.extrema_max_key_axis)
+                    if t.ir_range is not None:
+                        t_range = construct_torch_tensor(t.ir_range, device=t.betensor.device)
+                        if None != t.extrema_min_key_axis and t_range.numel() == t.extrema_min_key_axis.numel()*2:
+                            t.extrema_min_key_axis = t_range[0]
+                            t.extrema_max_key_axis = t_range[1]
+                            t.extrema_min = t.extrema_min_key_axis.min()
+                            t.extrema_max = t.extrema_max_key_axis.max()
+                        else:
+                            t.extrema_min = t_range[0]
+                            t.extrema_max = t_range[1]
+                            if None != t.extrema_min_key_axis:
+                                t.extrema_min_key_axis = t.extrema_min * torch.ones_like(t.extrema_min_key_axis)
+                                t.extrema_max_key_axis = t.extrema_max * torch.ones_like(t.extrema_max_key_axis)
                     else:
                         OPT_WARN(
-                            f"layer_id={n.attrs['layer_id']},layer_type={n.type},output_tensor={k} has no attrs['range'] when using 'in_ir'.")
+                            f"layer_id={n.attrs['layer_id']},layer_type={n.type},output_tensor={k} has no 'layer_top_range' when using 'in_ir'.")
         # else:
         #     # to use min/max file and can not apply calibration strategy cause lacking information
         #     # will be deprecated soon, use statistic_file instead.
@@ -571,17 +593,6 @@ class OptMaster(object):
         #################################################################################
 
     @opt_workflow_register
-    def metric(self, with_float=True):
-        if self.hparams.run_mode in ['quant_ir_forward']:
-            self.quant_metric(self.g, self.validation_dataloader, self.q_metrics)
-        elif self.hparams.run_mode in ['float_ir_forward']:
-            self.float_metric(self.g, self.validation_dataloader, self.f_metrics)
-        else:
-            self.quant_metric(self.g, self.validation_dataloader, self.q_metrics)
-            if with_float:
-                self.float_metric(self.g, self.validation_dataloader, self.f_metrics)
-
-    @opt_workflow_register
     def serialize(self, name="graph"):
         qg = self.g.quantgraph
         # first do a forward to check the final graph before serialize it
@@ -625,7 +636,8 @@ class OptMaster(object):
             'force_shift_positive',
             'running_statistic_momentum',
             'histc_bins',
-            'scaling_bits',
+            'extra_params',
+            'approx_params',
         ]
         node_attrs = {}
         for node in qg.nodes:
@@ -634,16 +646,28 @@ class OptMaster(object):
             mse_str = ''
             if node.type in [OpType.Convolution, ]:
                 node_attrs[node.name]['with_winograd'] = node.attrs['with_winograd']
+            quantization_info = {}
             for t in node.outputs:
-                node.attrs['quantization_info'][t.name]['similarity'] = t.similarity
-                node.attrs['quantization_info'][t.name]['MSE'] = t.mse
+                quantization_info[t.name] = {
+                    'scale': str(t.scale.cpu().tolist() if isinstance(t.scale, torch.Tensor) else t.scale),
+                    'zerop': str(t.zerop.cpu().tolist() if isinstance(t.zerop, torch.Tensor) else t.zerop),
+                    'qbits': str(t.qbits),
+                    'dtype': str(t.dtype),
+                    'qmin': str(t.qmin),
+                    'qmax': str(t.qmax),
+                    'fmin': str(t.min.cpu().tolist() if isinstance(t.min, torch.Tensor) else t.min),
+                    'fmax': str(t.max.cpu().tolist() if isinstance(t.max, torch.Tensor) else t.max),
+                    'fmin_key_axis': str(t.min_key_axis.cpu().tolist() if isinstance(t.scale, torch.Tensor) and isinstance(t.min_key_axis, torch.Tensor) else None),
+                    'fmax_key_axis': str(t.max_key_axis.cpu().tolist() if isinstance(t.scale, torch.Tensor) and isinstance(t.max_key_axis, torch.Tensor) else None),
+                    'qinvariant': str(t.qinvariant),
+                }
                 similarity_str += str(t.similarity) + ', '
                 mse_str += str(t.mse) + ', '
             for k, v in node.attrs.items():
                 if k in user_interactive_properties:
                     node_attrs[node.name][k] = v
             node_attrs[node.name]['just_for_display'] = {}
-            node_attrs[node.name]['just_for_display']['quantization_info'] = str(node.attrs['quantization_info'])
+            node_attrs[node.name]['just_for_display']['quantization_info'] = str(quantization_info)
             node_attrs[node.name]['just_for_display']['optimization_info'] = str(node.attrs['optimization_info'])
             node_attrs[node.name]['just_for_display'][
                 'brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s, MSE=%s' % (
@@ -671,7 +695,7 @@ class OptMaster(object):
             fp_ms = []
             qt_ms = []
             metric_log = {}
-            if self.f_metrics is not None and self.hparams.run_mode not in ['quant_ir_forward', 'mixed_ir_forward']:
+            if self.f_metrics is not None and self.hparams.eval_original_model:
                 for fm in self.f_metrics:
                     fscore = fm.compute()
                     fp_ms.append(fscore)
@@ -719,7 +743,7 @@ class OptMaster(object):
                 fw.write(cfg_info + '\n')
                 fw.write(str(report_dict))
 
-        return report_dict
+        return None if len(report_dict) == 0 else report_dict
 
     @opt_workflow_register
     def dump(self, dump_list=None, dump_attrs=None):
@@ -871,180 +895,47 @@ class OptMaster(object):
                 torch.cuda.empty_cache()
 
     @opt_workflow_register
-    def float_metric(self, graph, dataloader, fmetrics):
-        if opt_use_cuda():
-            torch.cuda.empty_cache()
-        graph_inference(graph, graph.forward, dataloader, fmetrics, with_float=True)
-        for fmetric in fmetrics:
-            OPT_INFO('float metric: %s' % (fmetric.report()))
+    def metric(self, with_float=True):
+        if self.validation_dataloader is None:
+            return
+
+        def _metric(metric_graph, forward_func, dataloader, metrics, with_float=False, msg="metric"):
+            if opt_use_cuda():
+                torch.cuda.empty_cache()
+            graph_inference(metric_graph, forward_func, dataloader, metrics, with_float)
+            for metric in metrics:
+                OPT_INFO(f"{msg}: {metric.report()}")
+
+        if self.hparams.eval_optimized_model:
+            if self.g.quantgraph is None:
+                self.g.quantgraph = self.g.clone()
+                QuantizeGraph.deduce_quantization_infos(self.g.quantgraph)
+            _metric(self.g.quantgraph, self.g.quantgraph.forward,
+                    self.validation_dataloader, self.q_metrics, msg="quant metric")
+
+        if self.hparams.eval_original_model:
+            _metric(self.g, self.g.forward, self.validation_dataloader, self.f_metrics, True, msg="float metric")
 
     @opt_workflow_register
-    def quant_metric(self, graph, dataloader, qmetrics):
-        if opt_use_cuda():
-            torch.cuda.empty_cache()
-        graph_inference(graph.quantgraph, graph.qforward, dataloader, qmetrics)
-        for qmetric in qmetrics:
-            OPT_INFO('quant metric: %s' % (qmetric.report()))
+    def qtlib_optimize(self):
+        from AIPUBuilder.Optimizer.qtlib_optimize import QTLibOptimize
+        qt_optimize = QTLibOptimize(self.g, self.hparams)
+        self.g.quantgraph = qt_optimize()
+        self.hparams.eval_original_model = False
+        self.dataloader4debug = None  # qat model do not collect similarity using calibration data
 
-    def open_quantized_flag(self):
-        if self.g.quantgraph is None:
-            OPT_ERROR(f"open node's quantized flag, please create the quantgraph firstly.")
-            return None
-        for node in self.g.quantgraph.nodes:
-            node.quantized = True
-
-    def close_quantized_flag(self):
-        if self.g.quantgraph is None:
-            OPT_ERROR(f"open node's quantized flag, please create the quantgraph firstly.")
-            return None
-        for node in self.g.quantgraph.nodes:
-            node.quantized = False
-
-    def deduce_quantization_infos(self, graph):
-        def _deduce_quantization_info_to_tensor_from_ir(node, updated_fields):
-            in_out_tensors = [*node.inputs, *node.outputs]
-            for t in in_out_tensors:
-                if is_float(t.dtype):
-                    continue
-                o_dtype = t.dtype
-                qmin, qmax = dtype2range(o_dtype)
-                qbits = dtype2bits(o_dtype)
-                quantization_infos = {
-                    'qmin': qmin,
-                    'qmax': qmax,
-                    'qbits': qbits
-                }
-                for field in updated_fields:
-                    if field in quantization_infos.keys():
-                        t.__setattr__(field, quantization_infos[field])
-
-        if graph is None:
-            OPT_ERROR(f"please check the graph(==None) before deduce quantization information.")
-            return None
-
-        for node in graph.nodes:
-            node.quantized = True
-            if node.type in [OpType.Quantize]:
-                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
-                continue
-
-            if node.get_param('unquantifiable', optional=True, default_value=False):
-                node.quantized = False
-            else:
-                dtypes = [t.dtype for t in (list(node.outputs) + list(node.inputs))]
-                with_lut = False
-                constants_name = node.constants.keys()
-                for name in constants_name:
-                    if 'lut' in name:
-                        with_lut = True
-                        if is_float(node.constants[name].dtype):
-                            OPT_WARN(
-                                f"{node},constant[{name}] dtype is float, currently set node.quantized = True.")
-                        break
-                    else:
-                        dtypes.append(node.constants[name].dtype)
-                if not with_lut:
-                    for dt in dtypes:
-                        if is_float(dt):
-                            node.quantized = False
-                            break
-            if node.quantized:
-                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
-        return graph
-
-    def run_quant_ir_forward(self):
-        if self.g.quantgraph is None:
-            self.g.quantgraph = self.g.clone()
-        self.deduce_quantization_infos(self.g.quantgraph)
-        # self.open_quantized_flag()
-        self.quant_metric(self.g, self.validation_dataloader, self.q_metrics)
-
-    def run_float_ir_forward(self):
-        self.float_metric(self.g, self.validation_dataloader, self.f_metrics)
-
-    def run_mixed_ir_forward(self):
-        if self.g.quantgraph is None:
-            self.g.quantgraph = self.g.clone()
-        self.deduce_quantization_infos(self.g.quantgraph)
-        self.quant_metric(self.g, self.validation_dataloader, self.q_metrics)
-
-    def run_default(self):
-        # self.prepare(self.hparams)
-        self.optimize()
-        self.serialize(os.path.join(self.hparams.output_dir, self.hparams.out_ir_name))
-        if self.validation_dataloader is not None:
-            self.metric(self.hparams.eval_original_model)
+    def optimize(self):
+        is_qtlib_flow = hasattr(self.g, 'compat_quantized_model') and self.g.compat_quantized_model
+        if is_qtlib_flow:
+            self.qtlib_optimize()
+        else:
+            if not self.hparams.skip_optimization:
+                self.opt_optimize()
+                self.serialize(os.path.join(self.hparams.output_dir, self.hparams.out_ir_name))
 
     def __call__(self, *args, **kwargs):
         self.prepare(self.hparams)
-        if hasattr(self.g, 'compat_quantized_model') and self.g.compat_quantized_model:
-            OPT_INFO(f"Now we do quantization transform in Optimizer.")
-            try:
-                from AIPUBuilder.core import quantize_transform as qtlib_quantize_transform
-            except Exception as e:
-                OPT_ERROR(
-                    f"The AIPUBuilder.core module is required when compat_quantized_model is True. now error message: {e}")
-
-            new_quantization_method_ops_type = []
-            if self.hparams.compat_quantized_model_ops != '':
-                lower_optype = {}
-                for k, v in OpType.__dict__.items():
-                    lower_optype.update({k.lower(): v})
-                for op in self.hparams.compat_quantized_model_ops.strip().replace(' ', '').split(','):
-                    new_quantization_method_ops_type.append(lower_optype[op])
-            # pre-pass
-            convert_resize_to_convolution(self.g)
-            for n in self.g.nodes:
-                # n.attrs['simplify_dequantize_quantize'] = self.hparams.simplify_dequantize_quantize
-                n.attrs['unify_shifts_mode'] = self.hparams.compat_quantized_model_unify_shifts_mode
-                # now qat model fixed to 13bits, TODO: set by cfg fields and distinguish with opt flow.
-                n.attrs['multiplier_bits'] = 13
-                if 'conv_from_resize_opt' not in n.attrs:
-                    n.attrs['trigger_float_op'] = 'float16_preferred' if self.hparams.trigger_float_op.get(
-                        n) == 'disable' else self.hparams.trigger_float_op.get(n)
-                if self.hparams.compat_quantized_model_int8_to_uint8:
-                    n.attrs["int8_to_uint8"] = True
-                if n.type == OpType.Constant:
-                    n.attrs['scale_zp_need_quantize'] = True
-                if n.type in new_quantization_method_ops_type:
-                    n.attrs['tflite_quantization'] = True
-                if n.type == OpType.Eltwise:
-                    # n.attrs['eltwise_quantization'] = True
-                    # n.attrs['eltwise_quantization'] = False
-                    n.attrs['left_shift_bits'] = self.hparams.compat_quantized_model_left_shift_bits
-                if n.type == OpType.BasicLSTM:
-                    n.attrs['weight_dim'] = 1
-                    n.attrs['set_default_placeholder_info'] = True
-                    # n.attrs['start_basic_lstm_id'] = 64
-                    # n.attrs['start_basic_lstm_id'] = 32
-                if n.type == OpType.Cast:
-                    n.attrs["eliminate_cast"] = self.hparams.compat_quantized_model_eliminate_cast
-
-            cg = convert_opt_graph_to_aipu_graph(self.g)
-            qtlib_quantize_transform(cg, run_mode=self.hparams.compat_quantized_model_strategy)
-            name = os.path.join(self.hparams.output_dir, self.hparams.out_ir_name)
-            if not os.path.exists(self.hparams.output_dir):
-                os.makedirs(self.hparams.output_dir)
-            if self.hparams.run_mode not in ['quant_ir_forward', ]:
-                cg.attrs['serialize_scale_zp'] = True
-                cg.serialize(f"{name}.txt", f"{name}.bin")
-                return
-            else:
-                self.g.quantgraph = convert_aipu_graph_to_opt_graph(cg)
-                self.g.quantgraph.serialize(f"{name}.txt", f"{name}.bin")
-
-        if self.hparams.run_mode == 'float_ir_forward':
-            OPT_INFO(f"Now configure the Float Compass IR, and Optimizer uses this IR only to float inference.")
-            self.run_float_ir_forward()
-        elif self.hparams.run_mode == 'quant_ir_forward':
-            OPT_INFO(
-                f"Now configure the Quantization Compass IR, and Optimizer uses this IR only to quantization inference.")
-            self.run_quant_ir_forward()
-        elif self.hparams.run_mode == 'mixed_ir_forward':
-            OPT_INFO(
-                f"Now configure the Mixed-Float-Quantization Compass IR, and Optimizer uses this IR only to inference.")
-            self.run_mixed_ir_forward()
-        else:
-            self.run_default()
+        self.optimize()
+        self.metric()
         report = self.report()
         return report

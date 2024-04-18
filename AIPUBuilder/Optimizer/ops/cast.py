@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
@@ -29,11 +29,11 @@ def cast(self, *args):
     clip_mode = self.get_param('clip_mode', optional=True, default_value='saturation').upper()
     ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=False)
     if self.quantized:
-        if self.get_ir_field(['scale_value', 'scale']):
+        if self.get_ir_field(['scale_value', 'scale']) is not None:
             do_scale = self.get_ir_field(['scale_value', 'scale'])
             do_shift = self.get_ir_field(['shift_value', 'shift'])
-            out.betensor = linear_requantize(inp.betensor + inp.zerop, do_scale,
-                                             do_shift, out.zerop, out.qmin, out.qmax)
+            out.betensor = linear_requantize(inp.betensor + inp.broadcast_zerop, do_scale, do_shift, out.zerop,
+                                             out.qmin, out.qmax, out.key_axis)
         else:
             input_zerop = 0 if ignore_scale_zp else inp.zerop
             output_zerop = 0 if ignore_scale_zp else out.zerop
@@ -50,7 +50,7 @@ def cast(self, *args):
 @quant_register(OpType.Cast)
 def cast_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
-    ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=False)
+    ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=True)
     inp = self.inputs[0]
     out = self.outputs[0]
     if 'only_for_quantized' in self.params:
@@ -74,6 +74,10 @@ def cast_quantize(self, *args):
             out.dtype = self.params['to_dtype']
             out.qbits = dtype2bits(out.dtype)
 
+            if out.qbits > 8:
+                q_mode_activation = QuantMode.to_symmetric(q_mode_activation)
+            elif is_signed(inp.dtype) and not is_signed(out.dtype):
+                q_mode_activation = QuantMode.to_asymmetric(q_mode_activation)
             out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
                 out, q_mode_activation, out.qbits, is_signed(out.dtype))
             do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
@@ -91,14 +95,29 @@ def cast_quantize(self, *args):
         self.params['clip_mode'] = 'saturation'
         self.params.pop('only_for_quantized')
     else:
-        # Currently float->int may have precision problems
-        out.scale = inp.scale
-        out.zerop = inp.zerop
-        out.qinvariant = inp.qinvariant
-        if not is_float(inp.dtype):
+        if not is_float(inp.ir_dtype):
+            out.scale = inp.scale
+            out.zerop = inp.zerop
             out.dtype = inp.dtype
             out.qbits = inp.qbits
             self.params['to_dtype'] = inp.dtype
+            out.qinvariant = inp.qinvariant
         else:
-            out.dtype = self.params['to_dtype']
-            out.qbits = dtype2bits(self.params['to_dtype'])
+            # Currently float->int will perform dequantization to int, which may have a little precision problems
+            is_sign = is_signed(self.params['to_dtype'])
+            out.qbits = min(32, dtype2bits(self.params['to_dtype']))
+            out.dtype = bits2dtype(out.qbits, is_sign)
+            do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
+                1 / inp.scale, mult_bits=16, force_shift_positive=self.force_shift_positive)
+            scale_name = "scale" if is_torch_tensor_with_multi_data(do_scale) else "scale_value"
+            shift_name = "shift" if is_torch_tensor_with_multi_data(do_shift) else "shift_value"
+            self.set_ir_field(scale_name, do_scale, do_scale_type)
+            self.set_ir_field(shift_name, do_shift, do_shift_type)
+            if not is_torch_tensor_with_multi_data(do_scale):
+                self.params["shift_type"] = do_shift_type
+                self.params["scale_type"] = do_scale_type
+            out.scale = 1
+            out.zerop = 0
+            out.qinvariant = True
+            self.params['ignore_scale_zp'] = False
+            self.params['clip_mode'] = 'saturation'.upper()

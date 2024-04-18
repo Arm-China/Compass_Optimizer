@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
@@ -61,8 +61,8 @@ def prelu_quantize(self, *args):
     do_scale, do_scale_type, do_shift, do_shift_type = \
         get_scale_approximation_params(out.scale / inp.scale, mult_bits=out.qbits,
                                        force_shift_positive=self.force_shift_positive)
-
-    negative_slope_shift = self.attrs['scaling_bits'][0]
+    extra_params = self.get_attrs('extra_params', optional=True, default_value=[0, 12])
+    negative_slope_shift = extra_params[1]
     negative_slope = linear_quantize_clip(
         self.constants['negative_slope'].betensor, (2 ** negative_slope_shift), 0, -32768, 32767)
     if len(negative_slope.shape) >= len(inp.ir_shape):

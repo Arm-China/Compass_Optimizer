@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2023 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -30,7 +30,6 @@ def accidentalhits(self, *args):
         if idx.numel() > 0:
             outt2.append(idx[:, 1])
             outt1.append(torch.ones_like(idx[:, 1]) * d)
-    # print(time.time()-aa,outt1,outt2)  # 0.004672050476074219s
 
     if outt1:
         outt1 = torch.hstack(outt1)
