@@ -26,8 +26,8 @@ def cast_to_NodeParamValue(v):
         v = v
     elif isinstance(v, (int, float, str, list)):
         v = NodeParamValue(v)
-    elif isinstance(v, torch.Tensor) and v.dim() < 1:
-        v = NodeParamValue(v.item())
+    elif isinstance(v, torch.Tensor) and (v.dim() < 1 or v.numel() == 1):
+        v = NodeParamValue(v.reshape(1).item())
     elif isinstance(v, np.ndarray) and v.ndim < 1:
         v = NodeParamValue(v.item())
     else:
@@ -117,8 +117,8 @@ def cast_to_NodeParamValue_string(v):
         return str(v)
     elif isinstance(v, str):
         return v
-    elif isinstance(v, torch.Tensor) and v.dim() < 1:
-        return str(v.item())
+    elif isinstance(v, torch.Tensor) and (v.dim() < 1 or v.numel() == 1):
+        return str(v.reshape(1).item())
     elif isinstance(v, np.ndarray) and v.ndim < 1:
         return str(v.item())
     elif v is None:
@@ -181,7 +181,7 @@ def convert_aipu_graph_to_opt_graph(cg):
         # store edges
         for v in n.outputs:
             pv = PyTensor(v.name, v.data())
-            pv.assigned_device = v.betensor.device
+            pv.is_act = True
             pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
             pv.ir_dtype = pv.dtype
             pv.ir_shape = tuple(v.shape)
@@ -193,7 +193,8 @@ def convert_aipu_graph_to_opt_graph(cg):
                 pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
                 pv.qbits = v.quantization.bits
                 pv.qinvariant = v.quantization.qinvariant
-
+                pv.min = v.quantization.mins
+                pv.max = v.quantization.maxs
             if 'range' in v._attrs:
                 pv.ir_range = v._attrs['range']
             emap[pv.name] = pv
@@ -271,14 +272,21 @@ def convert_opt_graph_to_aipu_graph(g):
     # store edges
     emap = {}
     for n in g.nodes:
-        for v in n.outputs:
+        for i, v in enumerate(n.outputs):
             ct = _Tensor(v.name, _TensorShape(list(v.ir_shape)), dt_dict[v.dtype.name])
             # ct._set_dtype(dt_dict[v.dtype.name])
             ct.quantization.scales = _convert_scale_zp_to_list(v.scale)
             ct.quantization.offsets = [int(zp) for zp in _convert_scale_zp_to_list(v.zerop)]
             ct.quantization.bits = v.qbits if v.qbits else n.attrs['q_bits_activation'] if 'q_bits_activation' in n.attrs else -1
             ct.quantization.qinvariant = v.qinvariant
+            if 'layer_top_range' in n.params:
+                tmins = n.params['layer_top_range'][i][0]
+                tmaxs = n.params['layer_top_range'][i][1]
+                ct.quantization.mins = tmins if isinstance(tmins, list) else [tmins]
+                ct.quantization.maxs = tmaxs if isinstance(tmaxs, list) else [tmaxs]
             emap[ct.name] = ct
+        if 'layer_top_range' in n.params:
+            n.params.pop('layer_top_range')
     for n in g.nodes:
         cn = _Node(n.name, ot_dict[str(n.type)] if str(n.type) in ot_dict.keys() else _register_optype(n.type.name))
         for k, v in n.params.items():
@@ -299,6 +307,11 @@ def convert_opt_graph_to_aipu_graph(g):
                 ct.quantization.bits = n.attrs['q_bits_bias'] if 'q_bits_bias' in n.attrs else -1
             ct.quantization.qinvariant = v.qinvariant
             cn.constants[k] = ct
+            if f"{k}_range" in cn.params:
+                mins, maxs = cn.params[f"{k}_range"][0], cn.params[f"{k}_range"][1]
+                ct.quantization.mins = mins if isinstance(mins, (list, tuple)) else [mins]
+                ct.quantization.maxs = maxs if isinstance(maxs, (list, tuple)) else [maxs]
+                cn.params.pop(f"{k}_range")
         for v in n.inputs:
             cn.add_input(emap[v.name])
         for v in n.outputs:
@@ -328,17 +341,7 @@ def parse_graph_from_ir(ir_txt, ir_bin):
     import re
     import numpy as np
     import torch
-    device_count = 0
     silent_load = 'AIPUOPT_SILENTLOADING' in os.environ
-    if torch.cuda.is_available():
-        device_count = torch.cuda.device_count()
-        try:
-            decode_str = subprocess.check_output("nvidia-smi nvlink --status", shell=True).decode()
-            if decode_str == '' or 'inactive' in decode_str.lower():
-                device_count = 1
-        except Exception as e:
-            OPT_WARN(f"Getting nvlink status failed, and error message :{e}")
-            device_count = 1
     g = QuantizeGraph()
     if not silent_load:
         OPT_INFO('Suggest using "aipuchecker" to validate the IR firstly if you are not sure about its validity.')
@@ -472,28 +475,6 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                 g.nodes.append(n)
             pbar.refresh()
 
-            gpu_rank = [(total_size // device_count) * (i+1) for i in range(device_count)]
-            size_to_node = 0
-            current_gpu = 0
-            if device_count > 0:
-                for node in g.nodes:
-                    tensors = []
-                    for t in node.outputs:
-                        tensors.append(t)
-                        size_to_node += np.prod(t.ir_shape)
-                    for k, v in node.constants.items():
-                        tensors.append(v)
-                        size_to_node += np.prod(v.ir_shape)
-                    if size_to_node > gpu_rank[current_gpu]:
-                        current_gpu += 1
-                        if current_gpu == device_count:
-                            current_gpu = device_count - 1
-                    for tensor in tensors:
-                        if device_count == 1:
-                            tensor.assigned_device = f"cuda:{tensor.betensor.device.index}"
-                        else:
-                            tensor.assigned_device = f"cuda:{current_gpu}"
-
             if not silent_load:
                 OPT_INFO("Begin to load weights.")
             f = open(ir_bin, "rb")
@@ -539,8 +520,6 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                         bstr = mmap.mmap(f.fileno(), fsize - global_offset,
                                          access=mmap.ACCESS_READ, offset=int(global_offset))
                 tmp = PyTensor("bintmp", arr)
-                if not t.assigned_device == "cpu":
-                    tmp.betensor = tmp.betensor.to(t.assigned_device)
                 t.betensor = tmp.betensor.reshape(t.ir_shape)
             pbar.refresh()
             f.close()
@@ -960,6 +939,10 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
 
     total_size = tensor_list[-1][0] + tensor_list[-1][1]
     mem_seg = 2 ** 29 - (2**29 % mmap.ALLOCATIONGRANULARITY)  # 512MB
+    for offset, size, ct in tensor_list:
+        size = ct.size * ct.itemsize
+        size = size - (size % mmap.ALLOCATIONGRANULARITY)
+        mem_seg = max(mem_seg, size)
 
     job_list = []
     job = []

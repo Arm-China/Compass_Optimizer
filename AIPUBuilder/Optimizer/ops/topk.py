@@ -96,37 +96,9 @@ def topk(self, *args):
 
         [out1, out2] = recover_out0, recover_out1
 
-    index_max = self.inputs[0].ir_shape[axis]
-    out1_bits = min(32, max(16, math.log2(index_max)))
-    self.outputs[1].dtype = bits2dtype(out1_bits, self.force_dtype_int)
-
     self.outputs[0].betensor = out1
     self.outputs[1].betensor = out2
     return [out1, out2]
-    # else:
-    #     inp_betensors = self.inputs[0].betensor
-    #     if select_index == 'random':
-    #         out = torch.topk(inp_betensors, k, axis,largest, issorted)
-
-    #     elif select_index== 'first':
-    #         out_order = torch.sort(inp_betensors, axis,True)
-    #         if axis!=0:
-    #             out = out_order[0][...,0:k],out_order[1][...,0:k]
-    #         else:
-    #             out = out_order[0][0:k,...],out_order[1][0:k,...]
-    #         if largest == False:
-    #             out = torch.flip(out[0],[0]),torch.flip(out[1],[axis])
-    #     else: #last mode
-    #         out_order = torch.sort(inp_betensors, axis,False)
-    #         if axis!=0:
-    #             out = torch.flip(out_order[0][...,-k:],[0]),torch.flip(out_order[1][...,-k:],[axis])
-    #         else:
-    #             out = torch.flip(out_order[0][-k:,...],[0]),torch.flip(out_order[1][-k:,...],[axis])
-    #         if largest == False:
-    #             out = torch.flip(out[0],[0]),torch.flip(out[1],[axis])
-    #     for i, outp in enumerate(out) :
-    #         self.outputs[i].betensor = outp
-    #     return out
 
 
 @quant_register(OpType.TopK)

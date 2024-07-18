@@ -5,7 +5,6 @@ from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
 
 
-@passes_run
 def merge_matmul_mul(graph, config=None):
     # find matmul+scale(represented by operator: bn or mul) and fuse related nodes into Matmul (with additional param: fused_multiplier)
     end_idx = len(graph.nodes)

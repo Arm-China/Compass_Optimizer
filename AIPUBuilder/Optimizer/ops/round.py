@@ -3,7 +3,7 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+import AIPUBuilder.Optimizer.ops.activation as activation_module
 import torch
 
 
@@ -32,17 +32,13 @@ def round_quantize(self, *args):
 
 @op_register(OpType.Round)
 def round(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    if self.quantized:
-        x = inp.betensor
-        x = x - inp.qmin
-        lut = self.constants["lut"].betensor
-        x = torch.reshape(x, (-1,))
-        y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
-            self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
-        out.betensor = torch.reshape(y, inp.betensor.shape)
-    else:
-        out.betensor = torch.round(inp.betensor)
+    self.attrs['lambda_func'] = torch.round
+    self.outputs[0].betensor = activation_module.unknown_activation(self, *args)
+    self.attrs.pop('lambda_func')
+    return self.outputs[0].betensor
 
-    return out.betensor
+
+@approx_register(OpType.Round)
+def round_approx(self, *args):
+    # this is not currently used because it is the same as the float process
+    self.params['is_perf_mode'] = False

@@ -3,7 +3,7 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+import AIPUBuilder.Optimizer.ops.activation as activation_module
 import torch
 
 # acosh(x) = log(x + sqrt(x^2-1)) x∈[1，inf)， y∈[0，inf)
@@ -12,45 +12,50 @@ import torch
 
 @quant_register(OpType.Acosh)
 def acosh_quantize(self, *args):
-    q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
-    q_bits_activation = self.attrs["q_bits_activation"]
-
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    if inp.extrema_min < 1:
-        OPT_WARN("input of Acosh(layer_id=%s) must be >= 1, otherwise the output is nan, please check!"
-                 % (self.attrs['layer_id']))
-    out.qbits = q_bits_activation
-    out_sign = False or self.force_dtype_int
-    dev = inp.betensor.device
-    out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-        out, q_mode_activation, out.qbits, out_sign)
-    lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
-    lut = torch.acosh(lut)
-    lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/acosh_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
-    out.qinvariant = False
+    self.attrs['lambda_func'] = torch.acosh
+    self.attrs['out_signed'] = False
+    activation_module.unknown_quantize(self, *args)
+    for k in ['lambda_func', 'out_signed']:
+        self.attrs.pop(k)
 
 
 @op_register(OpType.Acosh)
 def acosh(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    if self.quantized:
-        x = inp.betensor
-        x = x - inp.qmin
-        lut = self.constants["lut"].betensor
-        x = torch.reshape(x, (-1,))
-        y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
-            self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
-        out.betensor = torch.reshape(y, inp.betensor.shape)
-    else:
-        out.betensor = torch.acosh(inp.betensor)
-        if torch.any(torch.isnan(out.betensor)):
-            out.betensor = torch.where(torch.isnan(out.betensor), torch.zeros_like(inp.betensor), out.betensor)
-            OPT_WARN('layer_id=%s, type=%s, the output has nan, please confirm whether input is >= 1, now set nan to zero'
-                     % (self.attrs['layer_id'], str(self.type)))
-    return out.betensor
+    def approximated_float_forward(self,  inp_tensor):
+        if self.approximated and "lut" in self.constants:
+            lut = self.constants["lut"].betensor
+            out = lookup_float_index_lut(inp_tensor, lut,
+                                         self.params['index_scale_value'],
+                                         self.params['index_offset_value'],
+                                         mirror_mode=False,
+                                         value_offset_for_mirror_mode=self.params['value_offset_value'])
+        else:
+            out = torch.acosh(inp_tensor)
+        return out
+    self.attrs['lambda_func'] = lambda x: approximated_float_forward(self,  x)
+    self.outputs[0].betensor = activation_module.unknown_activation(self, *args)
+    self.attrs.pop('lambda_func')
+    return self.outputs[0].betensor
+
+
+@approx_register(OpType.Acosh)
+def acosh_approx(self, *args):
+    def set_min_max(inp, use_dynamic_lut):
+        if not use_dynamic_lut:
+            clip_min = 1
+            clip_max = 256
+        else:
+            clip_min = inp.min
+            clip_max = inp.max
+        return clip_min, clip_max
+
+    def acosh(x):
+        x = torch.clamp(x, min=1)
+        return torch.acosh(x)
+    self.attrs['set_min_max'] = set_min_max
+    self.attrs['lambda_func'] = acosh
+    self.attrs['out_signed'] = False
+    activation_module.unknown_approx(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('set_min_max')
+    self.attrs.pop('out_signed')

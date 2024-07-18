@@ -61,7 +61,9 @@ class BevFormerDataset(Dataset):
         self.use_shift = True
         self.rotation_prev_bev = True
         self.rotate_center = [100, 100]
+        self.num_cams = 6
         self.consumer = None
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.data = np.load(data_file, allow_pickle=True).tolist()
         self.label = None
@@ -74,6 +76,7 @@ class BevFormerDataset(Dataset):
         for pid, data in self.data.items():
             img = data['img']
             img_metas = data['img_metas'][0]
+            img_metas = img_metas[0] if isinstance(img_metas, list) else img_metas
 
             scene_token = img_metas['scene_token']
             can_bus = img_metas['can_bus']
@@ -163,8 +166,11 @@ class BevFormerDataset(Dataset):
             return ref_2d
 
     def generate_lidar2img(self, lidar2img):
-        ref_3d = BevFormerDataset.get_reference_points(
-            self.bev_h, self.bev_w, self.point_cloud_range[5] - self.point_cloud_range[2], self.num_points_in_pillar)
+        ref_3d = BevFormerDataset.get_reference_points(self.bev_h,
+                                                       self.bev_w,
+                                                       self.point_cloud_range[5] - self.point_cloud_range[2],
+                                                       self.num_points_in_pillar,
+                                                       device=self.device)
         ref_point_cam, bev_mask = self.point_sampling(lidar2img, ref_3d, self.point_cloud_range)
         return ref_point_cam, bev_mask
 
@@ -200,7 +206,7 @@ class BevFormerDataset(Dataset):
         reference_points_cam = torch.matmul(ld2img.to(torch.float32),
                                             reference_points.to(torch.float32)).squeeze(-1)
         # eps = 1e-5
-        # # eps = 1e-2
+        # eps = 1e-2
         eps = 1e-1
         # eps = 1
 
@@ -237,6 +243,23 @@ class BevFormerDataset(Dataset):
         clip_v = reference_points_cam.new_tensor(25.)
         reference_points_cam = torch.clamp(reference_points_cam, -clip_v, clip_v)
 
+        # if 0:
+        #     bs = 1
+        #     D = 8
+        #     indexes = []
+        #     for i, mask_per_img in enumerate(bev_mask):
+        #         index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
+        #         indexes.append(index_query_per_img)
+        #     max_len = max([len(each) for each in indexes])
+        #
+        #     # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
+        #     reference_points_rebatch = reference_points_cam.new_zeros(
+        #         [self.num_cams, max_len, D, 1, 2, 4, 2])
+        #     for i, reference_points_per_img in enumerate(reference_points_cam):
+        #         index_query_per_img = indexes[i]
+        #         reference_points_rebatch[i, :len(index_query_per_img), ...] = reference_points_per_img[index_query_per_img, ...]
+        #     reference_points_cam = reference_points_rebatch
+
         return reference_points_cam, bev_mask.int()
 
     def __len__(self):
@@ -254,14 +277,19 @@ class BevFormerDataset(Dataset):
         # sample = [[self.lidar2img[idx], self.imgs[idx], None, 0, self.prev_bev[idx]], []]
         sample = [[self.imgs[idx], None, 0, None, None, self.prev_bev[idx]], []]
         can_bus = self.can_bus[idx]
-        self.prev_tmp_pos = can_bus[:3]
-        self.prev_tmp_angle = can_bus[-1]
         if self.scene_token[idx] != self.prev_bev_flag:
             # OPT_ERROR(f"{idx} self.pre_bev_flag == {self.prev_bev_flag}")
             prev_bev = np.zeros(self.prev_bev_shape)
-            # the newest can_bus data has preprocess the can_bus issue, because we save the metas data before img_feat()
+
+            # the v1.0-mini dataset can_bus data has preprocess the can_bus issue, because we save the metas data before img_feat()
             # can_bus[-1] = 0
             # can_bus[:3] = 0
+            # but if v1.0-trainval dataset should process the can_bus data
+            if True or len(self) > 81:
+                self.prev_tmp_pos = np.array(can_bus[:3])
+                self.prev_tmp_angle = can_bus[-1]
+                can_bus[-1] = 0
+                can_bus[:3] = 0
         else:
             if self.consumer is not None and isinstance(self.consumer, PyGraph):
                 # OPT_ERROR(f"{idx} BEVFormer Dataset has consumer {self.consumer}")
@@ -269,8 +297,16 @@ class BevFormerDataset(Dataset):
             else:
                 prev_bev = np.zeros(self.prev_bev_shape)
             # the newest can_bus data has preprocess the can_bus issue, because we save the metas data before img_feat()
-            # can_bus[:3] -= self.prev_tmp_pos
-            # can_bus[-1] -= self.prev_tmp_angle
+            #     can_bus[:3] -= self.prev_tmp_pos
+            #     can_bus[-1] -= self.prev_tmp_angle
+            # but if v1.0-trainval dataset should process the can_bus data
+            if True or len(self) > 81:
+                cur_tmp_pos = np.array(can_bus[:3])
+                cur_tmp_angle = can_bus[-1]
+                can_bus[:3] -= self.prev_tmp_pos
+                can_bus[-1] -= self.prev_tmp_angle
+                self.prev_tmp_pos = cur_tmp_pos
+                self.prev_tmp_angle = cur_tmp_angle
 
         prev_bev, shift = self.align_prev_bev(
             can_bus, prev_bev, new_prev=True if self.scene_token[idx] != self.prev_bev_flag else False)
@@ -289,10 +325,5 @@ class BevFormerDataset(Dataset):
         sample[0][3] = ref_point_cam
         sample[0][4] = bev_mask
         sample[0][5] = prev_bev
+        # print(f"----{idx}/{len(self)}-----")
         return sample
-
-
-if __name__ == '__main__':
-    dataset = BevFormerDataset('/project/ai/zhouyi_compass/samhan01/work/models/bevformer/dataset_new_2.npy')
-    print(dataset)
-    d0 = dataset[0]

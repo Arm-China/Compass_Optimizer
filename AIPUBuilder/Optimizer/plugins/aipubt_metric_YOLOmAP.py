@@ -295,14 +295,15 @@ class YOLOXcocomAPMetric(YOLOV5onnxmAPMetric):
             hw = [[80, 80], [40, 40], [20, 20]]
             strides_list = [8, 16, 32]
             for (hsize, wsize), stride in zip(hw, strides_list):
-                yv, xv = meshgrid([torch.arange(hsize), torch.arange(wsize)])
+                yv, xv = meshgrid([torch.arange(hsize, device=outputs.device),
+                                  torch.arange(wsize, device=outputs.device)])
                 grid = torch.stack((xv, yv), 2).view(1, -1, 2)
                 grids.append(grid)
                 shape = grid.shape[:2]
-                strides.append(torch.full((*shape, 1), stride))
+                strides.append(torch.full((*shape, 1), stride, device=outputs.device))
 
-            grids = torch.cat(grids, dim=1).type(torch.FloatTensor)
-            strides = torch.cat(strides, dim=1).type(torch.FloatTensor)
+            grids = torch.cat(grids, dim=1).type(torch.FloatTensor).to(outputs.device)
+            strides = torch.cat(strides, dim=1).type(torch.FloatTensor).to(outputs.device)
 
             outputs = torch.cat([
                 (outputs[..., 0:2] + grids) * strides,
@@ -344,6 +345,8 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
                                 )
         self.strides = [8, 16, 32]
         self.featuremap_size_list = [52, 26, 13]
+        tiny = tiny.upper() == "TRUE" if isinstance(tiny, str) else tiny
+        letterbox = letterbox.upper() == "TRUE" if isinstance(letterbox, str) else letterbox
         if tiny:
 
             self.anchors = np.array([[[23., 27.], [37., 58.], [81., 82.]],

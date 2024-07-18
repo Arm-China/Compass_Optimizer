@@ -6,6 +6,8 @@
 # cython: language_level=3
 
 import torch
+import subprocess
+import os
 __all__ = [
     "PyTensor",
     "TensorShape",
@@ -13,8 +15,51 @@ __all__ = [
     "opt_use_cuda",
 ]
 
-# import os
-# cuda_device = os.environ['CUDA_VISIBLE_DEVICES']
+act_reserve_rate = 0.3  # set GDDR reserve 50% for act at start
+gddr_threshold = 0.9  # If a gpu mem is occupied over 90%, switch to next gpu
+
+if 'OPT_GPU_ACT_RSRV_RATE' in os.environ:
+    act_reserve_rate = float(os.environ.get('OPT_GPU_ACT_RSRV_RATE'))
+
+nvlink = True
+if torch.cuda.is_available():
+    device_count = torch.cuda.device_count()
+    try:
+        decode_str = subprocess.check_output("nvidia-smi nvlink --status", shell=True).decode()
+        if decode_str == '' or 'inactive' in decode_str.lower():
+            nvlink = False
+    except Exception as e:
+        nvlink = False
+else:
+    nvlink = False
+    device_count = 0
+gpu_info = [torch.cuda.get_device_properties(f'cuda:{i}') for i in range(device_count)]
+
+# Change this by rearrange env var CUDA_VISIBLE_DEVICES
+# ex. set CUDA_VISIBLE_DEVICES=1,0 to switch to cuda:1
+# Python will do rearrangement for device ids.
+target_device = 0
+device_cluster = [torch.device(f"cuda:{i}") for i in range(device_count)] + [torch.device("cpu")]
+
+if not nvlink and device_count > 0:
+    # Try not to take up other GPUs if nvlink is not available
+    device_count = 1
+    device_cluster = [torch.device(f"cuda:{target_device}"), torch.device("cpu")]
+
+
+def find_empty_device():
+    if device_count == 0:
+        return -1
+    index = 0
+    for i, device in enumerate(gpu_info):
+        total_mem = device.total_memory  # Bytes
+        allocated = torch.cuda.memory_allocated(i)
+        if i == target_device:
+            allocated += total_mem * act_reserve_rate
+        if allocated < total_mem * gddr_threshold:
+            return index
+        index += 1
+    return -1
 
 
 def opt_use_cuda():
@@ -85,7 +130,7 @@ _tensor_default_property = {
     "mse": None,
     "debug_flag": 0,
     "need_deleted": False,
-    "assigned_device": "cpu",
+    "is_act": False
 }
 
 
@@ -144,13 +189,35 @@ class PyTensor:
         else:
             self.betensor = torch.tensor(shape_or_arr, dtype=th_dict[dtype])
             self.dtype = torch_type2dtype(self.betensor.dtype) if dtype is None else dtype
-        if opt_use_cuda():
-            self.betensor = self.betensor.cuda()
-            self.assigned_device = self.betensor.device
         self.fit_dtype()
         self.ir_shape = TensorShape(self.betensor.shape)
         self.block_size = None
         self.attrs = dict()
+
+    def __getattribute__(self, name):
+        # Multi GPU wrapper
+        if device_count == 0:
+            return super().__getattribute__(name)
+        value = super().__getattribute__(name)
+        if isinstance(value, torch.Tensor):
+            if value.device == device_cluster[target_device]:
+                return value
+            value = value.to(device_cluster[target_device])
+            return value
+        else:
+            return super().__getattribute__(name)
+
+    def __setattr__(self, key, value):
+        if device_count == 0 or (not isinstance(value, torch.Tensor)):
+            return super().__setattr__(key, value)
+        if super().__getattribute__("is_act"):
+            device = target_device
+        else:
+            device = find_empty_device()
+        if value.device == device_cluster[device]:
+            return super().__setattr__(key, value)
+        else:
+            return super().__setattr__(key, value.to(device_cluster[device]))
 
     def fit_dtype(self, dtype: Union[Dtype, None] = None):
         from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type
@@ -175,6 +242,10 @@ class PyTensor:
                     f'tensor "{self.name}" contains NaN values and will be converted to zeros in fit_dtype() function.')
                 self.betensor = torch.where(nan_mask, torch.zeros_like(self.betensor), self.betensor)
             qmin, qmax = dtype2range(self.dtype)
+            # to avoid errors in clamp using uint64 qmax
+            if self.dtype == Dtype.UINT64:
+                qmin = float(qmin)
+                qmax = float(qmax)
             self.betensor = torch.clamp(self.betensor, qmin, qmax).to(dtype2torch_type(self.dtype))
             if self.ir_dtype is not None and is_float(self.ir_dtype) and not self.qinvariant:
                 # many torch api does not implement for none float dtypes
@@ -194,8 +265,8 @@ class PyTensor:
             return _ret
         scale = _scale_zp(self.scale)
         zerop = _scale_zp(self.zerop)
-        return (f"tensor.name={self.name}, tensor.ir_shape={self.ir_shape}, tensor.dtype={self.dtype}, "
-                f"tensor.qinfo[scale, zerop] = [{scale}, {zerop}]")
+        return (f"'tensor info: name={self.name}, ir_shape={self.ir_shape}, dtype={self.dtype}, "
+                f"scale={scale}, zerop={zerop}'")
 
     def clone(self, name=None):
         import copy
@@ -214,6 +285,15 @@ class PyTensor:
         for k, v in self.attrs.items():
             t.attrs[k] = copy.deepcopy(v)
         return t
+
+    def clone_qinfo(self, other):
+        self.scale = other.scale
+        self.zerop = other.zerop
+        self.qbits = other.qbits
+        self.dtype = other.dtype
+        self.qmin = other.qmin
+        self.qmax = other.qmax
+        self.qinvariant = other.qinvariant
 
     def statistic(self,
                   running_statistic_momentum,

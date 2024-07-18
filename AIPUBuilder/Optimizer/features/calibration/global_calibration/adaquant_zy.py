@@ -23,11 +23,6 @@ def adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes):
 
 
 def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw, lr_qpa, mscopes):
-    def is_in_scopes(layer_n):
-        if len(mscopes) < 1:
-            return True
-        else:
-            return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
 
     class QNodeModule (torch.nn.Module):
         def __init__(self, n, qn, lr_w, lr_b, lr_qpw, lr_qpa, only_optim_inp):
@@ -161,9 +156,6 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
     # prevent deleting intermediate tensors
     g.ref_count_tensors = {}
 
-    # prevent from fit_dtype which will cause backward issues
-    g.enable_fit_dtype(False)
-
     qg = g.clone()
     qg.clear_tensor_quantization_attrs()
     for n in qg.nodes:
@@ -238,7 +230,7 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
                     cached_float_tensors[ot.name] = ot.betensor
             # apply adaround on current layer
             unquantifiable = n.get_param('unquantifiable', optional=True, default_value=False)
-            if n.type != OpType.Input and not unquantifiable and is_in_scopes(n):
+            if n.type != OpType.Input and not unquantifiable and mscopes.get(n):
                 only_optim_inp = True
                 if 'weights' in n.constants and n.type not in [OpType.GRUv3, OpType.GRUv1]:
                     only_optim_inp = False
@@ -367,4 +359,3 @@ def _adaquant_zy(g, cdataloader, batches, epochs, batch_size, lr_w, lr_b, lr_qpw
                         ss = list(t.shape)
                     t.betensor = torch.zeros(ss, device=t.betensor.device)
             reset_layer_tensors(n)
-    g.enable_fit_dtype(True)

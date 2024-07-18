@@ -530,3 +530,62 @@ def aiff_ahead_shift_bias(x: torch.Tensor, origin_shift: torch.Tensor,
     if biases is not None:
         data = data.double() + biases.double()
     return data, remain_shift
+
+
+def simulate_x2_wdc(data: torch.Tensor, qbits: int) -> float:
+    total_cnt = data.flatten().shape[0]
+    data_stat = torch.zeros(16).int().to(data.device)
+    prob = torch.zeros(16).float().to(data.device)
+    avg_len = torch.zeros(16).float().to(data.device)
+    comp_rate = torch.zeros(16).float().to(data.device) + 1000.0
+
+    maxv = torch.tensor([(1 << i) - 1 for i in range(qbits)]).int().to(data.device)
+    minv = torch.tensor([0 - (1 << i) - 1 for i in range(qbits)]).int().to(data.device)
+
+    data = data.flatten().int()
+    for i in range(qbits):
+        data_stat[i] = torch.logical_and((data <= maxv[i]), (data >= minv[i])).sum()
+
+    for i in range(qbits):
+        prob[i] = data_stat[i].float() / total_cnt
+        avg_len[i] = prob[i] * (i+1) + (1-prob[i]) * (3 * (i+1))
+        comp_rate[i] = avg_len[i] / qbits
+        OPT_DEBUG(
+            f"AIFF uses try new WDC info: bit length:{i+1},cnt:{data_stat[i]},prob:{prob[i]},avg_len:{avg_len[i]},comp_rate:{comp_rate[i]}")
+
+    min_comp_rate_idx = comp_rate.argsort()
+    min_comp_rate = comp_rate.min().item()
+    min_comp_rate_len = (min_comp_rate - comp_rate[0] + 1).int().item()
+    if not min_comp_rate == comp_rate[min_comp_rate_len - 1]:
+        OPT_ERROR("WDC info mismatch")
+    if not min_comp_rate == comp_rate[min_comp_rate_idx[0]]:
+        OPT_ERROR("WDC info mismatch")
+
+    comp_rate_cfg = 1.0
+    valid_len = []
+    if qbits == 8:
+        valid_len += [5, 6]
+    else:
+        valid_len += [10, 12]
+
+    result = 1.0
+    for i in range(qbits):
+        found = False
+        for vb in valid_len:
+            if comp_rate[min_comp_rate_idx[i]] < comp_rate_cfg and vb == (min_comp_rate_idx[i] + 1):
+                OPT_DEBUG(f"wdc compression_rate:{comp_rate[min_comp_rate_idx[i]]}")
+                found = True
+                result = comp_rate[min_comp_rate_idx[i]]
+                break
+        if found:
+            break
+    return result
+
+
+def calc_SQNR(gt, pt):
+    # Higher is better
+    x = gt.flatten().float()
+    y = pt.flatten().float()
+    Ps = torch.norm(x)
+    Pn = torch.norm(x-y)
+    return 20 * torch.log10(Ps/Pn)

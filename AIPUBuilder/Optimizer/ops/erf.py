@@ -3,47 +3,56 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+import AIPUBuilder.Optimizer.ops.activation as activation_module
 from AIPUBuilder.Optimizer.utils.math_utils import *
 import torch
 
 
 @quant_register(OpType.Erf)
 def erf_quantize(self, *args):
-    q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
-    q_bits_activation = self.attrs["q_bits_activation"]
-
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    out.qbits = q_bits_activation
-    out_sign = True
-    dev = inp.betensor.device
-    out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-        out, q_mode_activation, out.qbits, out_sign)
-    iqmin, iqmax = dtype2range(inp.dtype)
-    lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = linear_dequantize(torch.linspace(iqmin, iqmax, steps=lsteps), inp.scale, inp.zerop)
-    lut = torch.erf(lut)
-    lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/erf_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
-    out.qinvariant = False
+    self.attrs['lambda_func'] = torch.erf
+    self.attrs['out_signed'] = True
+    activation_module.unknown_quantize(self, *args)
+    for k in ['lambda_func', 'out_signed']:
+        self.attrs.pop(k)
 
 
 @op_register(OpType.Erf)
 def erf(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    if self.quantized:
-        lut_in_bits = inp.qbits
-        lut_out_bits = out.qbits
-        in_is_signed = is_signed(inp.dtype)
-        out_is_signed = is_signed(out.dtype)
-        lut = self.constants["lut"].betensor
-        x = inp.betensor
-        y = lookup_lut_powerof2(x, lut, lut_in_bits, in_is_signed, lut_out_bits, out_is_signed)
-        out.betensor = torch.reshape(y, inp.betensor.shape)
-    else:
-        out.betensor = torch.erf(inp.betensor)
-    return out.betensor
+    def approximated_float_forward(self,  inp_tensor):
+        if self.approximated and "lut" in self.constants:
+            lut = self.constants["lut"].betensor
+            out = lookup_float_index_lut(inp_tensor, lut,
+                                         self.params['index_scale_value'],
+                                         self.params['index_offset_value'],
+                                         mirror_mode=True,
+                                         value_offset_for_mirror_mode=self.params['value_offset_value'])
+        else:
+            out = torch.erf(inp_tensor)
+        return out
+    self.attrs['lambda_func'] = lambda x: approximated_float_forward(self,  x)
+    self.outputs[0].betensor = activation_module.unknown_activation(self, *args)
+    self.attrs.pop('lambda_func')
+    return self.outputs[0].betensor
+
+
+@approx_register(OpType.Erf)
+def erf_approx(self, *args):
+    def set_min_max(inp, use_dynamic_lut):
+        if not use_dynamic_lut:
+            clip_min = 0
+            clip_max = 2
+        else:
+            clip_min = 0
+            clip_max = max(abs(inp.min), abs(inp.max))
+        return clip_min, clip_max
+
+    self.attrs['set_min_max'] = set_min_max
+    self.attrs['lambda_func'] = torch.erf
+    self.attrs['out_signed'] = False
+    activation_module.unknown_approx(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('set_min_max')
+    self.attrs.pop('out_signed')
+
+    self.params['lut_mode'] = 'MIRROR'

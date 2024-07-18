@@ -78,7 +78,14 @@ def onehot_quantize(self, *args):
             quan_off_value = linear_requantize(off_value_, out.scale, 0, out.zerop, out.qmin, out.qmax).int().item()
             self.params['values'] = [quan_off_value, quan_on_value]
     else:
-        OPT_FATAL(
+        OPT_WARN(
             'currently only support input qinvariant is True. but currently input qinvariant is False.layer_id=%s, layer_name=%s' % (
                 self.attrs['layer_id'], self.name),
             workflow_name='forward', op_name=str(self.type))
+        out.qinvariant = inp.qinvariant
+        out.scale = inp.scale
+        out.zerop = inp.zerop
+        out.qbits = inp.qbits
+        out.dtype = inp.dtype
+        out.qmin = inp.qmin
+        out.qmax = inp.qmax

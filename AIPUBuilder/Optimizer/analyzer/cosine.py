@@ -13,7 +13,8 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
     from torch.nn import MSELoss as mseloss
 
     MSE = mseloss()
-
+    float_graph.enable_fit_dtype()
+    quant_graph.enable_fit_dtype()
     float_graph.feed_inputs_data(inputs)
     quant_graph.feed_inputs_data(inputs)
     if keep_tensors:
@@ -71,6 +72,8 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
                 pld.betensor = tz
         float_graph.reset_edge_tensors_ref_count()
         quant_graph.reset_edge_tensors_ref_count()
+    quant_graph.disable_fit_dtype()
+    float_graph.disable_fit_dtype()
 
 
 def show_similarity(quant_graph):

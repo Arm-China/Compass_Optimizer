@@ -236,10 +236,10 @@ class QuantizeGraph(PyGraph):
         except Exception as e:
             OPT_WARN(f"Optimizer saves the statistic file failed, because {e}")
 
-    def load_statistic_info(self, statistic_info_fname):
+    def load_statistic_info(self, statistic_info_fname, ignore_missing=False):
         import numpy as np
         import torch
-        from AIPUBuilder.Optimizer.logger import OPT_FATAL, OPT_INFO
+        from AIPUBuilder.Optimizer.logger import OPT_FATAL, OPT_INFO, OPT_ERROR, OPT_WARN
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import opt_use_cuda
         # statistic_info = np.load(statistic_info_fname, allow_pickle=True).item()
         statistic_info = np.load(statistic_info_fname, allow_pickle=True)
@@ -265,7 +265,35 @@ class QuantizeGraph(PyGraph):
             if isinstance(value, torch.Tensor):
                 value = value.cuda() if opt_use_cuda() else value.cpu()
             return value
+
+        def copy_tensor_stat(src, tgt):
+            src.extrema_min = tgt.extrema_min
+            src.extrema_max = tgt.extrema_max
+            src.running_min = tgt.running_min
+            src.running_max = tgt.running_max
+            src.running_mean = tgt.running_mean
+            src.running_std = tgt.running_std
+            src.running_mad = tgt.running_mad
+            src.running_histc = tgt.running_histc
         for n in self.nodes:
+            if not n.name in statistic_info and ignore_missing:
+                OPT_WARN("can not find node '%s' in file %s, please update statistic_file by regenerating it.\
+                     Trying to fill values by its parent nodes..." %
+                         (n.name, statistic_info_fname))
+                # Try find one valid parent input and apply to itself as well as other unassigned parent inputs
+                if len(n.parents) > 0:
+                    tgt = None
+                    for inp in n.inputs:
+                        if inp.running_histc is not None:
+                            tgt = inp
+                            break
+                    if tgt is not None:
+                        for oup in n.outputs:
+                            copy_tensor_stat(oup, tgt)
+                        for inp in n.inputs:
+                            if inp.running_histc is None:
+                                copy_tensor_stat(inp, tgt)
+                continue
             for o in n.outputs:
                 o.extrema_min = query_property(n.name,   o.name, "extrema_min")
                 o.extrema_max = query_property(n.name,   o.name, "extrema_max")
@@ -314,32 +342,14 @@ class QuantizeGraph(PyGraph):
                 qn.quantize()
                 for i, t in enumerate(n.outputs):
                     tc = qn.outputs[i]
-                    t.scale = tc.scale
-                    t.zerop = tc.zerop
-                    t.qbits = tc.qbits
-                    t.dtype = tc.dtype
-                    t.qmin = tc.qmin
-                    t.qmax = tc.qmax
-                    t.qinvariant = tc.qinvariant
+                    t.clone_qinfo(tc)
                 for i, t in enumerate(n.placeholders):
                     tc = qn.placeholders[i]
-                    t.scale = tc.scale
-                    t.zerop = tc.zerop
-                    t.qbits = tc.qbits
-                    t.dtype = tc.dtype
-                    t.qmin = tc.qmin
-                    t.qmax = tc.qmax
-                    t.qinvariant = tc.qinvariant
+                    t.clone_qinfo(tc)
                 for k, t in n.constants.items():
                     if k in qn.constants.keys():
                         tc = qn.constants[k]
-                        t.scale = tc.scale
-                        t.zerop = tc.zerop
-                        t.qbits = tc.qbits
-                        t.dtype = tc.dtype
-                        t.qmin = tc.qmin
-                        t.qmax = tc.qmax
-                        t.qinvariant = tc.qinvariant
+                        t.clone_qinfo(tc)
                 pbar.update(1)
             pbar.refresh()
 
@@ -388,7 +398,7 @@ class QuantizeGraph(PyGraph):
             for n in self.quantgraph.nodes:
                 if not n.quantized:
                     n.quantize()
-                    n.quantized = True
+                    # n.quantized = True
                 pbar.update(1)
             pbar.refresh()
 
@@ -404,43 +414,6 @@ class QuantizeGraph(PyGraph):
                     OPT_DEBUG('\b'*36+'\n')
         else:
             OPT_DEBUG('no quantgraph when graph params show, please check workflow')
-
-    def insert_pad_op_ahead(self, condition_func=lambda node, parent_node, edge_tensor: False):  # for avgpool cnt=ceil=true
-        from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
-        inserted_op_list = self.insert_dummy_node_ahead(OpType.Pad, condition_func)
-        for n in inserted_op_list:
-            n.params['mode'] = 'CONSTANT'
-            n.params['constant_value'] = 0 - n.children[0].inputs[0].zerop
-            pool_params = n.children[0].params
-            if n.children[0].type == OpType.Pooling:
-                n.params['pads'] = [[0, 0], [pool_params['pad_top'], pool_params['pad_bottom']],
-                                    [pool_params['pad_left'], pool_params['pad_right']], [0, 0]]
-                n.children[0].params['pad_left'] = 0
-                n.children[0].params['pad_right'] = 0
-                n.children[0].params['pad_top'] = 0
-                n.children[0].params['pad_bottom'] = 0
-            if n.children[0].type == OpType.Pooling3D:  # NDHWC
-                n.params['pads'] = [[0, 0], [pool_params['pad_z_begin'], pool_params['pad_z_end']],
-                                    [pool_params['pad_y_begin'], pool_params['pad_y_end']],
-                                    [pool_params['pad_x_begin'], pool_params['pad_x_end']], [0, 0]]
-                n.children[0].params['pad_x_begin'] = 0
-                n.children[0].params['pad_x_end'] = 0
-                n.children[0].params['pad_y_begin'] = 0
-                n.children[0].params['pad_y_end'] = 0
-                n.children[0].params['pad_z_begin'] = 0
-                n.children[0].params['pad_z_end'] = 0
-        return inserted_op_list
-
-    # A->B => A->cast->B
-    def insert_cast_op_ahead(self, condition_func=lambda node, parent_node, edge_tensor: False):
-        from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
-        from AIPUBuilder.Optimizer.utils.dtype_utils import bits2dtype, is_signed
-        inserted_op_list = self.insert_dummy_node_ahead(OpType.Cast, condition_func)
-        for n in inserted_op_list:
-            # set cast default value
-            n.params['only_for_quantized'] = True
-            n.params['to_dtype'] = bits2dtype(n.attrs['q_bits_activation'], is_signed=is_signed(n.outputs[0].dtype))
-        return inserted_op_list
 
     def insert_dummy_node_ahead(self, ntype, condition_func=lambda node, parent_node, edge_tensor: False):
         from AIPUBuilder.Optimizer.utils.string_utils import timestamp_string
@@ -462,8 +435,8 @@ class QuantizeGraph(PyGraph):
                     dummy_op = PyNode(self.get_valid_node_name(_nname), ntype)
                     dummy_op.additional = True
                     dummy_op.add_input(inp_t)
-                    atensor_name = self.get_valid_tensor_name(
-                        inp_t.name + ("_%s_tensor_" % (str(ntype)[7:],)) + str(cast_count_num) + timestamp_string())
+                    atensor_name = self.get_valid_tensor_name(inp_t.name + ("_%s_tensor_" % (str(ntype)[7:],)) +
+                                                              str(cast_count_num) + timestamp_string())
                     atensor = inp_t.clone(atensor_name)
                     dummy_op.add_output(atensor)
                     idx = n.remove_input(inp_t)
@@ -474,51 +447,6 @@ class QuantizeGraph(PyGraph):
                     inserted_op_list.append(dummy_op)
                     cast_count_num += 1
                     self.add_node(dummy_op)
-        return inserted_op_list
-
-    def insert_dummy_node_ahead_old(self, ntype, condition_func=lambda node, parent_node, edge_tensor: False):
-        from AIPUBuilder.Optimizer.utils.string_utils import timestamp_string
-        from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
-        import copy
-        node_idx = 0
-        cast_count_num = 0
-        end_idx = len(self.nodes)
-        inserted_op_list = []
-        if condition_func:
-            while node_idx < end_idx:
-                n = self.nodes[node_idx]
-                ni = len(n.inputs)
-                for tensor_idx in range(ni):
-                    current_parent = None
-                    for parent in n.parents:
-                        if n.inputs[tensor_idx] in parent.outputs:
-                            current_parent = parent
-                            # p_idx = parent.outputs.index(n.inputs[tensor_idx])
-                            break
-
-                    if current_parent is not None and condition_func(n, current_parent, n.inputs[tensor_idx]):
-                        parent_out_tensor = n.inputs[tensor_idx]
-                        _nname = current_parent.name + \
-                            ("_%s_" % (str(ntype)[7:],)) + str(cast_count_num) + timestamp_string()
-                        dummy_op = PyNode(self.get_valid_node_name(_nname), ntype)
-                        dummy_op.additional = True
-                        dummy_op.add_input(parent_out_tensor)
-                        atensor_name = self.get_valid_tensor_name(
-                            parent_out_tensor.name + ("_%s_tensor_" % (str(ntype)[7:],)) + str(cast_count_num) + timestamp_string())
-                        atensor = parent_out_tensor.clone(atensor_name)
-                        dummy_op.add_output(atensor)
-                        idx = n.remove_input(parent_out_tensor)
-                        n.add_input(atensor, idx)
-                        dummy_op.attrs.update(current_parent.attrs.clone())
-                        dummy_op.attrs['layer_id'] = '0' + str(current_parent.attrs['layer_id'])
-                        self.nodes.insert(node_idx, dummy_op)
-                        # update graph network relations and related variables
-                        self.init_networkx()
-                        inserted_op_list.append(dummy_op)
-                        node_idx += 1
-                        end_idx += 1
-                        cast_count_num += 1
-                node_idx += 1
         return inserted_op_list
 
     @staticmethod

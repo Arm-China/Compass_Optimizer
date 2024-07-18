@@ -17,7 +17,7 @@ def forward_with_clip(inp, out_dtype, clip_mode, input_zerop=0, output_zerop=0):
         else:
             qmin, qmax = dtype2range(out_dtype)
             inp_t = inp.long() + input_zerop - output_zerop
-            output = torch.clamp(inp_t, qmin, qmax).type(dtype2torch_type(out_dtype))
+            output = torch.clamp(inp_t, qmin, qmax)
 
     return output
 

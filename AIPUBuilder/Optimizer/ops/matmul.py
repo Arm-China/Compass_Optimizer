@@ -52,7 +52,7 @@ def matmul_forward(self, *args):
         if len(self.placeholders) < 1:
             ph0 = PyTensor(self.name + "/matmul_result", z.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
             self.placeholders.append(ph0)
-        self.placeholders[0].betensor = z
+        self.placeholders[0].betensor = z.clone().detach()
         self.placeholders[0].key_axis = self.outputs[0].key_axis
         z *= self.get_param('fused_multiplier', optional=True, default_value=1)
     out.betensor = z
@@ -86,7 +86,8 @@ def matmul_quantize(self, *args):
         plh.qbits = q_bits_activation
         plh.scale, plh.zerop, plh.qmin, plh.qmax, plh.dtype = get_linear_quant_params_from_tensor(
             plh, q_mode_activation, plh.qbits, is_signed=out_signed)
-        out_scale = (1.0 if out.qinvariant else plh.scale) * fused_multiplier
+        # out_scale = (1.0 if out.qinvariant else plh.scale)
+        out_scale = out.scale * fused_multiplier
     if is_torch_tensor_with_multi_data(inp0.scale) or is_torch_tensor_with_multi_data(inp1.scale):
         dev = out.device
         inp0_scale = torch_tensor(inp0.scale, device=dev)

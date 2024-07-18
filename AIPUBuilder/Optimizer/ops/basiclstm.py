@@ -9,8 +9,120 @@ from AIPUBuilder.Optimizer.logger import *
 import torch.nn as nn
 
 
+def qat_basiclstm_forward(self):
+    inp0 = self.inputs[0]
+    dev = inp0.device
+
+    lut_in_bits = self.inputs[0].qbits
+    lut_out_bits = self.outputs[0].qbits
+
+    input_seq = inp0.betensor.float()
+    hm1_q_s = self.inputs[1].betensor.float()
+    c_prev_s = self.inputs[2].betensor.float()
+
+    batch_size = input_seq.shape[0]
+
+    time_step = self.get_param('time_steps')
+    input_size = self.get_param('input_size')
+    cell_size = self.get_param('cell_size')
+    direction = self.get_param('direction').lower()
+
+    if direction.lower() == 'reverse':
+        input_seq = torch.flip(input_seq, [1])
+
+    w = self.constants["weights"].betensor.clone()
+    bias = self.constants['biases'].betensor.clone().float()
+
+    weights = w.permute(1, 0).float()
+    wx_q = weights[0:input_size, :]
+    wh_q = weights[input_size:, :]
+
+    scale_start = 3
+    shift_start = 3
+    scales = self.constants['scale'].betensor.reshape(time_step, -1)
+    shifts = self.constants['shift'].betensor.reshape(time_step, -1)
+    zerops = self.constants['zerop'].betensor.reshape(time_step, -1)
+
+    ft_table = self.constants['lut_ft'].betensor.reshape(time_step, -1)
+    it_table = self.constants['lut_it'].betensor.reshape(time_step, -1)
+    gt_table = self.constants['lut_ct'].betensor.reshape(time_step, -1)
+    ot_table = self.constants['lut_ot'].betensor.reshape(time_step, -1)
+    h_table = self.constants['lut_h'].betensor.reshape(time_step, -1)
+
+    output = torch.zeros([batch_size, time_step, cell_size]).to(dev)
+    output2 = torch.zeros_like(output)
+
+    for batch, data_batch in enumerate(input_seq):
+        c_prev = c_prev_s[batch, :]
+        hm1_q = hm1_q_s[batch, :]
+        for ts in range(time_step):
+            scale = scales[ts]
+            shift = shifts[ts]
+            zerop = zerops[ts]
+
+            x_q = data_batch[ts:ts+1].reshape(1, input_size)
+            c_prev_zerop = self.inputs[2].zerop if ts == 0 else zerops[ts-1][6]
+            c_prev = c_prev + c_prev_zerop
+
+            hw_do_scale, hw_do_shift = scale[0], shift[0]
+            fc_do_scale, fc_do_shift = scale[1], shift[1]
+            hout_do_scale, hout_do_shift = scale[2], shift[2]
+
+            x_by_w = torch.matmul(x_q, wx_q)
+            h_by_w = torch.matmul(hm1_q, wh_q)
+
+            MIN_INT32, MAX_INT32 = -2**31, 2**31-1
+            MIN_INT8, MAX_INT8 = -128, 127
+            req_h_by_w = linear_requantize(h_by_w, hw_do_scale, hw_do_shift, 0, MIN_INT32, MAX_INT32)
+            mat_sum = linear_requantize(x_by_w + bias + req_h_by_w, 1.0, 0, 0, MIN_INT32, MAX_INT32)
+            rescaled_mat_sum = linear_requantize(mat_sum, fc_do_scale, fc_do_shift, zerop[0], MIN_INT8, MAX_INT8)
+            i_in, g_in, f_in, o_in = torch.chunk(rescaled_mat_sum, 4, dim=1)
+
+            f = lookup_lut_powerof2(f_in.reshape(-1), ft_table[ts], lut_in_bits, True, lut_out_bits, True)
+            i = lookup_lut_powerof2(i_in.reshape(-1), it_table[ts], lut_in_bits, True, lut_out_bits, True)
+            g = lookup_lut_powerof2(g_in.reshape(-1), gt_table[ts], lut_in_bits, True, lut_out_bits, True)
+            o = lookup_lut_powerof2(o_in.reshape(-1), ot_table[ts], lut_in_bits, True, lut_out_bits, True)
+
+            f_times_c_prev = (f + zerop[2]) * c_prev
+            i_times_g = (i + zerop[3]) * (g + zerop[5])
+            ig_b_do_scale, fcprev_b_do_scale, scale0, scale1, ts_b_do_scale = scale[scale_start: scale_start + 5]
+            ig_b_do_shift, fcprev_b_do_shift, ts_b_do_shift = shift[shift_start: shift_start + 3]
+
+            res_i_times_g = linear_requantize(i_times_g, ig_b_do_scale, ig_b_do_shift, 0, MIN_INT32, MAX_INT32)
+            res_i_times_g_times_scale0 = linear_requantize(res_i_times_g, scale0, 0, 0, MIN_INT32, MAX_INT32)
+            res_f_times_c_prev = linear_requantize(f_times_c_prev, fcprev_b_do_scale, fcprev_b_do_shift, zerop[10],
+                                                   MIN_INT8, MAX_INT8)
+            c_tmp = linear_requantize((res_i_times_g_times_scale0 + (res_f_times_c_prev + zerop[10]) * scale1),
+                                      ts_b_do_scale, ts_b_do_shift, 0, MIN_INT32, MAX_INT32)
+
+            re_scaled_c_tmp = linear_requantize(c_tmp, 1., 0, zerop[6], MIN_INT8, MAX_INT8)  # c_lut no need consider zp
+            c_prev = re_scaled_c_tmp
+
+            c_lut_out = lookup_lut_powerof2(re_scaled_c_tmp.reshape(-1),
+                                            h_table[ts], lut_in_bits, True, lut_out_bits, True)
+
+            hm1_q_tmp = (o + zerop[4]) * (c_lut_out + zerop[7])
+            h_prev_new = linear_requantize(hm1_q_tmp, hout_do_scale, hout_do_shift, zerop[8], MIN_INT8, MAX_INT8)
+            hm1_q = h_prev_new
+
+            output[batch][ts] = h_prev_new
+            output2[batch][ts] = re_scaled_c_tmp
+
+    if direction.lower() == 'reverse':
+        output = torch.flip(output, [1])
+
+    self.outputs[0].betensor = output
+    if len(self.outputs) == 2:
+        self.outputs[1].betensor = output2
+
+
 @op_register(OpType.BasicLSTM)
 def lstm(self, *args):
+    is_for_qat = self.get_param('basiclstm_for_qat', optional=True, default_value=False)
+    if is_for_qat:
+        qat_basiclstm_forward(self)
+        return [o.betensor for o in self.outputs]
+
     inp0 = self.inputs[0]
     input_seq = inp0.betensor.float()
     h_cell = self.inputs[1].betensor.float()

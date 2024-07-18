@@ -64,7 +64,7 @@ class OptMaster(object):
         self.fake_quant_scopes = []
         self.op_need_cast_dtypes_for_lib = set()
         self.batch_size_in_IR = 1
-        self.g.enable_fit_dtype(True)
+        self.g.disable_fit_dtype()
 
     def prepare(self, argv):
         """prepare the calibration and validation dataset, the metric method, and config.json
@@ -124,27 +124,7 @@ class OptMaster(object):
 
             # get metric instance
             from AIPUBuilder.Optimizer.config.cfg_fields import MetricField
-            m = argv.metric.replace(' ', '')
-            metrics = MetricField._split_metrics(m)
-            func_args = MetricField._get_func_args(metrics)
-
-            # delete the repeat metric
-            fn_arg_dict = {}
-            fas = [[s[0].lower(), s[1]] for s in func_args]
-            repeat = False
-            for fa in fas:
-                fname = fa[0]
-                args = fa[1]
-                if fname in fn_arg_dict.keys():
-                    for argl in fn_arg_dict[fname]:
-                        if args == argl:
-                            repeat = True
-                            break
-                    if not repeat:
-                        fn_arg_dict[fname].append(args)
-                else:
-                    fn_arg_dict.update({fname: [args]})
-
+            fn_arg_dict = MetricField.get_metric(argv.metric)
             for fn, argl in fn_arg_dict.items():
                 for arg in argl:
                     self.validation_metrics.append(QUANTIZE_METRIC_DICT[fn.lower()](*arg))
@@ -158,19 +138,16 @@ class OptMaster(object):
         # check dataset has the same data items with the input tensors.
         if checker_dataloader is not None:
             inp_tensor_num = len(self.g.input_tensors)
-            dataset_sample_len = 0
-            for i, sample in enumerate(checker_dataloader):
-                dataset_sample_len = 1
-                if isinstance(sample[0], list):
-                    dataset_sample_len = len(sample[0])
-                break
+            dataset_sample_len = 1
+            sample = checker_dataloader.dataset[0]
+            if isinstance(sample[0], list):
+                dataset_sample_len = len(sample[0])
             if inp_tensor_num != dataset_sample_len:
                 OPT_ERROR('Dataset plugin returns the inputs num(=%d) != len(input_tensors)(=%d)' %
                           (dataset_sample_len, inp_tensor_num))
 
-        if self.hparams.__getattribute__('opt_config') != '':
+        if self.hparams.opt_config != '':
             opt_config_file = self.hparams.opt_config
-            # TODO
             try:
                 with open(opt_config_file, 'r') as fr:
                     info = json.load(fr)
@@ -185,6 +162,16 @@ class OptMaster(object):
                 OPT_FATAL("Invalid opt_config file! please refer to opt_template.json")
 
         for node in self.g.nodes:
+            # check if each op exists in registered dict
+            from AIPUBuilder.Optimizer.framework import OP_DICT, QUANT_OP_DICT
+            if node.type not in OP_DICT:
+                OPT_ERROR('unsupported op "%s", can not find it in OP_DICT, please implement this op firstly' % str(
+                    node.type))
+            if node.type not in QUANT_OP_DICT:
+                OPT_ERROR(
+                    'unsupported op "%s", can not find it in QUANT_OP_DICT, please implement this op firstly' % str(
+                        node.type))
+
             properties = config_info[node.name]
 
             def init_attrs(key, default_value=None):
@@ -231,6 +218,7 @@ class OptMaster(object):
             init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff.get(node))
             init_attrs('trim_infinity_before_statistic', self.hparams.trim_infinity_before_statistic.get(node))
             init_attrs('trigger_float_op', self.hparams.trigger_float_op.get(node))
+            init_attrs('optimize_wdc_for_x2', self.hparams.optimize_wdc_for_x2.get(node))
             if node.type in AIFF_AHEAD_SHIFT_OP and self.hparams.remain_shift != '':
                 init_attrs('remain_shift', self.hparams.remain_shift.get(node))
             if node.type == OpType.Concat:
@@ -242,22 +230,12 @@ class OptMaster(object):
             node.attrs['batch_size_in_IR'] = self.batch_size_in_IR
             node.attrs['calculate_running_time'] = False
 
-            # check if each op exists in registered dict
-            from AIPUBuilder.Optimizer.framework import OP_DICT, QUANT_OP_DICT
-            if node.type not in OP_DICT:
-                OPT_ERROR('unsupported op "%s", can not find it in OP_DICT, please implement this op firstly' % str(
-                    node.type))
-            if node.type not in QUANT_OP_DICT:
-                OPT_ERROR(
-                    'unsupported op "%s", can not find it in QUANT_OP_DICT, please implement this op firstly' % str(
-                        node.type))
-
         # do a forward to check graph firstly and init placeholders,
         # force each op to be able to handle all zero inputs.
-        inputs = []
         if not (self.hparams.skip_optimization and self.hparams.eval_optimized_model) and \
                 ((hasattr(self.g, 'compat_quantized_model') and not self.g.compat_quantized_model) or not hasattr(
                     self.g, 'compat_quantized_model')):
+            inputs = []
             for inp in self.g.input_tensors:
                 shape = list(inp.ir_shape)
                 dtype = inp.dtype
@@ -299,7 +277,6 @@ class OptMaster(object):
         self.quantize()
         self.collect_information_for_debug()
         self.graph_optimize_stage3()
-
         self.graph_param_show()
 
     def graph_param_show(self, *args):
@@ -369,34 +346,8 @@ class OptMaster(object):
 
         ################################################################
         #  insert pad op for avgpool when count_include_pad=ceil_mode=True zp!=0
-        self.g.quantgraph.insert_pad_op_ahead(
-            condition_func=lambda node, parent_node, edge_tensor: node.type in OP_NEED_ADD_PAD_AVOID_ASYNC_DIVIDE and
-            node.get_param('ceil_mode', optional=True,
-                           default_value=False) == True and
-            node.get_param('count_include_pad', optional=True,
-                           default_value=False) == True and
-            node.get_param('method') == 'AVG' and node.outputs[
-                0].zerop != 0)
-
-        ################################################################
-        # transform useless op to lightweight reshape op
-        need_replace_ops = []
-        for n in self.g.quantgraph.nodes:
-            if n != None:
-                if (n.type == OpType.Cast and n.parents[0].attrs['q_mode_activation'] == n.attrs[
-                    'q_mode_activation'] and len(n.inputs) > 0 and len(n.outputs) > 0 and n.inputs[0].dtype ==
-                    n.outputs[0].dtype) \
-                        or (n.type == OpType.FakeQuantWithMinMaxVars):
-                    # create reshape node
-                    transform_op = PyNode(n.name, OpType.Reshape)
-                    transform_op.additional = True
-                    # set attrs and params
-                    transform_op.attrs.update(n.attrs.clone())
-                    transform_op.params['shape'] = n.outputs[0].ir_shape
-                    # record pairs
-                    need_replace_ops.append((n, transform_op))
-        for old, new in need_replace_ops:
-            self.g.quantgraph.replace_node_safely(old, new)
+        from AIPUBuilder.Optimizer.passes.insert_op import InsertPadOp
+        InsertPadOp(self.g.quantgraph, self.hparams)()
 
         ##############seperate featuremap ############################
         tiling_list = re.findall(r'\d+', self.hparams.featuremap_tiling_param)
@@ -449,7 +400,7 @@ class OptMaster(object):
         for node in deleted_nodes:
             self.g.quantgraph.remove_node(node)
 
-        optimization_stage3(self.g, self.hparams)
+        optimization_stage3(self.g.quantgraph, self.hparams)
 
         self.graph_optimize_stage3_flag = True
 
@@ -463,7 +414,8 @@ class OptMaster(object):
 
         if os.path.exists(self.hparams.statistic_file):
             # load statistic info from file
-            self.g.load_statistic_info(self.hparams.statistic_file)
+            ignore_missing = str(self.hparams.ignore_missing_statistic).lower() == "true"
+            self.g.load_statistic_info(self.hparams.statistic_file, ignore_missing)
         # elif self.ts_min_file=='' or self.ts_max_file=='':
         else:
             if self.calibration_dataloader is not None:
@@ -613,11 +565,15 @@ class OptMaster(object):
             for n in qg.nodes:
                 cstr = ""
                 mstr = ""
+                dynamic_top_shape = "["
                 for t in n.outputs:
-                    cstr += f"{t.similarity}, "
-                    mstr += f"{t.mse}, "
-                n.params['_cos'] = cstr
-                n.params['_mse'] = mstr
+                    cstr += f"{t.similarity},"
+                    mstr += f"{t.mse},"
+                    dynamic_top_shape += f"{t.attrs['dynamic_shape']}" if 'dynamic_shape' in t.attrs else f"{t.ir_shape}" + f","
+                n.params['D_cos'] = cstr[:-1]
+                n.params['D_mse'] = mstr[:-1]
+                n.params['D_dynamic_shape'] = dynamic_top_shape[:-1] + "]"
+                n.params['D_layer_id'] = n.attrs.get('layer_id', 'unknown')
 
         qg.serialize(name + ".txt", name + ".bin")
 
@@ -671,7 +627,7 @@ class OptMaster(object):
             node_attrs[node.name]['just_for_display']['optimization_info'] = str(node.attrs['optimization_info'])
             node_attrs[node.name]['just_for_display'][
                 'brief_info'] = 'layer_id = %s, layer_type = %s, similarity=%s, MSE=%s' % (
-                node.attrs['layer_id'], str(node.type), similarity_str, mse_str)
+                node.attrs['layer_id'], str(node.type), similarity_str[:-2], mse_str[:-2])
         opt_config_file = os.path.join(self.hparams.output_dir, "%s_%s" %
                                        (self.hparams.model_name, DEFAULT_CONFIG_FILE))
         make_path(opt_config_file)
@@ -910,11 +866,15 @@ class OptMaster(object):
             if self.g.quantgraph is None:
                 self.g.quantgraph = self.g.clone()
                 QuantizeGraph.deduce_quantization_infos(self.g.quantgraph)
+            self.g.quantgraph.enable_fit_dtype()
             _metric(self.g.quantgraph, self.g.quantgraph.forward,
                     self.validation_dataloader, self.q_metrics, msg="quant metric")
+            self.g.quantgraph.disable_fit_dtype()
 
         if self.hparams.eval_original_model:
+            self.g.enable_fit_dtype()
             _metric(self.g, self.g.forward, self.validation_dataloader, self.f_metrics, True, msg="float metric")
+            self.g.disable_fit_dtype()
 
     @opt_workflow_register
     def qtlib_optimize(self):

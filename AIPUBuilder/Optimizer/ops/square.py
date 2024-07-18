@@ -3,44 +3,28 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+import AIPUBuilder.Optimizer.ops.activation as activation_module
 import torch
 
 
 @quant_register(OpType.Square)
 def square_quantize(self, *args):
-    q_mode_activation = self.attrs["q_mode_activation"]
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
-    q_bits_activation = self.attrs["q_bits_activation"]
-
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    out.qbits = q_bits_activation
-    out_sign = False or self.force_dtype_int
-    dev = inp.betensor.device
-    out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-        out, q_mode_activation, out.qbits, out_sign)
-    lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
-    lut = torch.square(lut)
-    lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/square_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
-    out.qinvariant = False
+    self.attrs['lambda_func'] = torch.square
+    self.attrs['out_signed'] = False or self.force_dtype_int
+    activation_module.unknown_quantize(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('out_signed')
 
 
 @op_register(OpType.Square)
 def square(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    if self.quantized:
-        x = inp.betensor
-        x = x - inp.qmin
-        lut = self.constants["lut"].betensor
-        x = torch.reshape(x, (-1,))
-        y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
-            self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
-        out.betensor = torch.reshape(y, inp.betensor.shape)
-    else:
-        out.betensor = torch.square(inp.betensor)
-    return out.betensor
+    self.attrs['lambda_func'] = torch.square
+    self.outputs[0].betensor = activation_module.unknown_activation(self, *args)
+    self.attrs.pop('lambda_func')
+    return self.outputs[0].betensor
+
+
+@approx_register(OpType.Square)
+def square_approx(self, *args):
+    # By default, it is calculated directly on AIFF
+    self.params['is_perf_mode'] = True

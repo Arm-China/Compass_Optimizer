@@ -25,11 +25,6 @@ def adaround_global_calibration(g, cdataloader, mparams, mscopes):
 
 
 def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, beta_start, beta_end, warm_start, mscopes):
-    def is_in_scopes(layer_n):
-        if len(mscopes) < 1:
-            return True
-        else:
-            return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
 
     class QNodeModule (torch.nn.Module):
         def __init__(self, n, qn):
@@ -90,9 +85,6 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                 return (1.0 - (2 * h_alpha - 1).abs().pow(beta)).sum() * reg_param
     # prevent deleting intermediate tensors
     g.ref_count_tensors = {}
-
-    # prevent from fit_dtype which will cause backward issues
-    g.enable_fit_dtype(False)
 
     qg = g.clone()
     qg.clear_tensor_quantization_attrs()
@@ -172,7 +164,7 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                     cached_float_tensors[ot.name] = ot.betensor
             # apply adaround on current layer
             unquantifiable = n.get_param('unquantifiable', optional=True, default_value=False)
-            if 'weights' in n.constants and not unquantifiable and n.type not in [OpType.GRUv3, OpType.GRUv1] and is_in_scopes(n):
+            if 'weights' in n.constants and not unquantifiable and n.type not in [OpType.GRUv3, OpType.GRUv1] and mscopes.get(n):
                 qmodule = QNodeModule(n, qn)
                 optim = torch.optim.Adam([qmodule.alpha], lr=lrate)
                 cur_iter = 0
@@ -304,4 +296,3 @@ def _adaround(g, cdataloader, batches, epochs, batch_size, lrate, reg_param, bet
                     t.betensor = torch.zeros(ss, device=t.betensor.device)
             reset_layer_tensors(n)
             reset_layer_tensors(qn)
-    g.enable_fit_dtype(True)

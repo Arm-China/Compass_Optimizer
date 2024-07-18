@@ -15,13 +15,17 @@ class TopKMetric(OptBaseMetric):
     This plugin defaultly computes Top1.
     """
 
-    def __init__(self, K='1'):
+    def __init__(self, K='1', with_argmax=False):
         self.correct = 0
         self.total = 0
-        self.K = int(K)
+        self.K = int(K) if not with_argmax else 1
+        self.with_argmax = with_argmax
 
     def __call__(self, pred, target):
-        _, pt = torch.topk(pred[0].reshape([pred[0].shape[0], -1]), self.K, dim=-1)  # NHWC
+        if self.with_argmax:
+            pt = pred[0].reshape([pred[0].shape[0], -1]).cpu().numpy().astype('int32')
+        else:
+            _, pt = torch.topk(pred[0].reshape([pred[0].shape[0], -1]), self.K, dim=-1)  # NHWC
         for i in range(target.numel()):
             if target[i] in pt[i]:
                 self.correct += 1

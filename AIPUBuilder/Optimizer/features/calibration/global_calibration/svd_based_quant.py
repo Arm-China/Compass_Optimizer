@@ -5,6 +5,9 @@ from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.logger import tqdm, OPT_ERROR
 import torch
 import sys
+from torch.nn import MSELoss as mseloss
+import torch.nn as nn
+from AIPUBuilder.Optimizer.ops.activation import with_activation_out_is_signed
 
 
 def svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes):
@@ -17,13 +20,17 @@ def svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes):
     msg = (
         f"svd_based_search_scale with mode={int(mode)} alpha={alpha}, "f"beta={beta}, nsteps={nsteps}, thresh={thresh}")
     OPT_INFO(msg)
-    oplist = (set(), set(), set())
+    from AIPUBuilder.Optimizer.config import PerNodeFieldDict
+    dpdict = PerNodeFieldDict(False)
+    oplist = (dpdict, dpdict, dpdict, dpdict)
     if int(mode) <= 0:
-        oplist = (mscopes, set(), set())
+        oplist = (mscopes, dpdict, dpdict, dpdict)
     elif int(mode) == 1:
-        oplist = (set(), mscopes, set())
-    elif int(mode) >= 2:
-        oplist = (set(), set(), mscopes)
+        oplist = (dpdict, mscopes, dpdict, dpdict)
+    elif int(mode) == 2:
+        oplist = (dpdict, dpdict, mscopes, dpdict)
+    elif int(mode) >= 3:
+        oplist = (dpdict, dpdict, dpdict, mscopes)
     _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, oplist)
 
 
@@ -53,9 +60,10 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         return fmin, fmax
 
     def get_denoise_max_min(out):
-        have_inf = out.betensor.float() < -32768
-        mvalue = have_inf*-127
-        filt_out = out.betensor.float()*(~have_inf)+mvalue
+        # have_inf = (out.betensor.float() < -32768)
+        # mvalue = have_inf*-127
+        # filt_out = out.betensor.float()*(~have_inf)+mvalue
+        filt_out = torch.clamp(out.betensor.float(), min=-32767)
         U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
         percent = thresh
         S_sorted = S.flatten().sort()[0]
@@ -63,7 +71,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         the = S_sorted[int(slen*percent)]
         while the > 1 and percent > 0.01:
             the = S_sorted[int(slen*percent)]
-            percent = percent - 0.004
+            percent = percent - 0.002
         if the > 1.56:
             the = 1.56
         while the < 0.0001 and percent < 0.2:
@@ -87,10 +95,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
     def check_node_if_optimization(k, nodes, oplist):
         layer_n = nodes[k]
         mscopes = oplist
-        if len(mscopes) < 1:
-            return False
-        else:
-            return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
+        return mscopes.get(layer_n)
 
     def get_best_scale(out, bmin, bmax, quant_mode, op_list):
 
@@ -99,37 +104,131 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         have_inf = out.betensor.float() < -32768
         mvalue = have_inf*-127
         filt_out = out.betensor.float()*(~have_inf)+mvalue
-        U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
+        # U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
+        S = torch.abs(torch.fft.fft(filt_out))
         denoise_out = PyTensor('denoise_out', out.ir_shape, out.dtype)
         denoise_out.min, denoise_out.max = bmin, bmax
 
         scale, zerop, _, _, _ = get_linear_quant_params_from_tensor(denoise_out, quant_mode, out.qbits, out_signed)
 
-        best_s = scale
+        best_s = 1
+        scale = scale.item()
         # if str(n.type)[7:].lower() in op_list:
         zero = zerop
         if op_list:
 
-            init_s = scale*scale
+            init_s = scale
             qbetensor = linear_quantize_clip(filt_out, init_s, zerop, q_min, q_max)
             deqbetenor = linear_dequantize(qbetensor, init_s, zerop)
-            qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
-            min_dist = torch.dist(S, qS)
+            # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
+            qS = torch.abs(torch.fft.fft(deqbetenor))
+            min_dist = MSE(S, qS)
             # zero = torch.clamp(zerop.round(), -2 ** (out.qbits - 1) + 1, 2 ** (out.qbits - 1))
             # TODO: support per-channel
             if is_torch_tensor_with_multi_data(scale):
                 OPT_ERROR(f"svd now only support per-tensor quantization.")
-            start, end = alpha * scale.item(), beta * scale.item()
-            for s in torch.linspace(start, end, nsteps):
+            start, end = alpha, beta
+            for f in torch.linspace(start, end, nsteps):
+                denoise_out.min, denoise_out.max = bmin*f, bmax*f
+                s, zerop, _, _, _ = get_linear_quant_params_from_tensor(denoise_out, quant_mode, out.qbits, out_signed)
                 qbetensor = linear_quantize_clip(filt_out, s, zerop, q_min, q_max)
                 deqbetenor = linear_dequantize(qbetensor, s, zerop)
-                qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
-                dist = torch.dist(S, qS)
+                qS = torch.abs(torch.fft.fft(deqbetenor))
+                # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
+                # dist = torch.dist(S, qS)
+                dist = MSE(S, qS)
                 if dist < min_dist:
                     min_dist = dist
-                    best_s = s
+                    best_s = f
 
-        return best_s, zero
+        return bmin*best_s, bmax*best_s
+
+    def linear_op_quantize_param_search(n, alpha, beta, nsteps):
+        q_mode_bias = n.attrs["q_mode_bias"]
+        q_mode_weight = n.attrs["q_mode_weight"]
+        q_mode_activation = n.attrs["q_mode_activation"]
+        if q_mode_weight != q_mode_bias:
+            OPT_FATAL("Currently quantization mode of weight (q_mode_weight) and bias (q_mode_bias) must be the same!")
+        q_bits_weight = n.attrs["q_bits_weight"]
+        q_bits_bias = n.attrs["q_bits_bias"]
+        q_bits_activation = n.attrs["q_bits_activation"]
+        multiplier_bits = n.get_attrs('multiplier_bits', optional=True, default_value=q_bits_activation)
+
+        inp = n.inputs[0]
+
+        w = n.constants["weights"]
+
+        key_axis = w.key_axis
+
+        out = n.outputs[0]
+        out_signed = with_activation_out_is_signed(n) or n.force_dtype_int
+        out.qbits = q_bits_activation
+
+        out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
+            out, q_mode_activation, q_bits_activation, is_signed=out_signed)
+        out.qinvariant = False
+
+        inp_scale = inp.scale
+
+        # simulate result
+
+        MSE = mseloss()
+        best_s = 1
+        w.qbits = q_bits_weight
+        w.qinvariant = False
+
+        w_sim = PyTensor('w_sim', w.ir_shape, w.ir_dtype)
+
+        sim = 0
+        best_mse = 1000
+        np.random.seed(10000+int(n.attrs['layer_id']))
+
+        # for s in torch.linspace(w.broadcast_scale.item()*0.65, w.broadcast_scale.item()*1.65, 100) :
+        for f in torch.linspace(alpha, beta, nsteps):
+            btensor = torch.tensor(np.random.randint(w.qmin, w.qmax, inp.ir_shape), device=inp.device)
+            w_sim.min, w_sim.max = w.min*f, w.max*f
+            s, w_sim.zerop, w_sim.qmin, w_sim.qmax, w_sim.dtype = get_linear_quant_params_from_tensor(
+                w_sim, q_mode_weight, q_bits_weight, is_signed=True)
+            # btensor = torch.tensor(np.random.randint(w.qmin,w.qmax,inp.ir_shape),device=inp.device)
+            # fbetensor = torch.tensor(np.random.rand(w.qmin,w.qmax,inp.ir_shape),device=inp.device)
+            weights = linear_quantize_clip(w.betensor, s,  w_sim.zerop, w.qmin, w.qmax)
+            if 'biases' in n.constants:
+                b = n.constants["biases"]
+                b.scale = inp_scale * s
+                b.zerop = 0
+                b.qmin = -2 ** (q_bits_bias - 1)
+                b.qmax = 2 ** (q_bits_bias - 1) - 1
+                b.qbits = q_bits_bias
+                bias = linear_quantize_clip(b.betensor, b.scale, 0, b.qmin, b.qmax)
+
+                b.dtype = bits2dtype(b.qbits, is_signed=True)
+                b.qinvariant = False
+            local_rescale = out.scale / (inp_scale * s)
+            do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(local_rescale,
+                                                                                              mult_bits=multiplier_bits,
+                                                                                              force_shift_positive=n.force_shift_positive)
+            x = nn.functional.linear(btensor.double(), weights, bias,)
+            x = linear_requantize(x, do_scale, do_shift, out.broadcast_zerop,
+                                  out.qmin, out.qmax, key_axis)
+            fout = linear_dequantize(x, out.scale, out.zerop, key_axis=None)
+
+            fbtensor = linear_dequantize(btensor, inp_scale, n.inputs[0].broadcast_zerop, key_axis=None)
+            fx = nn.functional.linear(fbtensor, w.betensor.float(), b.betensor.float(),)
+
+            # qS = torch.abs(torch.fft.fft(fout))
+            # S = torch.abs(torch.fft.fft(fx))
+            # qS = nn.functional.softmax(fout, dim=-1)
+            # S = nn.functional.softmax(fx, dim=-1)
+            # U, S, Vh = torch.linalg.svd(fout, full_matrices=False)
+            # qU, qS, qVh = torch.linalg.svd(fx, full_matrices=False)
+            # sim =cosine_distance(qS,S)
+            mse = MSE(fx, fout).item()
+            if mse < best_mse:
+                best_mse = mse
+                best_s = f
+
+        w.min = w.min*best_s
+        w.max = w.max*best_s
 
     def filter(input, init_state, alpha):
         yn_1 = init_state
@@ -150,7 +249,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
     g.ref_count_tensors = {}
 
     vdataloader = copy.deepcopy(cdataloader)
-    dataset_len = len(vdataloader.dataset.data)
+    dataset_len = len(vdataloader.dataset)
     start = 0
     end = dataset_len
     with tqdm(total=dataset_len, desc='svd_based_search_scale', file=sys.stdout, leave=True) as pbar:
@@ -163,6 +262,8 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         # group_norm_op = [OpType.LayerNorm,OpType.InstanceNorm,OpType.GroupNorm]
         tscale = torch.ones(dataset_len, len(g.nodes), 2)*-1
         need_adjust_nodes = []
+        MSE = mseloss()
+        # cos_sim = nn.CosineSimilarity(eps=1e-8)
         # prevent deleting intermediate tensors
         g.ref_count_tensors = {}
         for i, sample in enumerate(vdataloader):
@@ -188,16 +289,16 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
 
                     out = n.outputs[0]
 
-                    if optimized_flag and mode > 0:
+                    if optimized_flag and mode > 0 and mode < 3:
                         fmin, fmax = get_denoise_max_min(out)
                         if mode == 1:
-                            best_s, zerop = get_best_scale(out, fmin, fmax, quant_mode, optimized_flag)
-                            symmetric = QuantMode.is_symmetric(quant_mode)
+                            omin, omax = get_best_scale(out, fmin, fmax, quant_mode, optimized_flag)
+                            # symmetric = QuantMode.is_symmetric(quant_mode)
 
-                            out_signed = is_signed(n.outputs[0].dtype)
-                            fmin, fmax = scale2minmax(best_s, zerop, out_signed, q_bits_activation, symmetric)
-                        tscale[i, k, 0] = fmin
-                        tscale[i, k, 1] = fmax
+                            # out_signed = is_signed(n.outputs[0].dtype)
+                            # fmin,fmax = scale2minmax(best_s, zerop,out_signed, q_bits_activation,symmetric)
+                        tscale[i, k, 0] = omin
+                        tscale[i, k, 1] = omax
                         need_adjust_nodes.append(k)
             pbar.update(1)
 
@@ -226,21 +327,24 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             #                                        check_node_if_optimization(k, g.nodes, oplist[0]))
             #         out_signed = is_signed(out.dtype)
             #         out.min,out.max = scale2minmax(best_s, zerop,out_signed, q_bits_activation,False)
-
-        for k, n in enumerate(g.nodes):
-            # n.forward()
-            if n.outputs[0].betensor.ndim <= 1:
-                continue
-            if check_node_if_optimization(k, g.nodes, oplist[0]):
-                quant_mode = n.attrs["q_mode_activation"]
-                q_bits_activation = n.attrs["q_bits_activation"]
-                symmetric = QuantMode.is_symmetric(quant_mode)
-                fmax = n.outputs[0].max
-                fmin = n.outputs[0].min
-                best_s, zerop = get_best_scale(n.outputs[0], fmin, fmax, quant_mode, True)
-                out_signed = is_signed(n.outputs[0].dtype)
-                fmin, fmax = scale2minmax(best_s, zerop, out_signed, q_bits_activation, symmetric)
-                n.outputs[0].max = fmax
-                n.outputs[0].min = fmin
-
+        if oplist[0]:
+            for k, n in enumerate(g.nodes):
+                # n.forward()
+                if n.outputs[0].betensor.ndim <= 1:
+                    continue
+                if check_node_if_optimization(k, g.nodes, oplist[0]):
+                    quant_mode = n.attrs["q_mode_activation"]
+                    q_bits_activation = n.attrs["q_bits_activation"]
+                    symmetric = QuantMode.is_symmetric(quant_mode)
+                    fmax = n.outputs[0].max
+                    fmin = n.outputs[0].min
+                    omin, omax = get_best_scale(n.outputs[0], fmin, fmax, quant_mode, True)
+                    # out_signed = is_signed(n.outputs[0].dtype)
+                    # fmin,fmax = scale2minmax(best_s, zerop,out_signed, q_bits_activation,symmetric)
+                    n.outputs[0].max = omax
+                    n.outputs[0].min = omin
+        if oplist[3]:
+            for k, n in enumerate(g.nodes):
+                if check_node_if_optimization(k, g.nodes, oplist[3]):
+                    linear_op_quantize_param_search(n, alpha, beta, nsteps)
         pbar.refresh()

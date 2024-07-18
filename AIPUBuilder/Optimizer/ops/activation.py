@@ -99,6 +99,49 @@ def unknown_quantize(self, *args):
     out.qinvariant = False
 
 
+def unknown_approx(self, *args):
+    inp = self.inputs[0]
+    dev = inp.device
+    approx_params = self.get_attrs('approx_params', optional=True, default_value=[0])
+    method = int(approx_params[0] if len(approx_params) > 0 else 0)
+    min_compatible_zhouyi_target = self.attrs["min_compatible_zhouyi_target"].upper()
+    lut_items_in_bits = Target.aiff_lut_items_in_bits(min_compatible_zhouyi_target)
+    if 1 == method and Target.optimized_target_level(min_compatible_zhouyi_target) >= 2:
+        q_mode_activation = self.attrs["q_mode_activation"]
+        use_dynamic_lut = len(approx_params) > 1 and approx_params[1] > 0
+        bak_min = inp.min
+        bak_max = inp.max
+        set_min_max_func = self.get_attrs('set_min_max', optional=True, default_value=None)
+        if set_min_max_func is not None:
+            inp.min, inp.max = set_min_max_func(inp, use_dynamic_lut)
+        out_sign = self.get_attrs('out_signed', optional=True, default_value=True)
+        index_scale, index_offset, _, _, _ = get_linear_quant_params_from_tensor(
+            inp, QuantMode.to_asymmetric(QuantMode.to_per_tensor(q_mode_activation)), lut_items_in_bits, out_sign)
+        inp.min = bak_min
+        inp.max = bak_max
+        lut = linear_dequantize(torch.arange(0, 2**lut_items_in_bits, device=dev), index_scale, index_offset)
+        value_offset = self.get_attrs('value_offset', optional=True, default_value=0)
+        func = self.get_attrs('lambda_func', optional=True, default_value=None)
+        if func is not None:
+            lut = func(lut) + value_offset
+        else:
+            OPT_WARN(
+                f"{self} Activation op method=UNKNOWN does not support float forward, and the output.tensor will directly use input.tensor")
+        lut = to_fp24(lut)
+        self.constants["lut"] = PyTensor(self.name + "/plh_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        self.params['is_perf_mode'] = True
+        self.params['lut_mode'] = 'NORMAL'
+        self.params['index_scale_value'] = index_scale
+        self.params['index_scale_type'] = Dtype.FP32
+        self.params['index_offset_value'] = index_offset
+        self.params['index_offset_type'] = Dtype.FP32
+        self.params['value_offset_value'] = value_offset
+        self.params['value_offset_type'] = Dtype.FP32
+    else:
+        # not suit for aiff, need use tpc to implement a high accuracy version
+        self.params['is_perf_mode'] = False
+
+
 #                     lower_case_method_name        output_type_is_signed         forward_func     quantize_func
 g_activation_method_supported = {'sigmoid':         (False,                       sigmoid_forward, sigmoid_quantize),
                                  'tanh':            (True,                        tanh,            tanh_quantize),

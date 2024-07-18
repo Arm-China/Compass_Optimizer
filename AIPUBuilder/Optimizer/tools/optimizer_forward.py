@@ -85,7 +85,9 @@ class OptForward(object):
         output_data = []
         input_data = self.check_input_data(data)
         if input_data:
+            self.optimizer.g.enable_fit_dtype()
             out = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
+            self.optimizer.g.disable_fit_dtype()
             for o in out:
                 if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
                     o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop).cpu().numpy()
@@ -97,6 +99,86 @@ class OptForward(object):
                 output_data.append(o_data)
 
         return output_data
+
+    def init_exe_debugger(self):
+        from AIPUBuilder.core import Graph
+        from AIPUBuilder.executor.engine import get_engine
+        # Get all op types
+        self.op_dict = {}
+        for node in self.optimizer.g.nodes:
+            if node.type in self.op_dict:
+                self.op_dict[node.type] += 1
+            else:
+                self.op_dict[node.type] = 1
+        OPT_INFO("Initializing Executor debugger... Op Types:")
+        OPT_INFO(f"{str(self.op_dict)}")
+        self.aipugraph = Graph.parse(self.ir_txt, self.ir_bin)
+        self.engine = get_engine("_GT")
+        self.aipunode = {}
+        for node in self.aipugraph.nodes:
+            self.aipunode[node.name] = node
+
+    def exe_debug_forward_by_replace(self, data, op_list=None, exclude=False, transfer_to_float=False, keep_tensors=False):
+        from AIPUBuilder.core.tensor import PythonObjectWrapper
+        # Op in op_list will be executed via GT engine, except for Input
+        # if exclude, then Op not in op_list will be executed via GT engine.
+        if OpType.Input in op_list:
+            if not exclude:
+                op_list.remove(OpType.Input)
+            else:
+                op_list.append(OpType.Input)
+        for i, t in enumerate(self.optimizer.g.input_tensors):
+            inp = PyTensor("tmp", data[i]).betensor
+            t.betensor = inp
+        assert len(self.optimizer.g.nodes) == len(self.aipugraph.nodes)
+
+        refs = {}
+        for node in self.optimizer.g.nodes:
+            for parent in node.parents:
+                try:
+                    refs[parent.name] += 1
+                except:
+                    refs[parent.name] = 1
+        with tqdm(total=len(self.optimizer.g.nodes), file=sys.stdout, leave=True) as pbar:
+            for i in range(len(self.optimizer.g.nodes)):
+                opt_node = self.optimizer.g.nodes[i]
+                exe_node = self.aipunode[opt_node.name]
+                if (not exclude and not opt_node.type in op_list) or\
+                        (exclude and opt_node.type in op_list):
+                    opt_node.forward()
+                else:
+                    for i, inp in enumerate(opt_node.inputs):
+                        exe_node.inputs[i]._attrs['_betensor'] = PythonObjectWrapper(inp.betensor)
+                    self.engine[exe_node.type]["_all"](exe_node)
+                    for i, oup in enumerate(opt_node.outputs):
+                        oup.betensor = exe_node.outputs[i].betensor
+                    for inp in exe_node.inputs:
+                        inp.remove_betensor()
+                    for oup in exe_node.outputs:
+                        oup.remove_betensor()
+                for parent in opt_node.parents:
+                    refs[parent.name] -= 1
+                    if refs[parent.name] == 0:
+                        for oup in parent.outputs:
+                            if keep_tensors or (oup in self.optimizer.g.output_tensors):
+                                pass
+                            else:
+                                del oup.betensor
+                                oup.betensor = PyTensor('tmp').betensor
+                pbar.update(1)
+            pbar.refresh()
+        outputs = self.optimizer.g.output_tensors
+        result = []
+        for o in outputs:
+            if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
+                o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop).cpu().numpy()
+            else:
+                # keep the ir_dtype
+                o_data = o.betensor.cpu().numpy().astype(dtype2nptype(o.ir_dtype))
+            if len(o.ir_shape) <= 1:
+                o_data = o_data.reshape(o.ir_shape)
+            result.append(o_data)
+        return result
 
     def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False):
         """
@@ -114,7 +196,7 @@ class OptForward(object):
         self.optimizer.g.current_batch_idx = 0
         dequantized_data = []
         for data, inp_t in zip(input_data, input_tensors):
-            d = linear_dequantize(torch_tensor(data).long(), inp_t.broadcast_scale, inp_t.broadcast_zerop)
+            d = linear_dequantize(PyTensor('null', data).betensor.long(), inp_t.broadcast_scale, inp_t.broadcast_zerop)
             dequantized_data.append(d)
         out = self.forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
         return out

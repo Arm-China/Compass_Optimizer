@@ -4,7 +4,6 @@
 from AIPUBuilder.Optimizer.utils import *
 
 
-@passes_run
 def check_quantization_info(graph: PyGraph, config=None):
     """
     check the 16bits quantization should be symmetric

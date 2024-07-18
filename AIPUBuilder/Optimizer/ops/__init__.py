@@ -175,3 +175,4 @@ from . import col2im
 from . import batchtospaceNd
 from . import adativepool
 from . import filterbox
+from . import atanh

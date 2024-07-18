@@ -64,7 +64,11 @@ def pooling3D(self, *args):
     on = self.inputs[0].shape[0]
     oc = self.outputs[0].ir_shape[-1]
 
-    inp = torch.nn.functional.pad((inpp + self.inputs[0].zerop) if self.quantized else inpp, padding, value=pvalue)
+    if self.quantized and method == 'AVG' and count_include_pad:
+        inp_zerop = self.inputs[0].zerop
+    else:
+        inp_zerop = 0
+    inp = torch.nn.functional.pad((inpp + inp_zerop), padding, value=pvalue)
     if (extra_pz > 0 or extra_ph > 0 or extra_pw > 0) and original_ceil_mode:
         ceil_mode = False
         inp = torch.nn.functional.pad(inp, (0, extra_pw, 0, extra_ph, 0, extra_pz), value=pvalue)
@@ -86,6 +90,7 @@ def pooling3D(self, *args):
         if self.quantized:
             outt = torch.clamp(outt, out.qmin, out.qmax)
     else:  # avgpool
+        out_zerop = self.outputs[0].zerop if count_include_pad else 0
         if dilation[0] > 1 or dilation[1] > 1 or dilation[2] > 1:
             n, c, d, h, w = inp.shape
             kz, kh, kw = kernel_size
@@ -129,7 +134,7 @@ def pooling3D(self, *args):
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
                     1. / y_area, mult_bits=8, force_shift_positive=False)
                 outt = linear_requantize(y_sum, do_scale, do_shift,
-                                         self.outputs[0].zerop, out.qmin, out.qmax)
+                                         out_zerop, out.qmin, out.qmax)
             else:
                 outt = y_sum / y_area
         else:
@@ -219,13 +224,10 @@ def pooling3D(self, *args):
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(1. / y_area, mult_bits=8,
                                                                                                   force_shift_positive=False)
                 outt = torch.multiply(torch.multiply(outt, do_scale), torch.pow(0.5, do_shift))
-                outt = torch.clamp(torch.round(outt), -2 ** 31, 2 ** 31)
+                outt = torch.clamp(torch.round(outt) - out_zerop, out.qmin, out.qmax)
 
-                outt = torch.clamp(torch.round(outt), out.qmin, out.qmax)
-
-    outt = outt.permute(0, 2, 3, 4, 1)
+    out.betensor = outt.permute(0, 2, 3, 4, 1)
     # outt[outt != outt] = 0
-    out.betensor = (outt - self.outputs[0].zerop) if self.quantized else outt
     return out.betensor
 
 

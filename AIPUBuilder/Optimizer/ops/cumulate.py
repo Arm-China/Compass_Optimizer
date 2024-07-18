@@ -124,9 +124,9 @@ def cumulate_quantize(self, *args):
         OPT_FATAL("Currently not support per-channel quantization of activations")
 
     out_signed = is_signed(inp.dtype) or self.force_dtype_int
-    out.qbits = q_bits_activation
+    out.qbits = inp.qbits  # q_bits_activation
     out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-        out, q_mode_activation, q_bits_activation, is_signed=out_signed)
+        out, q_mode_activation, out.qbits, is_signed=out_signed)
     out.qinvariant = False
 
     if method == 'SUM':
@@ -139,8 +139,8 @@ def cumulate_quantize(self, *args):
         self.params["scale_value"] = int(do_scale)
         self.params["scale_type"] = do_scale_type
     elif method == 'PROD':
-        input_scale = 1 / inp.scale
-        local_scale = out.scale
+        input_scale = 1 / inp.scale.item()
+        local_scale = out.scale.item()
         input_shape = list(inp.ir_shape)
         step = 1
         for ax in axis:

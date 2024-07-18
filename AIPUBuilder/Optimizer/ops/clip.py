@@ -11,7 +11,8 @@ from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
 @op_register(OpType.Clip)
 def clip(self, *args):
     inp_t = self.inputs[0].betensor
-    out_max, out_min = min(self.get_param('clip_max'), OPT_INT_MAX), max(float(self.get_param('clip_min')), OPT_INT_MIN)
+    out_max, out_min = min(self.get_param('clip_max'), dtype2range(torch_type2dtype(inp_t.dtype))[1]), max(
+        float(self.get_param('clip_min')), dtype2range(torch_type2dtype(inp_t.dtype))[0])
     if not self.quantized:
         out_t = torch.clamp(inp_t, out_min, out_max)
     else:

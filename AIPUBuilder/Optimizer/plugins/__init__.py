@@ -31,6 +31,7 @@ from . import aipubt_dataset_tensorfromnumpymultiinput
 from . import aipubt_dataset_stable_diffusion_unet
 from . import aipubt_dataset_bevformer
 from . import aipubt_dataset_llama2
+from . import aipubt_dataset_cocokp
 
 # for built in metric
 from . import aipubt_metric_CosDistance
@@ -68,12 +69,13 @@ from . import aipubt_metric_MaxAbsError_with_seqlen
 from . import aipubt_metric_roc
 from . import aipubt_metric_imdb
 from . import aipubt_metric_LMHead
+from . import aipubt_metric_cocokeypoint
 
 try:
     from AIPUBuilder.Optimizer.plugins.aipubt_metric_bevformer import BEVFormerMetric
 except Exception as e:
     from AIPUBuilder.Optimizer.logger import OPT_DEBUG
-    OPT_DEBUG(f"import bevformermetric failed")
+    # OPT_DEBUG(f"import bevformermetric failed")
 
 # for built in op
 from . import aipubt_op_tile

@@ -3,7 +3,7 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
+import AIPUBuilder.Optimizer.ops.activation as activation_module
 import torch
 
 
@@ -15,49 +15,49 @@ register_optype('SELU')
 
 @op_register(OpType.SELU)
 def selu(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-
-    if self.quantized:
-        x = inp.betensor
-        x = x - inp.qmin
-        lut = self.constants["lut"].betensor
-        x = torch.reshape(x, (-1,))
-        y = lookup_lut_powerof2(x, lut, inp.qbits, False, dtype2bits(
-            self.constants["lut"].dtype), is_signed(self.constants["lut"].dtype))
-        out.betensor = torch.reshape(y, inp.betensor.shape)
-    else:
-        alpha = self.get_param("alpha")
-        gamma = self.get_param("gamma")
-        out.betensor = gamma*torch.nn.functional.elu(inp.betensor, alpha)
-        # out.betensor = torch.nn.functional.selu(inp.betensor)
-
-    return out.betensor
+    def approximated_float_forward(self,  inp_tensor):
+        if self.approximated and "lut" in self.constants:
+            lut = self.constants["lut"].betensor
+            out = lookup_float_index_lut(
+                inp_tensor, lut, self.params['index_scale_value'], self.params['index_offset_value'], mirror_mode=False, value_offset_for_mirror_mode=self.params['value_offset_value'])
+        else:
+            alpha = self.get_param("alpha")
+            gamma = self.get_param("gamma")
+            out = gamma*torch.nn.functional.elu(inp_tensor, alpha)
+        return out
+    self.attrs['lambda_func'] = lambda x: approximated_float_forward(self,  x)
+    self.outputs[0].betensor = activation_module.unknown_activation(self, *args)
+    self.attrs.pop('lambda_func')
+    return self.outputs[0].betensor
 
 
 @quant_register(OpType.SELU)
 def selu_quantize(self, *args):
-    inp = self.inputs[0]
-    out = self.outputs[0]
-    dev = inp.betensor.device
-    q_mode_activation = self.attrs["q_mode_activation"]
-
-    alpha = self.get_param("alpha")
-    gamma = self.get_param("gamma")
-    if QuantMode.is_per_channel(q_mode_activation) == True:
-        OPT_FATAL("Currently not support per-channel quantization")
-
-    q_bits_activation = self.attrs["q_bits_activation"]
-    out.qinvariant = False
-    out.qbits = q_bits_activation
-    out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
-        out, q_mode_activation, out.qbits, True)
-
-    lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
-    lut = gamma*torch.nn.functional.elu(lut, alpha)
-    lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/selu_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+    def selu_lambda(x): return float(self.get_param("gamma"))*torch.nn.functional.elu(x, float(self.get_param("alpha")))
+    self.attrs['lambda_func'] = selu_lambda
+    self.attrs['out_signed'] = True
+    activation_module.unknown_quantize(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('out_signed')
 
     self.params.pop('alpha')
     self.params.pop('gamma')
+
+
+@approx_register(OpType.SELU)
+def selu_approx(self, *args):
+    def set_min_max(inp, use_dynamic_lut):
+        import math
+        negative_limit = math.log(1e-5) - 2
+        # The value that crosses the boundary can be calculated based on the slope
+        return negative_limit, 4
+
+    def selu_lambda(x): return float(self.get_param("gamma"))*torch.nn.functional.elu(x, float(self.get_param("alpha")))
+
+    self.attrs['set_min_max'] = set_min_max
+    self.attrs['lambda_func'] = selu_lambda
+    self.attrs['out_signed'] = False
+    activation_module.unknown_approx(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('set_min_max')
+    self.attrs.pop('out_signed')

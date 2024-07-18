@@ -35,7 +35,7 @@ def LRN(self, *args):
             inputs_square = inputs_square.unsqueeze(1)
             padding = (0, 0, 0, 0, int(size / 2), int((size - 1) / 2))
             inp_square_with_pad = torch.nn.functional.pad(inputs_square, padding, mode='constant', value=0)
-            square_sum = torch.nn.functional.avg_pool3d(inp_square_with_pad,
+            square_sum = torch.nn.functional.avg_pool3d(inp_square_with_pad.float(),
                                                         kernel_size=(size, 1, 1),
                                                         stride=1,
                                                         padding=0,
@@ -49,7 +49,7 @@ def LRN(self, *args):
                 self.placeholders.append(ph0)
             self.placeholders[0].betensor = square_sum
         else:  # method == 'WITHIN_CHANNEL':
-            square_sum = torch.nn.functional.avg_pool2d(inputs_square,
+            square_sum = torch.nn.functional.avg_pool2d(inputs_square.float(),
                                                         kernel_size=size,
                                                         stride=1,
                                                         padding=int((size-1.0)/2),
@@ -150,7 +150,8 @@ def LRN_quantize(self, *args):
     lut_in_bits = 16
     lut_qmin, lut_qmax = bits2range(lut_in_bits, False)
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
-    lut = 1. / torch.pow(bias + alpha * (torch.linspace(lut_qmin, lut_qmax, steps=lsteps) / placeholder_scale), beta)
+    lut = 1. / torch.pow(bias + alpha * (torch.linspace(lut_qmin, lut_qmax,
+                         steps=lsteps, device=inp.device) / placeholder_scale), beta)
     lut = PyTensor(self.name+"/tmp", lut.cpu().numpy())
     lut.min = lut.betensor.min().item()
     lut.max = lut.betensor.max().item()

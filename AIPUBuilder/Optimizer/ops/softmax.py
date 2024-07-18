@@ -103,6 +103,7 @@ def softmax_approx(self, *args):
         lut = to_fp24(lut)
         self.constants["lut"] = PyTensor(self.name + "/fp24_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
         self.params['is_perf_mode'] = True  # use fast approximate implementation of AIFF as much as possible
+        self.params['lut_mode'] = 'EXP'
     else:
         # not suit for aiff, need use tpc to implement a higher accuracy version
         self.params['is_perf_mode'] = False
@@ -177,7 +178,7 @@ def softmax(self, *args):
         else:
             # 31->30: Adaptation the lut.max=1 case in android and these case lib would overflow using base_bits=31
             base_bits = 30 if lut.max() == 1 else 31
-            if shape_value_in_axis < 8 and in_size % 128 == 0:
+            if shape_value_in_axis < 8 and in_size % 128 == 0 and self.inputs[0].qbits <= 8:
                 scale_bits = torch.ceil(torch.log2(lut.max())).long()
                 enlarge_bits = base_bits - scale_bits
                 numerator = (y.long() << enlarge_bits) + (y_sum >> 1)

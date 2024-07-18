@@ -7,4 +7,3 @@ from AIPUBuilder.Optimizer.utils.files_utils import *
 from AIPUBuilder.Optimizer.utils.math_utils import *
 from AIPUBuilder.Optimizer.utils.string_utils import *
 from AIPUBuilder.Optimizer.utils.random_utils import *
-from AIPUBuilder.Optimizer.utils.passes_utils import *

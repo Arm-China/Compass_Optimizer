@@ -62,6 +62,7 @@ def nchw2nhwc(x):
 
 def is_signed(dt):
     dt_dict = {
+        Dtype.BOOL:     False,
         Dtype.FP16:     True,
         Dtype.FP32:     True,
         Dtype.FP64:     True,
@@ -79,6 +80,7 @@ def is_signed(dt):
         Dtype.ALIGNED_UINT12: False,
     }
     th_dict = {
+        torch.bool:        False,
         torch.bfloat16:    True,
         torch.float16:     True,
         torch.float32:     True,
@@ -102,6 +104,7 @@ def is_signed(dt):
 
 def is_float(dt):
     dt_dict = {
+        Dtype.BOOL:     False,
         Dtype.BFP16:    True,
         Dtype.FP16:     True,
         Dtype.FP32:     True,
@@ -120,6 +123,7 @@ def is_float(dt):
         Dtype.ALIGNED_UINT12: False,
     }
     th_dict = {
+        torch.bool:        False,
         torch.bfloat16:    True,
         torch.float16:     True,
         torch.float32:     True,
@@ -489,6 +493,7 @@ def torch_type2dtype(tp):
 
 def dtype2torch_type(tp):
     th_dict = {
+        Dtype.BOOL:         torch.bool,
         Dtype.BFP16:        torch.bfloat16,
         Dtype.FP16:         torch.float16,
         Dtype.FP32:         torch.float32,

@@ -88,7 +88,7 @@ def squareddifference(self, *args):
         diff = x0 - x1
         squared_diff = (diff * diff).long()
         # diff is in the range of int16, so the result after square is in the range of 32bit
-        squared_diff = torch.clamp(squared_diff, 0, 2**32-1)
+        squared_diff = torch.clamp(squared_diff, act_qmin, act_qmax)
         out.betensor = linear_requantize(squared_diff, out_scale, out_shift, out.zerop, out.qmin, out.qmax).long()
     else:
         minus = x0 - x1

@@ -5,7 +5,6 @@ from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
 
 
-@passes_run
 def decompose_nonmonotonic_activations(graph: PyGraph, config=None):
     nodes_removed = []
     for node in graph.nodes:

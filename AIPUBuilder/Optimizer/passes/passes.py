@@ -9,55 +9,53 @@ from . convert_resize_to_convolution import convert_resize_to_convolution
 from . decompose_nonmonotonic_activations_s1 import decompose_nonmonotonic_activations
 from . tune_op_extra_params_s1 import *
 from . check_quantization_info_s1 import check_quantization_info
-from . split_act_perchannel_matmul_s1 import split_matmul
+from . split_qkv_fc_s1 import split_qkv_fc
+from . detect_inf_mask_nodes import detect_inf_mask_nodes
 from . set_unquantifiable import set_unquantifiable
 from . unify_scales_for_multi_inputs_operator import opt_unify_scales_for_multi_inputs_operators
+from . optimize_x2_wdc import optimize_x2_wdc
+from . global_calibration_prepare import global_calibration_prepare
 from . insert_op import (InsertCastOp,
                          InsertQuantizeOp,
                          InsertDeQuantizeOp,
                          InsertPadOp)
-
-from AIPUBuilder.Optimizer.utils.passes_utils import PASSES
+from . absorb_cast_to_clip import absorb_cast_to_clip
 
 # =========================optimization stage 1 passes============================================
 
 
 def optimization_stage1(graph, config):
-    # notice the order of pass to run
-    _passes_to_run = [
-        'convert_resize_to_convolution',
-        'shrink_pow_exponent',
-        'decompose_nonmonotonic_activations',
-        'tune_op_complicated_activations',
-        'tune_op_softmax',
-        'merge_matmul_mul',
-        'check_quantization_info',
-        'tune_op_trigonometric_activations',
-    ]
-    for _pass in _passes_to_run:
-        PASSES[_pass](graph, config)
+    shrink_pow_exponent(graph, config)
+    if config.enable_pass_decompose_nonmonotonic_activations:
+        decompose_nonmonotonic_activations(graph, config)
+    if config.enable_pass_tune_op_complicated_activations:
+        tune_op_complicated_activations(graph, config)
+        tune_op_trigonometric_activations(graph, config)
+    if config.enable_pass_tune_op_softmax:
+        tune_op_softmax(graph, config)
+    if config.enable_pass_merge_matmul_mul:
+        merge_matmul_mul(graph, config)
+
+    check_quantization_info(graph, config)
     for node in graph.nodes:
         for ot in node.outputs:
             ot.key_axis = None
-    split_matmul(graph, config)
+    global_calibration_prepare(graph, config)
+    detect_inf_mask_nodes(graph, config)
+    split_qkv_fc(graph, config)
 
 # =========================optimization stage 1 end   ============================================
 
 
 # =========================optimization stage 2 passes============================================
 def optimization_stage2(graph, config):
-    pass
+    optimize_x2_wdc(graph, config)
 # =========================optimization stage 2 end   ============================================
 
 # =========================optimization stage 3 passes============================================
 
 
 def optimization_stage3(graph, config):
-    #  insert pad op for avgpool when count_include_pad=ceil_mode=True zp!=0
-    _insert_obj = [InsertPadOp]
-    for _obj in _insert_obj:
-        handler = _obj(graph, config)
-        handler.run()
     # revert Matmul (with additional param: fused_multiplier) into Matmul+Mul if Matmul is unquantifiable
     if config.enable_pass_merge_matmul_mul:
         def condition_func(node, parent_node, edge_tensor): return (
@@ -73,6 +71,7 @@ def optimization_stage3(graph, config):
             if 'fused_multiplier' in parent_node.params:
                 parent_node.params.pop('fused_multiplier')
             ft = PyTensor(graph.get_valid_tensor_name(n.inputs[0].name + '_scale'), fused_multiplier)
+            ft.dtype = n.inputs[0].dtype
             fn = PyNode(graph.get_valid_node_name(parent_node.name + '_scale'), OpType.Constant)
             fn.attrs.update(n.attrs.clone())
             fn.constants['weights'] = ft.clone(graph.get_valid_tensor_name(ft.name + '_w'))
@@ -81,17 +80,17 @@ def optimization_stage3(graph, config):
             fn.add_output(ft)
             n.add_input(ft)
             graph.add_node(fn)
+
+    absorb_cast_to_clip(graph, config)
 # =========================optimization stage 3 end   ============================================
 
 
 # =========================before graph quantize passes===========================================
 def insert_op_pass(graph, config, insert_obj):
     graph.set_tensor_quantization_attrs()
-
     set_unquantifiable(graph, config)
     for _obj in insert_obj:
-        handler = _obj(graph, config)
-        handler.run()
+        _obj(graph, config)()
     graph.clear_tensor_quantization_attrs()
 
 
@@ -132,13 +131,7 @@ def adapt_float_subgraph_pass(graph, config):
                 cn = qn.children[0].clone()
                 cn.quantize()
                 ct = cn.outputs[0]
-                ot.dtype = ct.dtype
-                ot.scale = ct.scale
-                ot.zerop = ct.zerop
-                ot.qinvariant = ct.qinvariant
-                ot.qmin = ct.qmin
-                ot.qmax = ct.qmax
-                ot.qbits = ct.qbits
+                ot.clone_qinfo(ct)
                 if 'quantize_scale' in qn.params:
                     qn.params['quantize_scale'] = ct.scale[0]
                     qn.params['quantize_zp'] = ct.zerop[0]
@@ -166,6 +159,12 @@ def adapt_float_subgraph_pass(graph, config):
                 q_mode_weight = qn.attrs["q_mode_weight"]
                 w.qbits = qn.attrs["q_bits_weight"]
                 w.qinvariant = False
+                # replace quantized weights if gptq optimization was applied
+                if 'gptq_weights' in qn.attrs:
+                    bkey = qn.attrs['q_bits_weight']
+                    if bkey in qn.attrs['gptq_weights'].keys():
+                        OPT_DEBUG(f'gptq optimization was applied on {qn}')
+                        w.betensor = qn.attrs['gptq_weights'][bkey]
                 if QuantMode.is_per_block(q_mode_weight):
                     w.block_size = qn.attrs["weight_block_size"]
                     from AIPUBuilder.Optimizer.features import statistic_and_calibration

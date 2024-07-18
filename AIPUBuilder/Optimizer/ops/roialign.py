@@ -503,7 +503,8 @@ def roialign(self, *args):
                 split_rois = torch.split(rois, split_size_or_sections=1, dim=-1)
                 rois = torch.cat([split_rois[0], split_rois[2], split_rois[1], split_rois[4], split_rois[3]], dim=-1)
                 fm = nhwc2nchw(inp_d)
-                out = roi_align(fm, rois, [pool_height, pool_width], spatial_scale=spatial_x, sampling_ratio=sample_w)
+                out = roi_align(fm.float(), rois, [pool_height, pool_width],
+                                spatial_scale=spatial_x, sampling_ratio=sample_w)
                 out = nchw2nhwc(out)
         else:  # method=='max'
             params = {}

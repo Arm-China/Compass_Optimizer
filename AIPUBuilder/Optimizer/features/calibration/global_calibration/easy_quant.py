@@ -24,12 +24,6 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups, m
     import copy
     from AIPUBuilder.Optimizer.logger import tqdm
 
-    def is_in_scopes(layer_n):
-        if len(mscopes) < 1:
-            return True
-        else:
-            return layer_n.type.name.lower() in mscopes or int(layer_n.attrs['layer_id']) in mscopes
-
     def scale2minmax(scale, is_signed, qrange):
         frange = qrange / scale
         if is_signed:
@@ -71,7 +65,7 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups, m
                     initial_similarity = layer_similarity(n, qn)
                     q_mode_weight = n.attrs["q_mode_weight"]
                     q_mode_activation = n.attrs["q_mode_activation"]
-                    if 'weights' in n.constants and not unquantifiable and is_in_scopes(n):
+                    if 'weights' in n.constants and not unquantifiable and mscopes.get(n):
                         w = n.constants["weights"]
                         if not w.qinvariant:
                             dn_m = None
@@ -152,7 +146,7 @@ def _easy_quant(g, cdataloader, batches, epochs, alpha, beta, nsteps, ngroups, m
                     inp_scales = []
                     for idx, inp in enumerate(n.inputs):
                         inp_scales.append((inp.scale, inp.zerop, inp.min, inp.max))
-                        if not inp.qinvariant and not unquantifiable and is_in_scopes(n):
+                        if not inp.qinvariant and not unquantifiable and mscopes.get(n):
                             qrange = 2 ** inp.qbits - 1
                             if not QuantMode.is_full_range(q_mode_activation):
                                 qrange -= 1

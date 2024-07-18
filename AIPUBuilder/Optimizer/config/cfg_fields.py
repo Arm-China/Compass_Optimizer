@@ -31,6 +31,7 @@ class PerNodeFieldDict:
         self.global_value = string_to_base_type(default_value) if isinstance(default_value, str) else default_value
         self.tdict = {}
         self.rdict = {}
+        self.ndict = {}
 
     def __repr__(self):
         from collections import defaultdict
@@ -58,6 +59,9 @@ class PerNodeFieldDict:
     def add_layer_range_field(self, key: tuple, value):
         self.rdict[key] = string_to_base_type(value) if isinstance(value, str) else value
 
+    def add_layer_name_field(self, key: str, value):
+        self.ndict[key] = string_to_base_type(value) if isinstance(value, str) else value
+
     def get(self, node: PyNode):
         tkey = node.type.name.lower()
         mkey = node.params['method'].lower() if (node.type == OpType.Activation) else ''
@@ -71,6 +75,10 @@ class PerNodeFieldDict:
             return self.tdict[tkey]
         elif mkey in self.tdict.keys():
             return self.tdict[mkey]
+        # then name redex config with lowest priority
+        for restr in self.ndict.keys():
+            if re.match(restr, node.name):
+                return self.ndict[restr]
         # then use global default config
         return self.global_value
 
@@ -82,12 +90,14 @@ class BaseField(object):
     roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
     rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
     rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
-    per_node_cfg_usage = "\nYou can also use 'global_value & <[(layer_id1,layer_id2),(layer_id3,layer_id4), ...]:local_value1> < [operator_type1, operator_type2, ...]:local_value2> ...' formart (where 'global_value' is the default value to configure each layer, and 'lobal_value' is for overwriting the default value on specific layers you assigned, 'layer_id' stands for layer_id in input IR and '(layer_id1, layer_id2)' specify the layers which will be applied, 'operator_type' stands for valid operator type names that specify the operators which will be applied) for per-layer configuration."
+    rnames = r'\s*\{.*\}\s*'
+    per_node_cfg_usage = "\nYou can also use 'global_value & <[(layer_id1,layer_id2),(layer_id3,layer_id4), ...]:local_value1> < [operator_type1, operator_type2, ...]:local_value2> <{node_name_regex_str}:local_value3>...' formart (where 'global_value' is the default value to configure each layer, and 'lobal_value' is for overwriting the default value on specific layers you assigned, 'layer_id' stands for layer_id in input IR and '(layer_id1, layer_id2)' specify the layers which will be applied, 'operator_type' stands for valid operator type names that specify the operators which will be applied) for per-layer configuration. Regex pattern can be surrounded by {} to config per-layer params by node name."
 
     @staticmethod
     def _re_parse(cfg_content, roi_pattern: str):
         cfg_line = str(cfg_content)
-        rnode_cfg = r'\s*(({})|({})):\s*({})\s*'.format(BaseField.rlayers, BaseField.roptypes, roi_pattern)
+        rnode_cfg = r'\s*(({})|({})|({})):\s*({})\s*'.format(BaseField.rlayers,
+                                                             BaseField.roptypes, BaseField.rnames, roi_pattern)
         re_per_node_field = r'(^\s*{}\s*$)|(^\s*{}&(\<{}\>)+\s*$)'.format(roi_pattern, roi_pattern, rnode_cfg)
         pdict = PerNodeFieldDict()
         flag = False
@@ -104,16 +114,27 @@ class BaseField(object):
                     kstr = pair_str[:kidx].strip()
                     vstr = pair_str[kidx+1:].strip()
                     assert re.match(roi_pattern, vstr)
-                    if re.match(BaseField.roptypes, kstr):
-                        for ot in [o.lower().strip() for o in re.split(r',|\[|\]|\(|\)|\s+', kstr) if o.lower().strip()]:
+                    m1r = re.search(BaseField.roptypes, kstr)
+                    if m1r:
+                        midx = m1r.span()
+                        mstr = kstr[midx[0]:midx[1]]
+                        for ot in [o.lower().strip() for o in re.split(r',|\[|\]|\(|\)|\s+', mstr) if o.lower().strip()]:
                             pdict.add_optype_field(ot, vstr)
-                    elif re.match(BaseField.rlayers, kstr):
+                    m2r = re.search(BaseField.rlayers, kstr)
+                    if m2r:
+                        midx = m2r.span()
+                        mstr = kstr[midx[0]:midx[1]]
                         layer_ranges = [int(idx) for idx in re.split(
-                            r',|\[|\]|\(|\)|\s+', kstr) if idx.lower().strip()]
+                            r',|\[|\]|\(|\)|\s+', mstr) if idx.lower().strip()]
                         for k in range(0, len(layer_ranges), 2):
                             pdict.add_layer_range_field((layer_ranges[k], layer_ranges[k+1]), vstr)
-                    else:
-                        pass
+                    m3r = re.search(BaseField.rnames, kstr)
+                    if m3r:
+                        midx = m3r.span()
+                        mstr = kstr[midx[0]:midx[1]]
+                        regex_str = mstr[1:-1]
+                        value = vstr
+                        pdict.add_layer_name_field(regex_str, value)
             pdict.set_default_value(default_value)
         return flag, pdict
 
@@ -177,7 +198,7 @@ class BinField(BaseField):
 class ModelNameField(BaseField):
     @staticmethod
     def default():
-        return ''
+        return 'unknown'
 
     @staticmethod
     def parse(m):
@@ -362,6 +383,30 @@ class MetricField(BaseField):
             msg += f"Require the 'metric' field must be in {MetricField._metric_plugins()}, "
         msg += f"now 'metric={m}'."
         return msg
+
+    @staticmethod
+    def get_metric(m):
+        m = m.replace(' ', '')
+        metrics = MetricField._split_metrics(m)
+        func_args = MetricField._get_func_args(metrics)
+
+        # delete the repeat metric
+        fn_arg_dict = {}
+        fas = [[s[0].lower(), s[1]] for s in func_args]
+        repeat = False
+        for fa in fas:
+            fname = fa[0]
+            args = fa[1]
+            if fname in fn_arg_dict.keys():
+                for argl in fn_arg_dict[fname]:
+                    if args == argl:
+                        repeat = True
+                        break
+                if not repeat:
+                    fn_arg_dict[fname].append(args)
+            else:
+                fn_arg_dict.update({fname: [args]})
+        return fn_arg_dict
 
     @staticmethod
     def message():
@@ -785,10 +830,12 @@ class GlobalCalibrationParamField(BaseField):
         roptypes = r'\s*\[{}(,{})*\]\s*'.format(roptype, roptype)
         rscope = r'\s*\(\s*\d+\s*,\s*\d+\s*\)\s*'
         rlayers = r'\s*\[{}(,{})*\]\s*'.format(rscope, rscope)
-        rmethod = r'\s*((svd_quant)|(easy_quant)|(mvn_correction)|(adaround)|(adaquant_zy))\s*'
+        rnames = r'\s*\{.*\}\s*'
+        rmethod = r'\s*((svd_quant)|(easy_quant)|(mvn_correction)|(adaround)|(adaquant_zy)|(smooth_quant_zy)|(awq_zy)|(gptq_zy))\s*'
         rmethod_param = r'{}{}'.format(rmethod, rparams)
         rmethod_param_optypes = r'{}{}{}'.format(rmethod, rparams, roptypes)
         rmethod_param_layers = r'{}{}{}'.format(rmethod, rparams, rlayers)
+        rmethod_param_names = r'{}{}{}'.format(rmethod, rparams, rnames)
         one_method = r'\s*(({})|({})|({})|({}))\s*'.format(rmethod, rmethod_param,
                                                            rmethod_param_optypes, rmethod_param_layers)
         multi_methods = r'^{}(&{})*$'.format(one_method, one_method)
@@ -802,24 +849,29 @@ class GlobalCalibrationParamField(BaseField):
                 name_idx = name.find('[')
                 name = name[:name_idx].strip()
                 vec = []
-                oplist = []
+                pdict = PerNodeFieldDict(True)
                 if name_idx > 0:
                     param_end = mstr.find(']')
                     param_list = re.split(r',|\[|\]|\(|\)|\s+', mstr[len(name):param_end])
                     vec = [float(param) for param in param_list if param.lower().strip()]
-                    ol_str = mstr[param_end+1:]
+                    ol_str = mstr[param_end+1:].strip()
                     if re.match(rmethod_param_optypes, mstr):
-                        oplist = [o.lower().strip() for o in re.split(
-                            r',|\[|\]|\(|\)|\s+', ol_str) if o.lower().strip()]
+                        pdict.set_default_value(False)
+                        for ot in [o.lower().strip() for o in re.split(
+                                r',|\[|\]|\(|\)|\s+', ol_str) if o.lower().strip()]:
+                            pdict.add_optype_field(ot, True)
                     elif re.match(rmethod_param_layers, mstr):
+                        pdict.set_default_value(False)
                         idx_list = re.split(r',|\[|\]|\(|\)|\s+', ol_str)
                         layer_ranges = [int(idx) for idx in idx_list if idx.lower().strip()]
                         for k in range(0, len(layer_ranges), 2):
-                            for l in range(layer_ranges[k], layer_ranges[k+1]+1):
-                                oplist.append(l)
+                            pdict.add_layer_range_field((layer_ranges[k], layer_ranges[k+1]), True)
+                    elif re.match(rmethod_param_names, mstr):
+                        pdict.set_default_value(False)
+                        pdict.add_layer_name_field(ol_str[1:-1], True)
                     else:
-                        pass
-                valid_methods.append((name, vec, set(oplist)))
+                        pdict.set_default_value(True)
+                valid_methods.append((name, vec, pdict))
             return (True, valid_methods)
         else:
             return (False, [])
@@ -830,32 +882,48 @@ class GlobalCalibrationParamField(BaseField):
 
     @staticmethod
     def message():
-        return "Global calibration (scale/zero_point/rounding optimization) method, now supports: 'none', \
-            'easy_quant' (refer to https://arxiv.org/pdf/2006.16669.pdf), \
-            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups]', \
-            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][operator_type1, operator_type2, ...]', \
-            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][(layer_i, layer_j), (layer_k, layer_l), ...]', \
-            'adaround' (refer to https://arxiv.org/pdf/2004.10568.pdf), \
-            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start]', \
-            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][operator_type1, operator_type2, ...]', \
-            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][(layer_i, layer_j), (layer_k, layer_l), ...]', \
-            'adaquant_zy' (refer to https://arxiv.org/pdf/2006.10518.pdf) \
-            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation]' \
-            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][operator_type1, operator_type2, ...]' \
-            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][(layer_i, layer_j), (layer_k, layer_l), ...]' \
-            'mvn_correction' (arm china),\
-            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits]' ,\
-            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][operator_type1, operator_type2, ...]' ,\
-            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][(layer_i, layer_j), (layer_k, layer_l), ...]' ,\
-            'svd_quant' (arm china), \
-            'svd_quant[mode, alpha, beta, nsteps, thresh][operator_type1, operator_type2, ...]', \
-            'svd_quant[mode, alpha, beta, nsteps, thresh][(layer_i, layer_j), (layer_k, layer_l), ...]'. \
-            Where 'operator_type1' and 'operator_type2' are valid operator type names that specify the operators which will be applied, \
-            'layer_i', 'layer_j', 'layer_k' and ''layer_l' stand for layer_id in input IR and '(layer_i, layer_j), (layer_k, layer_l)' specify the layers which will be applied,  \
-            'batches' means how many (calibartion) data batches will be used, 'epochs' means the maximum epochs if not convergence, \
-            'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha', 'beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods, \
-            'none' means do nothing, default to 'none'. \
-            You can also apply multiple methods sequentially with `&`, e.g. `adaround[10, 3, 32] & easy_quant`. "
+        return '''Global calibration (scale/zero_point/rounding optimization) method, now supports: 'none',
+            'easy_quant' (refer to https://arxiv.org/pdf/2006.16669.pdf),
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups]',
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][operator_type1, operator_type2, ...]',
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups][(layer_i, layer_j), (layer_k, layer_l), ...]',
+            'easy_quant[batches, epochs, alpha, beta, nsteps, ngroups]{node_name_regex_str}',
+            'adaround' (refer to https://arxiv.org/pdf/2004.10568.pdf),
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start]',
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][operator_type1, operator_type2, ...]',
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start][(layer_i, layer_j), (layer_k, layer_l), ...]',
+            'adaround[batches, epochs, batch_size, lr, reg_param, beta_start, beta_end, warm_start]{node_name_regex_str}',
+            'adaquant_zy' (refer to https://arxiv.org/pdf/2006.10518.pdf)
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation]'
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][operator_type1, operator_type2, ...]'
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation][(layer_i, layer_j), (layer_k, layer_l), ...]'
+            'adaquant_zy[batches, epochs, batch_size, lr_weight, lr_bias, lr_quant_param_weight, lr_quant_param_activation]{node_name_regex_str}'
+            'mvn_correction' (arm china),
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits]' ,
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][operator_type1, operator_type2, ...]' ,
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits][(layer_i, layer_j), (layer_k, layer_l), ...]' ,
+            'mvn_correction[mode, alpha, beta, gamma, act_bits, wgt_bits, bias_bits, lut_bits]{node_name_regex_str}' ,
+            'svd_quant' (arm china),
+            'svd_quant[mode, alpha, beta, nsteps, thresh][operator_type1, operator_type2, ...]',
+            'svd_quant[mode, alpha, beta, nsteps, thresh][(layer_i, layer_j), (layer_k, layer_l), ...]'.
+            'svd_quant[mode, alpha, beta, nsteps, thresh]{node_name_regex_str}',
+            'smooth_quant_zy' (refer to https://arxiv.org/pdf/2211.10438.pdf)
+            'smooth_quant_zy[default_alpha, auto_tune, alpha_min, alpha_max, nsteps, insert_norm_if_none]'
+            'smooth_quant_zy[default_alpha, auto_tune, alpha_min, alpha_max, nsteps, insert_norm_if_none][(layer_i, layer_j), (layer_k, layer_l), ...]'
+            'smooth_quant_zy[default_alpha, auto_tune, alpha_min, alpha_max, nsteps, insert_norm_if_none]{node_name_regex_str}'
+            'awq_zy' (refer to https://arxiv.org/pdf/2306.00978)
+            'awq_zy[n_grid, max_shrink, insert_norm_if_none]'
+            'awq_zy[n_grid, max_shrink, insert_norm_if_none][(layer_i, layer_j), (layer_k, layer_l), ...]'
+            'awq_zy[n_grid, max_shrink, insert_norm_if_none]{node_name_regex_str}'
+            'gptq_zy' (refer to https://arxiv.org/pdf/2210.17323.pdf)
+            'gptq_zy[batches, use_act_order, perc_damp, block_size]'
+            'gptq_zy[batches, use_act_order, perc_damp, block_size][operator_type1, operator_type2, ...]'
+            'gptq_zy[batches, use_act_order, perc_damp, block_size][(layer_i, layer_j), (layer_k, layer_l), ...]'
+            'gptq_zy[batches, use_act_order, perc_damp, block_size]{node_name_regex_str}'
+            Where 'operator_type1' and 'operator_type2' are valid operator type names that specify the operators which will be applied, 'layer_i', 'layer_j', 'layer_k' and ''layer_l' stand for layer_id in input IR and '(layer_i, layer_j), (layer_k, layer_l)' specify the layers which will be applied,  'node_name_regex_str' stands for regex string patterns to config per-layer params,
+            'batches' means how many (calibartion) data batches will be used, 'epochs' means the maximum epochs if not convergence, 'lr' means the learning rate, 'ngroups' means groups which will be divided into when meeting per-channel quantization parameters to speed up (0 means no speed up), and the 'alpha', 'beta', 'nsteps', etc are the float type configurable inner hyper-parameters for corresponding methods,
+            'none' means do nothing, default to 'none'.
+            You can also apply multiple methods sequentially ('adaround', 'adaquant_zy', 'gptq_zy' can only appear at the end) with `&`, e.g. `easy_quant & adaround[10, 3, 32]`. '''
 
     @staticmethod
     def error(gc):
@@ -907,7 +975,7 @@ class QuantizeMethodForWeightField(BaseField):
     # quantization method for weights and biases, like 'per_tensor_symmetric_restricted_range, per_channel_symmetric_restricted_range'
     @staticmethod
     def _weight_quantize_method():
-        return list(filter(QuantMode.is_symmetric, QuantMode.mode_names()))
+        return list(QuantMode.mode_names())
 
     @staticmethod
     def default():
@@ -1170,18 +1238,16 @@ class CastDtypesForLibField(BaseField):
 
     @staticmethod
     def parse(cd):
-        return True, cd
+        cd_pattern = r'((false)|(true)|(False)|(True)|(TRUE)|(FALSE))'
+        return BaseField._re_parse(cd, cd_pattern)
 
     @staticmethod
     def error(cd):
-        return f"Require the 'cast_dtypes_for_lib' field be 'False' or 'True' or list of valid operator type names (case insensitive, corresponding to layer_type in float IR), e.g., Abs,reshape,tile"
+        return f"Require the 'cast_dtypes_for_lib' field be 'False' or 'True'."
 
     @staticmethod
     def message():
-        return (f"Whether to cast dtypes of OPs to adapt to lib's dtypes' spec (may cause model accuracy loss "
-                f"due to corresponding spec's restriction). 'False' means no. 'True' means yes to all OPs. "
-                f"A list of valid operator type names (case insensitive, corresponding to layer_type in float IR),"
-                f" e.g., Abs,reshape,tile means yes to all the specified OPs.")
+        return f"Whether to cast dtypes of OPs to adapt to lib's dtypes' spec (may cause model accuracy loss due to corresponding spec's restriction). 'False' means no. 'True' means yes to all OPs. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('min_compatible_zhouyi_target', 'default')
@@ -2255,6 +2321,84 @@ class PassDeeplySetUnquantifiable(BaseField):
     def message():
         return f"when enable this pass, the unquantifiable=true will penetrate the op like reshape/transpose, which original unquantifiable=false." \
                f"this pass possibility eliminates the quantize/dequantize operators."
+
+
+@field_register('enable_pass_split_qkv_fc_in_transformer', 'default')
+class SplitQkvFcForQuantField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'enable_pass_split_qkv_fc_in_transformer' field be 'False' or 'True'."
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: split_qkv_fc_in_transformer, split qkv fc into seperate smaller fc layers is good for quantization, default value is 'False'.")
+
+
+@field_register('enable_pass_detect_inf_mask_nodes', 'default')
+class DetectInfMaskNodesField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'enable_pass_detect_inf_mask_nodes' field be 'False' or 'True'."
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: detect_inf_mask_nodes, nodes used for inf masks (e.g. a batch norm layer like y=xw+b, where w+b=0, so when x==1 then y == 0 and exp(y)==1, when x==0 then y==-inf and exp(y)==0) may cause accuracy drop in quantization, this pass will try to detect these nodes and refine them for quantization, default value is 'False'.")
+
+
+@field_register('optimize_wdc_for_x2', 'default')
+class WDCForX2(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'optimize_wdc_for_x2' field be 'False' or 'True', default value=False."
+
+    @staticmethod
+    def message():
+        return f"Default is False, if set to True, will try to adjust the quantization parameters of the constants of operators, in order to adapt weight compression in gbuilder. Accuracy may be affacted. {BaseField.per_node_cfg_usage}"
+
+
+@field_register('ignore_missing_statistic', 'default')
+class IgnoreMissingStat(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'ignore_missing_statistic' field be 'False' or 'True', default value=False."
+
+    @staticmethod
+    def message():
+        return "If statistic file is configured, by setting this field to True, OPT will ignore missing nodes\
+            inside stat file. It will fill stat values with parent/child nodes directly. However, if stat value still\
+            remains undefined, errors may occurs in quantization without a warning."
 
 
 ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}

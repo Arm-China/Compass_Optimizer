@@ -3,7 +3,6 @@
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
-from AIPUBuilder.Optimizer.utils.passes_utils import passes_run
 import re
 
 
@@ -16,7 +15,6 @@ def parse_params_from_tune_op_cfg_line(cfg_str: str):
     return extra_params, approx_params
 
 
-@passes_run
 def tune_op_complicated_activations(graph: PyGraph, config):
     for n in graph.nodes:
         if OpType.Activation == n.type and n.params['method'].lower() in ['gelu', 'silu', 'swish', 'sigmoid']:
@@ -24,7 +22,6 @@ def tune_op_complicated_activations(graph: PyGraph, config):
             n.attrs['extra_params'], n.attrs['approx_params'] = parse_params_from_tune_op_cfg_line(cfg_str)
 
 
-@passes_run
 def tune_op_softmax(graph: PyGraph, config):
     sensitive_optypes = [OpType.NMS, OpType.Sort, OpType.ArgMinMax, OpType.TopK, OpType.InTopK]
     for n in graph.nodes:
@@ -42,9 +39,10 @@ def tune_op_softmax(graph: PyGraph, config):
                 n.attrs['extra_params'] = [2, 20] if sensitive else [1, 1]
 
 
-@passes_run
 def tune_op_trigonometric_activations(graph: PyGraph, config):
     for n in graph.nodes:
-        if n.type in [OpType.Cosine, OpType.Sine]:
+        if n.type in [OpType.Cosine, OpType.Sine, OpType.Atanh, OpType.Asinh, OpType.Atan, OpType.Asin, OpType.Acos, OpType.Acosh,
+                      OpType.Sinh, OpType.Tanh, OpType.Erf, OpType.Log, OpType.SHRINK, OpType.Softsign, OpType.Exp, OpType.Softplus,
+                      OpType.Cosh, OpType.MISH, OpType.CELU, OpType.SELU, OpType.ELU]:
             cfg_str = config.enable_pass_tune_op_complicated_activations.get(n)
             n.attrs['extra_params'], n.attrs['approx_params'] = parse_params_from_tune_op_cfg_line(cfg_str)

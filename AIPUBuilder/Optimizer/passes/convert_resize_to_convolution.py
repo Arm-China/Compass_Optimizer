@@ -351,7 +351,6 @@ def _resize_to_convolution(g, resize_node):
     resize_to_conv_handler.build_subgraph(resize_node)
 
 
-@passes_run
 def convert_resize_to_convolution(graph, config=None):
     nodes = graph.nodes
     for n in nodes:

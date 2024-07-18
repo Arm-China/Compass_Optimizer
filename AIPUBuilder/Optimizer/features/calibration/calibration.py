@@ -57,6 +57,12 @@ def apply_global_calibration(g, cdataloader, strategy):
             adaround_global_calibration(g, cdataloader, mparams, mscopes)
         elif 'adaquant_zy' == mname:
             adaquant_zy_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'gptq_zy' == mname:
+            gptq_zy_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'smooth_quant_zy' == mname:
+            smooth_quant_zy_global_calibration(g, cdataloader, mparams, mscopes)
+        elif 'awq_zy' == mname:
+            awq_zy_global_calibration(g, cdataloader, mparams, mscopes)
         elif 'svd_quant' == mname:
             svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
         elif 'mvn_correction' == mname:

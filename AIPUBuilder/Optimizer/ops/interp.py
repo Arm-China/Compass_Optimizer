@@ -302,7 +302,7 @@ def nearest_resize(input_data, output_shape, mode, ratio_x, ratio_y, nearest_mod
 
     def get_pixel(nearest_mode, original_pixel, down_sample):
         if nearest_mode == "round_prefer_floor":
-            mask = torch.eq(original_pixel, original_pixel.int() + 0.5)
+            mask = torch.isclose(original_pixel, original_pixel.int() + 0.5, rtol=1e-07, atol=1e-09)
             return torch.where(mask, torch.floor(original_pixel).int(), torch.round(original_pixel).int())
         elif nearest_mode == "floor":
             return torch.floor(original_pixel).int()

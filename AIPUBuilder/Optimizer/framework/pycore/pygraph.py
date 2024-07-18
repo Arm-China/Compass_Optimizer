@@ -311,6 +311,83 @@ class PyGraph:
             for i, t in enumerate(new.outputs):
                 old.outputs = old.outputs + (t.clone(),)
 
+    def copy_subgraph(self, nodes):
+        import copy
+        from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
+        from AIPUBuilder.Optimizer.utils import timestamp_string
+        sg = self.subgraph_view(nodes)
+        g = self.__class__(self.name+'_sg')
+        nmap = {}
+        emap = {}
+        for n in sg.nodes:
+            pn = PyNode(n.name, n.type)
+            for k, v in n.params.items():
+                pn.params[k] = copy.deepcopy(v)
+            for k, v in n.attrs.items():
+                pn.attrs[k] = copy.deepcopy(v)
+            for k, v in n.constants.items():
+                pv = v.clone(v.name)
+                pn.constants[k] = pv
+            for v in n.placeholders:
+                pv = v.clone(v.name)
+                pn.placeholders.append(pv)
+            g.nodes.append(pn)
+            pn.graph = g
+            nmap[pn.name] = pn
+            # store edges
+            for v in n.outputs:
+                pv = v.clone(v.name)
+                emap[pv.name] = pv
+        for v in sg.inflow_tensors:
+            pv = v.clone(v.name)
+            emap[pv.name] = pv
+        # connect edges
+        # create Input nodes for inflow_tensors
+        missing_input_nodes = []
+        for i, n in enumerate(sg.nodes):
+            pn = g.nodes[i]
+            tlist = []
+            nlist = []
+            for v in n.inputs:
+                pv = emap[v.name]
+                tlist.append(pv)
+                if v in sg.inflow_tensors:
+                    sn = PyNode(n.name + timestamp_string(), OpType.Input)
+                    for k, v in n.attrs.items():
+                        sn.attrs[k] = copy.deepcopy(v)
+                        sn.attrs['layer_id'] = '0' + str(n.attrs['layer_id'])
+                    sn.add_output(pv)
+                    missing_input_nodes.append(sn)
+                    nlist.append(sn)
+            pn.inputs = tuple(tlist)
+            for x in n.parents:
+                if x.name in nmap:
+                    nlist.append(nmap[x.name])
+            pn.parents = tuple(nlist)
+            tlist = []
+            for v in n.outputs:
+                tlist.append(emap[v.name])
+            pn.outputs = tuple(tlist)
+            nlist = []
+            for x in n.children:
+                if x.name in nmap:
+                    nlist.append(nmap[x.name])
+            pn.children = tuple(nlist)
+        g.nodes = missing_input_nodes + g.nodes
+        ilist = []
+        for n in g.nodes:
+            if OpType.Input == n.type:
+                ilist.append(n.outputs[0])
+        g.input_tensors = tuple(ilist)
+        olist = []
+        for t in sg.outflow_tensors:
+            olist.append(emap[t.name])
+        g.output_tensors = tuple(olist)
+        g.init_networkx()
+
+        return g
+
     def cut_subgraph(self, nodes):
         sg = self.subgraph_view(nodes)
         clone_t_inp = {}
@@ -380,21 +457,12 @@ class PyGraph:
         if len(self.input_tensors) == 1 and not isinstance(feed_data, list):
             data = [feed_data, ]
         for inp, d in zip(self.input_tensors, data):
-            inp.betensor = PyTensor('tmp', d).betensor.to(inp.assigned_device)
+            inp.betensor = PyTensor('tmp', d).betensor
 
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm
         with tqdm(total=len(self.nodes), desc='forward_to', file=sys.stdout, leave=True, disable=disable_pbar) as pbar:
             for n in self.nodes:
-                if len(n.inputs) > 0:
-                    device = n.outputs[0].assigned_device
-                    for inp in n.inputs:
-                        if not inp.assigned_device == device:
-                            inp.betensor = inp.betensor.to(device)
-                            for attrname in dir(inp):
-                                attr = getattr(inp, attrname)
-                                if isinstance(attr, torch.Tensor):
-                                    setattr(inp, attrname, attr.to(device))
                 n.forward()
                 if dest_node is not None and n == dest_node:
                     break
@@ -509,9 +577,13 @@ class PyGraph:
         from AIPUBuilder.Optimizer.framework.pycore.pyir import serialize_graph_to_ir
         serialize_graph_to_ir(self, ir_txt, ir_bin)
 
-    def enable_fit_dtype(self, flag: bool):
+    def enable_fit_dtype(self):
         for node in self.nodes:
-            node.enable_fit_dtype = flag
+            node.enable_fit_dtype = True
+
+    def disable_fit_dtype(self):
+        for node in self.nodes:
+            node.enable_fit_dtype = False
 
     @classmethod
     def parse(cls, ir_txt, ir_bin):

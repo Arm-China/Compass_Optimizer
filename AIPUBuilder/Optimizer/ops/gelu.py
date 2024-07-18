@@ -56,42 +56,27 @@ def gelu_quantize(self, *args):
 
 @approx_register(OpType.GELU)
 def gelu_approx(self, *args):
-    inp = self.inputs[0]
-    dev = inp.betensor.device
-    approx_params = self.get_attrs('approx_params', optional=True, default_value=[0])
-    method = int(approx_params[0] if len(approx_params) > 0 else 0)
-    min_compatible_zhouyi_target = self.attrs["min_compatible_zhouyi_target"].upper()
-    lut_items_in_bits = Target.aiff_lut_items_in_bits(min_compatible_zhouyi_target)
-    if 1 == method and Target.optimized_target_level(min_compatible_zhouyi_target) >= 2:
-        q_mode_activation = self.attrs["q_mode_activation"]
-        use_dynamic_lut = len(approx_params) > 1 and approx_params[1] > 0
-        bak_min = inp.min
-        bak_max = inp.max
+
+    def set_min_max(inp, use_dynamic_lut):
         if not use_dynamic_lut:
-            inp.min = 0
-            inp.max = 6
-        inp.min = 0
-        inp.max = max(abs(inp.min), abs(inp.max))
-        index_scale, index_offset, _, _, _ = get_linear_quant_params_from_tensor(
-            inp, QuantMode.to_asymmetric(QuantMode.to_per_tensor(q_mode_activation)), lut_items_in_bits, False)
-        inp.min = bak_min
-        inp.max = bak_max
-        lut = linear_dequantize(torch.arange(0, 2**lut_items_in_bits, device=dev), index_scale, index_offset)
-        value_offset = -0.5
-        lut = phi_tanh_approx(lut) + value_offset
-        lut = to_fp24(lut)
-        self.constants["lut"] = PyTensor(self.name + "/plh_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-        self.params['is_perf_mode'] = True
-        self.params['lut_mode'] = 'MIRROR'
-        self.params['index_scale_value'] = index_scale
-        self.params['index_scale_type'] = Dtype.FP32
-        self.params['index_offset_value'] = index_offset
-        self.params['index_offset_type'] = Dtype.FP32
-        self.params['value_offset_value'] = value_offset
-        self.params['value_offset_type'] = Dtype.FP32
-    else:
-        # not suit for aiff, need use tpc to implement a high accuracy version
-        self.params['is_perf_mode'] = False
+            clip_min = 0
+            clip_max = 6
+        else:
+            clip_min = 0
+            clip_max = max(abs(inp.min), abs(inp.max))
+        return clip_min, clip_max
+
+    self.attrs['set_min_max'] = set_min_max
+    self.attrs['lambda_func'] = phi_tanh_approx
+    self.attrs['out_signed'] = False
+    self.attrs['value_offset'] = -0.5
+    activation_module.unknown_approx(self, *args)
+    self.attrs.pop('lambda_func')
+    self.attrs.pop('set_min_max')
+    self.attrs.pop('out_signed')
+    self.attrs.pop('value_offset')
+
+    self.params['lut_mode'] = 'MIRROR'
 
 
 @op_register(OpType.GELU)
