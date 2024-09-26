@@ -108,7 +108,7 @@ def cast_quantize(self, *args):
             out.qbits = min(32, dtype2bits(self.params['to_dtype']))
             out.dtype = bits2dtype(out.qbits, is_sign)
             do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-                1 / inp.scale, mult_bits=16, force_shift_positive=self.force_shift_positive)
+                1.0 / inp.scale, mult_bits=16, force_shift_positive=self.force_shift_positive)
             scale_name = "scale" if is_torch_tensor_with_multi_data(do_scale) else "scale_value"
             shift_name = "shift" if is_torch_tensor_with_multi_data(do_shift) else "shift_value"
             self.set_ir_field(scale_name, do_scale, do_scale_type)
@@ -116,8 +116,9 @@ def cast_quantize(self, *args):
             if not is_torch_tensor_with_multi_data(do_scale):
                 self.params["shift_type"] = do_shift_type
                 self.params["scale_type"] = do_scale_type
-            out.scale = 1
+            out.scale = 1.0
             out.zerop = 0
             out.qinvariant = True
-            self.params['ignore_scale_zp'] = False
+            self.params['ignore_scale_zp'] = (inp.scale.max() - 1.0).abs().item() <= torch.finfo(
+                torch.float32).eps and (inp.scale.min() - 1.0).abs().item() <= torch.finfo(torch.float32).eps
             self.params['clip_mode'] = 'saturation'.upper()

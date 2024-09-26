@@ -215,6 +215,7 @@ class OptMaster(object):
             # init_attrs('force_dtype_int', False)
             init_attrs('bias_effective_bits', node.attrs['q_bits_bias'] if self.hparams.bias_effective_bits == ''
                        else self.hparams.bias_effective_bits.get(node))
+            init_attrs('bias_effective_bits_auto_adaption', self.hparams.bias_effective_bits_auto_adaption.get(node))
             init_attrs('unify_shifts_for_aiff', self.hparams.unify_shifts_for_aiff.get(node))
             init_attrs('trim_infinity_before_statistic', self.hparams.trim_infinity_before_statistic.get(node))
             init_attrs('trigger_float_op', self.hparams.trigger_float_op.get(node))
@@ -224,11 +225,13 @@ class OptMaster(object):
             if node.type == OpType.Concat:
                 init_attrs('unify_scales_for_multi_inputs_operator_threshold',
                            self.hparams.unify_scales_for_concat_threshold)
+                init_attrs('unify_scales_for_kvc_concat', self.hparams.unify_scales_for_kvc_concat.get(node))
             init_attrs('unify_scales_for_multi_inputs_operators',
                        self.hparams.unify_scales_for_multi_inputs_operators.get(node))
             node.attrs['optimization_info'] = {}
             node.attrs['batch_size_in_IR'] = self.batch_size_in_IR
             node.attrs['calculate_running_time'] = False
+            node.attrs['trigger_float_op_bkup'] = node.attrs['trigger_float_op']
 
         # do a forward to check graph firstly and init placeholders,
         # force each op to be able to handle all zero inputs.
@@ -519,7 +522,6 @@ class OptMaster(object):
         # it's not necessary to hold the original graph when self.dataloader4debug is none (cosine similarity and metric are skipped) to save memory
         self.g.quantgraph = self.g.clone() if self.dataloader4debug is not None else self.g
         unify_scales_for_multi_inputs_op_pass(self.g.quantgraph, self.hparams)
-        adapt_float_subgraph_pass(self.g.quantgraph, self.hparams)
         self.g.quantize()
 
     def enable_fake_quant_scopes_for_debug(self, fake_quant_scopes):
@@ -594,6 +596,7 @@ class OptMaster(object):
             'histc_bins',
             'extra_params',
             'approx_params',
+            'trigger_float_op_bkup'
         ]
         node_attrs = {}
         for node in qg.nodes:
@@ -621,6 +624,10 @@ class OptMaster(object):
                 mse_str += str(t.mse) + ', '
             for k, v in node.attrs.items():
                 if k in user_interactive_properties:
+                    if '_bkup' in k:
+                        k = k.replace("_bkup", "")
+                    if not (isinstance(v, int) or isinstance(v, float) or isinstance(v, bool)):
+                        v = str(v)
                     node_attrs[node.name][k] = v
             node_attrs[node.name]['just_for_display'] = {}
             node_attrs[node.name]['just_for_display']['quantization_info'] = str(quantization_info)

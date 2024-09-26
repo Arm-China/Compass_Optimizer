@@ -220,7 +220,7 @@ class PyTensor:
             return super().__setattr__(key, value.to(device_cluster[device]))
 
     def fit_dtype(self, dtype: Union[Dtype, None] = None):
-        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type, dtype2bits, torch_type2dtype
         from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
         from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
         if dtype is not None:
@@ -246,10 +246,16 @@ class PyTensor:
             if self.dtype == Dtype.UINT64:
                 qmin = float(qmin)
                 qmax = float(qmax)
+            self.betensor = self.betensor.double() if is_float(
+                torch_type2dtype(self.betensor.dtype)) else self.betensor.long()
             self.betensor = torch.clamp(self.betensor, qmin, qmax).to(dtype2torch_type(self.dtype))
             if self.ir_dtype is not None and is_float(self.ir_dtype) and not self.qinvariant:
                 # many torch api does not implement for none float dtypes
                 self.betensor = self.betensor.float()
+            elif dtype2bits(self.dtype) < 32:
+                self.betensor = self.betensor.int()
+            else:
+                self.betensor = self.betensor.long()
 
     def __repr__(self):
         import torch
@@ -604,6 +610,14 @@ class PyTensor:
     @property
     def device(self):
         return self.betensor.device
+
+    def is_qinfo_equal(self, other):
+        for k in ['scale', 'zerop', 'qmin', 'qmax', 'dtype', 'qinvariant', 'qbits']:
+            v = self.__getattribute__(k)
+            other_v = other.__getattribute__(k)
+            if v != other_v:
+                return False
+        return True
 
 
 PyTensor.shape = property(lambda self: self.betensor.shape, None)

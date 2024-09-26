@@ -70,8 +70,7 @@ class PyNode:
         n = self.__class__(name, self.type)
         for k, v in self.params.items():
             n.params[k] = copy.deepcopy(v)
-        for k, v in self.attrs.items():
-            n.attrs[k] = copy.deepcopy(v)
+        n.attrs.update(self.attrs.clone())
         for k, v in self.constants.items():
             n.constants[k] = v.clone(v.name)
         for t in self.inputs:
@@ -82,6 +81,12 @@ class PyNode:
             n.placeholders.append(t.clone(t.name))
         n.graph = None
         return n
+
+    def clear_inputs(self):
+        self.inputs = ()
+
+    def clear_outputs(self):
+        self.outputs = ()
 
     def add_input(self, t, idx=-1):
         k = idx if idx >= 0 else len(self.inputs) + 1 + idx
@@ -309,7 +314,7 @@ class PyNode:
                 apply_calibration_strategy(t, qstrategy, qmethod)
 
     def forward(self, *args):
-        from AIPUBuilder.Optimizer.framework import OP_DICT
+        from AIPUBuilder.Optimizer.framework import OP_DICT, Dtype
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor
         from AIPUBuilder.Optimizer.utils.quant_tool_utils import linear_dequantize, linear_quantize_clip
         from AIPUBuilder.Optimizer.utils.dtype_utils import is_float
@@ -375,18 +380,18 @@ class PyNode:
         # for cases with explicit IR field
         # if "weights" in self.constants.keys() and self.get_param("approximate_method", optional=True, default_value='none').lower() in ['weight_only_quantization', ]:
         # for cases without explicit IR field, currently lib can detect weight only quantization through IR Dtype info
-        if not self.quantized and "weights" in self.constants.keys():
+        if not self.quantized and "weights" in self.constants.keys() and self.get_attrs('weight_only_quantization', optional=True, default_value=False):
             wt = self.constants["weights"]
-            if wt.betensor.dtype is None or is_float(wt.betensor.dtype):
-                pass
-            elif (wt.scale == torch.ones_like(wt.scale)).all() and (wt.zerop == torch.zeros_like(wt.zerop)).all():
+            if (wt.scale == torch.ones_like(wt.scale)).all() and (wt.zerop == torch.zeros_like(wt.zerop)).all():
                 # when wt.qinvariant is false, but scale == 1.0, zerop == 0; better to skip the dtype convertion caused by dequantize
                 pass
             else:
                 wt.block_size = self.get_param("weight_block_size", optional=True, default_value=None)
                 # dequantize quantized weights
                 maintained_constants_betensor['weights'] = wt.betensor
+                maintained_constants_betensor['weights_dtype'] = wt.dtype
                 wt.betensor = linear_dequantize(wt.betensor, wt.broadcast_scale, wt.broadcast_zerop)
+                wt.dtype = Dtype.FP32
         # fit constants dtype
         if self.fit_dtype_enabled:
             for k, v in self.constants.items():
@@ -395,7 +400,15 @@ class PyNode:
         for ii, iinp in enumerate(self.inputs):
             iinp.betensor = maintained_inp_betensors[ii]
         for kk, vv in maintained_constants_betensor.items():
+            '''
+            when weight_only_quantization, we save weight.dtype in the maintained_constants_betensor, 
+            so if kk is the saved weight.dtype, we skip it and set it to weight.dtype when kk == weights
+            '''
+            if kk.endswith('_dtype'):
+                continue
             self.constants[kk].betensor = vv
+            if f"{kk}_dtype" in maintained_constants_betensor:
+                self.constants[kk].dtype = maintained_constants_betensor[f"{kk}_dtype"]
         # restore quantized flag and constants
         self.quantized = quant_state
         if None != constants_betensor_backup:

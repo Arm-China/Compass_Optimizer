@@ -46,10 +46,10 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
     iou_threshold = self.get_param('iou_threshold')
     areas_shift = self.params['areas_shift'] if self.quantized else 0
 
-    y0 = box[:, 0]
-    x0 = box[:, 1]
-    y1 = box[:, 2]
-    x1 = box[:, 3]
+    y0 = box[:, 0].float()
+    x0 = box[:, 1].float()
+    y1 = box[:, 2].float()
+    x1 = box[:, 3].float()
 
     if self.quantized:
         areas = torch.abs((y1 - y0) * (x1 - x0)).long()
@@ -60,77 +60,63 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
         iou_thresh_shift = 0
 
     current_box_num = box.shape[0]
-
     greater_score_thres_mask = score.float() > score_threshold
     box_index = torch.arange(current_box_num, device=score.device)[greater_score_thres_mask]
-    score_cand = score[greater_score_thres_mask].clone()
-    areas_cand = areas[greater_score_thres_mask].clone()
-    filter_score_num = len(score_cand)
+    suppress_begin_index = torch.zeros_like(box_index, device=score.device)
+    score_cand = score[greater_score_thres_mask].double().clone()
     selected_boxes_index = []
 
     keep_idx = 0
     while (keep_idx < max_nms_box_num_per_class and score_cand.numel() > 0):
-        order = score_cand[:].argsort(dim=-1, descending=True)
-        argmax_idx = order[0]
+        argmax_idx = torch.argmax(score_cand, dim=-1)
         box_id = box_index[argmax_idx]
         score_value = score_cand[argmax_idx]
-        score_cand = del_tensor_from_index(score_cand, argmax_idx)
-        box_index = del_tensor_from_index(box_index, argmax_idx)
-        areas_cand = del_tensor_from_index(areas_cand, argmax_idx)
+        origin_score = score_value.clone()
 
-        if score_value.float() <= score_threshold:
-            break
-
-        # nms difference of tf or tflite is in here, tflite contains the following code, but tf don't
-        if len(selected_boxes_index) >= 1:
-            inter_w, inter_h = iou(x0, y0, x1, y1, box_id, selected_boxes_index)
-            inter_area = inter_w * inter_h
+        for j in range(suppress_begin_index[argmax_idx], len(selected_boxes_index)):
+            bid = selected_boxes_index[j]
+            w, h = iou(x0, y0, x1, y1, box_id, bid)
+            inter = w * h
             if self.quantized:
-                inter_area = inter_area.int() >> int(areas_shift)
-            uniou = areas[box_id] + areas[selected_boxes_index] - inter_area
-            inter_area_thresh = uniou * iou_threshold
-            if self.quantized:
-                inter_area_thresh = inter_area_thresh.int() >> int(iou_thresh_shift)
-            iou_greater_than_threshold_mask = torch.gt(
-                inter_area, inter_area_thresh) if self.quantized else torch.ge(inter_area, inter_area_thresh)
-            if True in iou_greater_than_threshold_mask:
-                continue
-        ####################################################################################
+                scale_lut = self.constants['gaussian_scale_lut'].betensor
+                shift_lut = self.constants['gaussian_shift_lut'].betensor
+                soft_nms_sigma_in_shift = self.params["soft_nms_sigma_in_shift"]
+                inter = (inter).int()
+                inter = inter >> areas_shift
+                union = areas[box_id] + areas[bid] - inter
+                offset = 2 ** soft_nms_sigma_in_shift - 1
+                inter[union == 0] = 0
+                union[union == 0] = 1
+                ious = (inter * offset // union).long()
+                score_value = (score_value * scale_lut[ious]).long() >> shift_lut[ious].int()
+            else:
+                union = areas[box_id] + areas[bid] - inter
+                soft_nms_sigma = -0.5 / self.get_param('soft_nms_sigma')
+                ious = inter / union
+                if union == 0:
+                    ious = torch.tensor(0, device=score.device)
+                score_value = score_value * torch.exp(soft_nms_sigma * ious * ious)
 
-        keep[keep_idx] = box_id
-        nms_box[keep_idx, :] = box[box_id, :]
-        nms_score[keep_idx] = score_value
-        selected_boxes_index.append(box_id.item())
-        keep_idx += 1
+            if score_value.float() <= score_threshold:
+                break
 
-        if len(box_index) == 0:
-            break
-
-        # xx0 = torch.max(x0[box_id], x0[box_index])
-        # yy0 = torch.max(y0[box_id], y0[box_index])
-        # xx1 = torch.min(x1[box_id], x1[box_index])
-        # yy1 = torch.min(y1[box_id], y1[box_index])
-        # w = torch.max(torch.tensor(0.0).to(device), xx1 - xx0)
-        # h = torch.max(torch.tensor(0.0).to(device), yy1 - yy0)
-        w, h = iou(x0, y0, x1, y1, box_id, box_index)
-        inter = w * h
-        if self.quantized:
-            scale_lut = self.constants['gaussian_scale_lut'].betensor
-            shift_lut = self.constants['gaussian_shift_lut'].betensor
-            soft_nms_sigma_in_shift = self.params["soft_nms_sigma_in_shift"]
-            inter = (inter).int()
-            inter = inter >> areas_shift
-            union = areas[box_id] + areas[box_index] - inter
-            offset = 2**soft_nms_sigma_in_shift - 1
-            inter[union == 0] = 0
-            union[union == 0] = 1
-            ious = (inter * offset // union).long()
-            score_cand = (score_cand * scale_lut[ious]).long() >> shift_lut[ious].int()
+        suppress_begin_index[argmax_idx] = len(selected_boxes_index)
+        if origin_score == score_value:
+            keep[keep_idx] = box_id
+            nms_box[keep_idx, :] = box[box_id, :]
+            nms_score[keep_idx] = score_value
+            selected_boxes_index.append(box_id.item())
+            keep_idx += 1
+            score_cand = del_tensor_from_index(score_cand, argmax_idx)
+            box_index = del_tensor_from_index(box_index, argmax_idx)
+            suppress_begin_index = del_tensor_from_index(suppress_begin_index, argmax_idx)
+            continue
+        if score_value <= score_threshold:
+            score_cand = del_tensor_from_index(score_cand, argmax_idx)
+            box_index = del_tensor_from_index(box_index, argmax_idx)
         else:
-            union = areas[box_id] + areas[box_index] - inter
-            soft_nms_sigma = -0.5 / self.get_param('soft_nms_sigma')
-            ious = inter / union
-            score_cand = score_cand * torch.exp(soft_nms_sigma * ious * ious)
+            score_cand[argmax_idx] = score_value
+
     boxNum_perclass = keep_idx
     if self.quantized:
         box_scale = self.params['scale_value']
@@ -139,6 +125,7 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
     nms_box = nms_box[0:boxNum_perclass, :]
     nms_score = nms_score[0:boxNum_perclass]
     keep = keep[0:boxNum_perclass]
+
     return nms_box, nms_score, boxNum_perclass, keep
 
 
@@ -150,10 +137,10 @@ def single_nms(self, box, score, max_nms_box_num):
     nms_score = torch.zeros((max_nms_box_num))
     keep = torch.zeros((max_nms_box_num))
 
-    y0 = box[:, 0]
-    x0 = box[:, 1]
-    y1 = box[:, 2]
-    x1 = box[:, 3]
+    y0 = box[:, 0].float()
+    x0 = box[:, 1].float()
+    y1 = box[:, 2].float()
+    x1 = box[:, 3].float()
 
     # it will set optional to False when parser add 'score_threshold' in future
     score_threshold = float(self.get_param('score_threshold', optional=True, default_value='-inf'))

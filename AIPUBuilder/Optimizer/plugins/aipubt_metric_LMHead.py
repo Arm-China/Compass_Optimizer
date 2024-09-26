@@ -8,32 +8,26 @@ import torch
 @register_plugin(PluginType.Metric, '1.0')
 class LMHeadMetric(OptBaseMetric):
     '''
-    This plugin calculate correctness rate of Language Model Head output, given
-    golden output.
-
-    Sample input: FloatTensor[batch, seq_len, hidden_size]
-    Model output: FloatTensor[batch, 1, vocab_size]
-    Vocab output: IntTensor[batch, 1]
-    Output ref: IntTensor[batch, 1]
-    Param: effective_count, vocab output & ref -> [batch, seq_len-effective_count:]
-    return (ref == output).sum() / output.size()
+    Compare logits PPL with label
+    CrossEntropyLoss([batch, vocab_size], [batch, 1(token id)]) -> [batch, 1(neg log liklihood)]
+    PPL = exp([batch, 1(nll)].mean())
     '''
 
     def __init__(self):
-        self.total = 0
-        self.correct = 0
+        self.nlls = []
+        self.loss = torch.nn.CrossEntropyLoss()
 
     def __call__(self, pred, target):
-        vocab = pred[0].argmax(-1)
-        self.total += vocab.shape[0]
-        self.correct += (vocab.int() == target.argmax(-1).int()).sum().item()
+        vocab = pred[0][:, -1, :]  # [batch, seqlen, vocabsize] -> [batch, vocabsize]
+        nll = self.loss(vocab, target[0][:, 0])
+        self.nlls.append(nll)
 
     def reset(self):
-        self.correct = 0
-        self.total = 0
+        self.nlls = []
 
     def compute(self):
-        return self.correct / self.total
+        total_nll = torch.tensor(self.nlls)
+        return torch.exp(total_nll.mean())
 
     def report(self):
         return f"Correct/Total: {self.compute()}"

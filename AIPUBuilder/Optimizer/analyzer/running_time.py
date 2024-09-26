@@ -14,7 +14,7 @@ def calculate_op_running_time(f_graph, q_graph):
         f_cost_time = 0
         if n.name in nname_id.keys():
             fnodes = f_graph.nodes[nname_id[n.name]]
-            f_cost_time = fnodes.attrs['cost_time']
+            f_cost_time = fnodes.attrs.get('cost_time', -1)
         ct = [f_cost_time, q_cost_time]
         cost_times.update({key: ct})
 

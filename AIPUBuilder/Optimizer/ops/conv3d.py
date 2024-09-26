@@ -43,8 +43,7 @@ def conv3d(self, *args):
                                    )
     x = x.permute(0, 2, 3, 4, 1)
     shift_bk = None
-    if self.quantized and aasrb is not None:
-        bias = aiff_clear_lower_bits_for_bias(bias, self)
+    if self.quantized and aasrb is not None and (dtype2bits(self.constants["weights"].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
         self.outputs[0].betensor = apply_with_activation(self, x,
                                                          *args, aasrb=(aasrb, bias))
         return self.outputs[0].betensor

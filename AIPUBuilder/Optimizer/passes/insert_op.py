@@ -62,19 +62,7 @@ class InsertQuantizeOp(BaseInsertOp):
             inpt = n.inputs[0]
             if inpt.qbits is None or inpt.qmin is None or inpt.qmax is None:
                 OPT_ERROR(f"the input({inpt.name}) of {n} doesn't quantize in InsertQuantizeOp.")
-            n.attrs['quantize_scale'] = inpt.scale
-            n.attrs['quantize_zp'] = inpt.zerop
-
             n.params['unquantifiable'] = True
-            n.outputs[0].dtype = inpt.dtype
-            n.attrs['q_bits_activation'] = dtype2bits(n.outputs[0].dtype)
-            n.attrs['qinfo'] = {
-                'qbits': inpt.qbits,
-                'qmin': inpt.qmin,
-                'qmax': inpt.qmax,
-                'qinvariant': inpt.qinvariant,
-                'dtype': inpt.dtype,
-            }
 
 
 class InsertDeQuantizeOp(BaseInsertOp):
@@ -95,9 +83,6 @@ class InsertDeQuantizeOp(BaseInsertOp):
         for n in self.inserted_ops:
             n.params['unquantifiable'] = True
             n.attrs['trigger_float_op'] = n.children[0].attrs['trigger_float_op']
-            inpt = n.inputs[0]
-            n.attrs['quantize_scale'] = inpt.scale
-            n.attrs['quantize_zp'] = inpt.zerop
 
 
 class InsertPadOp(BaseInsertOp):

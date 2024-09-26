@@ -27,17 +27,18 @@ align_corners and asymmetric are mutually exclusive.
 
 
 def _scaler(i, ratio, mode, input_size, out_size):
+    i = torch.tensor(i).double()
     if mode == 'half_pixel':
-        return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else (i + 0.5) * (input_size / out_size) - 0.5
+        return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else ((i + 0.5) * input_size / out_size) - 0.5
     elif mode == 'align_corners':
         return i * 0. if out_size == 1 else (i * (input_size - 1) / (out_size - 1))
     elif mode == 'pytorch_half_pixel':
         if out_size > 1:
-            return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else (i + 0.5) * (input_size / out_size) - 0.5
+            return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else ((i + 0.5) * input_size / out_size) - 0.5
         else:
             return i * 0.
     elif mode == 'tf_half_pixel_for_nn':
-        return (i + 0.5) * (1. / ratio) if ratio is not None else (i + 0.5) * (input_size / out_size)
+        return (i + 0.5) * (1. / ratio) if ratio is not None else ((i + 0.5) * input_size / out_size)
     elif mode == 'half_pixel_symmetric':
         if ratio is not None:
             adj = out_size / (input_size * ratio)
@@ -45,9 +46,9 @@ def _scaler(i, ratio, mode, input_size, out_size):
             offset = center * (1. - adj)
             return offset + (i + 0.5) * (1. / ratio) - 0.5
         else:
-            return (i + 0.5) * (input_size / out_size) - 0.5
+            return ((i + 0.5) * input_size / out_size) - 0.5
     else:  # asymmetric
-        return i * (1. / ratio) if ratio is not None else i * (input_size / out_size)
+        return i * (1. / ratio) if ratio is not None else (i * input_size / out_size)
 
 
 def accelerate_resize_bilinear(in_data, output_shape, mode, ratio_x, ratio_y, coordination_shift):
@@ -131,11 +132,12 @@ def compute_weight_coefficients(input_size, output_size, rscale, mode, exclude_o
         if x < 1.0:
             return 1.0 - x
         return 0.0
+
     import math
-    scale = 1/rscale
+    scale = 1 / rscale if rscale is not None else (input_size / output_size)
     support = scale if (scale >= 1.0) else 1.0
     windowsize = int(math.ceil(support)) * 2 + 1
-    inv_scale = 1/(scale) if scale >= 1.0 else 1.0
+    inv_scale = 1 / (scale) if scale >= 1.0 else 1.0
     bound_w_min = []
     bound_w_max = []
     scale_buffer = torch.zeros([windowsize * output_size], device=dev)
@@ -153,7 +155,7 @@ def compute_weight_coefficients(input_size, output_size, rscale, mode, exclude_o
         xmin = xmin_cut if exclude_outside else xmin_real
         xmax = xmax_cut if exclude_outside else xmax_real
         terp = xmax - xmin
-        offset = coord*windowsize
+        offset = coord * windowsize
         for x in range(terp):
             weight = filter((x + xmin - center + 0.5) * inv_scale)
             scale_buffer[offset + x] = weight
@@ -165,7 +167,7 @@ def compute_weight_coefficients(input_size, output_size, rscale, mode, exclude_o
                 scale_buffer[offset + neg_xsize] += scale_buffer[offset + i]
             bound_xsize = (xmax + xmin - input_size) if (xmax + xmin > input_size) else 0
             for x in range(xmax - bound_xsize, xmax):
-                scale_buffer[offset+xmax - bound_xsize - 1] += scale_buffer[offset + x]
+                scale_buffer[offset + xmax - bound_xsize - 1] += scale_buffer[offset + x]
             x = 0
             while (neg_xsize | bound_xsize) > 0 and (x < xmax_cut - xmin_cut):
                 scale_buffer[offset + x] = scale_buffer[offset + x + neg_xsize]
@@ -194,21 +196,21 @@ def resize_bilinear_antialias(self, input_data, params):
         weight_coefficients_y, bound_y_min, bound_y_max = compute_weight_coefficients(
             input_height, output_height, ratio_y, mode, exclude_outside, dev)
         self.constants["weight_coefficients_x"] = PyTensor(
-            self.name+"/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            self.name + "/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
         self.constants["weight_coefficients_y"] = PyTensor(
-            self.name+"/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            self.name + "/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
         # currently set to uint16
         bound_x_dtype = bound_y_dtype = bits2dtype(16, False)
         # _, bound_x_dtype = range2dtype(0, input_width)
         # _, bound_y_dtype = range2dtype(0, input_height)
         self.constants["bound_x_min"] = PyTensor(
-            self.name+"/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+            self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
         self.constants["bound_x_max"] = PyTensor(
-            self.name+"/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+            self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
         self.constants["bound_y_min"] = PyTensor(
-            self.name+"/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+            self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
         self.constants["bound_y_max"] = PyTensor(
-            self.name+"/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+            self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
     else:
         weight_coefficients_x = self.constants['weight_coefficients_x'].betensor
         weight_coefficients_y = self.constants['weight_coefficients_y'].betensor
@@ -226,7 +228,8 @@ def resize_bilinear_antialias(self, input_data, params):
         xmin = bound_x_min[w]
         xmax = bound_x_max[w]
         tmp_data = (input_data[:, :, xmin:xmax, :] * weight_coefficients_x[w *
-                    windowsize_w: w*windowsize_w + xmax - xmin].reshape([1, 1, -1, 1]))
+                                                                           windowsize_w: w * windowsize_w + xmax - xmin].reshape(
+            [1, 1, -1, 1]))
         output = torch.sum(tmp_data, dim=2, keepdim=False)
         image_temp_buffer[:, :, w, :] = output
     if quantized:
@@ -238,7 +241,8 @@ def resize_bilinear_antialias(self, input_data, params):
         xmin = bound_y_min[h]
         xmax = bound_y_max[h]
         tmp_data = (image_temp_buffer[:, xmin:xmax, :, :] * weight_coefficients_y[h *
-                    windowsize_h: h*windowsize_h + xmax - xmin].reshape([1, -1, 1, 1]))
+                                                                                  windowsize_h: h * windowsize_h + xmax - xmin].reshape(
+            [1, -1, 1, 1]))
         output = torch.sum(tmp_data, dim=1, keepdim=False)
         output_data[:, h, :, :] = output
     if quantized:
@@ -302,7 +306,7 @@ def nearest_resize(input_data, output_shape, mode, ratio_x, ratio_y, nearest_mod
 
     def get_pixel(nearest_mode, original_pixel, down_sample):
         if nearest_mode == "round_prefer_floor":
-            mask = torch.isclose(original_pixel, original_pixel.int() + 0.5, rtol=1e-07, atol=1e-09)
+            mask = torch.eq(original_pixel, torch.trunc(original_pixel) + 0.5)
             return torch.where(mask, torch.floor(original_pixel).int(), torch.round(original_pixel).int())
         elif nearest_mode == "floor":
             return torch.floor(original_pixel).int()
@@ -317,10 +321,8 @@ def nearest_resize(input_data, output_shape, mode, ratio_x, ratio_y, nearest_mod
                 ratio_y, mode, in_h, out_h)
     x = _scaler(torch.arange(out_w, device=input_data.device),
                 ratio_x, mode, in_w, out_w)
-
     map_inp_h = get_pixel(nearest_mode, y, out_h / in_h < 1)
     map_inp_w = get_pixel(nearest_mode, x, out_w / in_w < 1)
-
     map_inp_h = torch.maximum(
         map_inp_h, torch.tensor(0, device=input_data.device))
     map_inp_h = torch.minimum(map_inp_h, torch.tensor(
@@ -345,9 +347,9 @@ def interp(self, *args):
     method = self.get_param('method').lower()
     rmode = self.get_param('mode').lower()
     ratio_x = self.get_param('ratio_x', optional=True,
-                             default_value=self.outputs[0].ir_shape[2]/self.inputs[0].ir_shape[2])
+                             default_value=None)
     ratio_y = self.get_param('ratio_y', optional=True,
-                             default_value=self.outputs[0].ir_shape[1]/self.inputs[0].ir_shape[1])
+                             default_value=None)
     antialias = self.get_param('antialias', optional=True, default_value=False)
     exclude_outside = self.get_param('exclude_outside', optional=True, default_value=False)
     output_shape = out.ir_shape
@@ -362,11 +364,6 @@ def interp(self, *args):
         if method not in ['bilinear']:
             OPT_WARN(
                 f"antialias is only valid for bilinear now (will support bicubic antialias in feature), but method is {method}, so we reset antialias false")
-            antialias = False
-            self.params['antialias'] = antialias
-        if ratio_y > 1.0 or ratio_x > 1.0:
-            OPT_WARN(
-                f"antialias is only valid for downscaling, so we reset antialias false")
             antialias = False
             self.params['antialias'] = antialias
 
@@ -387,6 +384,10 @@ def interp(self, *args):
         if self.quantized:
             coordination_shift = self.get_param('interp_shift_value')
             params['coordination_shift'] = coordination_shift
+            # use input_size/output_size instead of ratio in quantization,
+            # this may make the float and quantization results different
+            params['ratio_x'] = None
+            params['ratio_y'] = None
         if antialias:
             params['exclude_outside'] = exclude_outside
             outp = resize_bilinear_antialias(self, input_data, params)
@@ -406,6 +407,9 @@ def interp(self, *args):
             'nearest_mode', optional=True, default_value='round_prefer_floor').lower()
         inpt = inp.betensor.float()
         output_shape = [inp.shape[0]] + list(output_shape)[1:]
+        if self.quantized:
+            ratio_x = None
+            ratio_y = None
         outp = nearest_resize(inpt, output_shape, rmode,
                               ratio_x, ratio_y, n_mode)
 
@@ -454,21 +458,23 @@ def interp_quantize(self, *args):
             # _, bound_x_dtype = range2dtype(0, input_width)
             # _, bound_y_dtype = range2dtype(0, input_height)
             self.constants["bound_x_min"] = PyTensor(
-                self.name+"/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+                self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
             self.constants["bound_x_max"] = PyTensor(
-                self.name+"/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+                self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
             self.constants["bound_y_min"] = PyTensor(
-                self.name+"/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+                self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
             self.constants["bound_y_max"] = PyTensor(
-                self.name+"/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+                self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
 
-            weight_coefficients_x = (weight_coefficients_x*multiplier).int()
-            weight_coefficients_y = (weight_coefficients_y*multiplier).int()
+            weight_coefficients_x = (weight_coefficients_x * multiplier).int()
+            weight_coefficients_y = (weight_coefficients_y * multiplier).int()
             weight_dtype = bits2dtype(interp_shift, False)
             self.constants["weight_coefficients_x"] = PyTensor(
-                self.name+"/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(weight_dtype)))
+                self.name + "/weight_coefficients_x",
+                weight_coefficients_x.cpu().numpy().astype(dtype2nptype(weight_dtype)))
             self.constants["weight_coefficients_y"] = PyTensor(
-                self.name+"/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(weight_dtype)))
+                self.name + "/weight_coefficients_y",
+                weight_coefficients_y.cpu().numpy().astype(dtype2nptype(weight_dtype)))
         else:
             # interp_shift = 13
             interp_shift = extra_params[1]

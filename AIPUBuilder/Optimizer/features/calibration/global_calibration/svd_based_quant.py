@@ -105,7 +105,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         mvalue = have_inf*-127
         filt_out = out.betensor.float()*(~have_inf)+mvalue
         # U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
-        S = torch.abs(torch.fft.fft(filt_out))
+        S = torch.abs(torch.fft.fft(filt_out, norm='forward'))
         denoise_out = PyTensor('denoise_out', out.ir_shape, out.dtype)
         denoise_out.min, denoise_out.max = bmin, bmax
 
@@ -121,7 +121,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             qbetensor = linear_quantize_clip(filt_out, init_s, zerop, q_min, q_max)
             deqbetenor = linear_dequantize(qbetensor, init_s, zerop)
             # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
-            qS = torch.abs(torch.fft.fft(deqbetenor))
+            qS = torch.abs(torch.fft.fft(deqbetenor, norm='forward'))
             min_dist = MSE(S, qS)
             # zero = torch.clamp(zerop.round(), -2 ** (out.qbits - 1) + 1, 2 ** (out.qbits - 1))
             # TODO: support per-channel
@@ -133,7 +133,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
                 s, zerop, _, _, _ = get_linear_quant_params_from_tensor(denoise_out, quant_mode, out.qbits, out_signed)
                 qbetensor = linear_quantize_clip(filt_out, s, zerop, q_min, q_max)
                 deqbetenor = linear_dequantize(qbetensor, s, zerop)
-                qS = torch.abs(torch.fft.fft(deqbetenor))
+                qS = torch.abs(torch.fft.fft(deqbetenor, norm='forward'))
                 # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
                 # dist = torch.dist(S, qS)
                 dist = MSE(S, qS)
@@ -290,9 +290,9 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
                     out = n.outputs[0]
 
                     if optimized_flag and mode > 0 and mode < 3:
-                        fmin, fmax = get_denoise_max_min(out)
+                        omin, omax = get_denoise_max_min(out)
                         if mode == 1:
-                            omin, omax = get_best_scale(out, fmin, fmax, quant_mode, optimized_flag)
+                            omin, omax = get_best_scale(out, omin, omax, quant_mode, optimized_flag)
                             # symmetric = QuantMode.is_symmetric(quant_mode)
 
                             # out_signed = is_signed(n.outputs[0].dtype)

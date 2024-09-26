@@ -332,7 +332,7 @@ def linear_dequantize(x, scale, zero_point, key_axis=None):
         scale_shape = [-1 if s == key_axis else 1 for s in range(x_t.dim())]
         scale_t = scale_t.reshape(scale_shape)
         zero_point_t = zero_point_t.reshape(scale_shape)
-    return (x_t + zero_point_t) / scale_t
+    return (x_t + zero_point_t) * (1.0 / scale_t)
 
 
 def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mult_bits_ceil=15, shift_bits_ceil=31,
@@ -486,31 +486,6 @@ def whether_align_to_out_scale(n):
             if len(qn.outputs) > 0 and qn.outputs[0].scale != iscale:
                 scale_changed.append(True)
         return len(scale_changed) > 1
-
-
-def aiff_clear_lower_bits_for_bias(b: torch.Tensor, node: PyNode = None):
-    mbits = range2bits(b.min(), b.max())[0]
-    lbits = 32
-    if node is not None:
-        lbits = node.get_attrs('bias_effective_bits', optional=True, default_value=32)
-    if mbits <= lbits:
-        return b
-    shift = mbits - lbits
-    b = (b.round().long() >> shift) << shift
-    return b.double()
-
-
-def aiff_merge_shifts(scales: torch.Tensor, shifts: torch.Tensor):
-    if not isinstance(scales, torch.Tensor):
-        scales = torch.tensor(scales)
-        shifts = torch.tensor(shifts)
-    m_shift = shifts.int().max()
-    scale_norm = scales * 2 ** (m_shift - shifts)
-    remain_shift = torch.log2(scale_norm.max() + 1).ceil() - 15
-    if remain_shift > 0:
-        scale_norm = scale_norm >> remain_shift
-        m_shift -= remain_shift
-    return scale_norm, m_shift
 
 
 def aiff_ahead_shift_bias(x: torch.Tensor, origin_shift: torch.Tensor,

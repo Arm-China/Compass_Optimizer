@@ -288,6 +288,8 @@ def broadcasting_transform(x0, x1):
 
 
 def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    f_vdata[f_vdata.isnan()] = 0
+    f_vdata = torch.clamp(f_vdata.float(), torch.finfo(torch.float32).min, torch.finfo(torch.float32).max)
     mantisa_bit = 16
     #lut_bits = 9
     vshape = f_vdata.shape
@@ -312,6 +314,8 @@ def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -
 
 
 def x3_aiff_softmax_approximation(vx: torch.Tensor, axis, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    vx[vx.isnan()] = 0
+    vx = torch.clamp(vx.float(), torch.finfo(torch.float32).min, torch.finfo(torch.float32).max)
     max_v, _ = vx.max(axis, keepdim=True)
     f_vdata = (vx-max_v)*1.442695
     yy = x3_aiff_exp_approximation(f_vdata, pow2_f_lut)

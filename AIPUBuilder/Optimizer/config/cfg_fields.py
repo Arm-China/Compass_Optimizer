@@ -98,7 +98,7 @@ class BaseField(object):
         cfg_line = str(cfg_content)
         rnode_cfg = r'\s*(({})|({})|({})):\s*({})\s*'.format(BaseField.rlayers,
                                                              BaseField.roptypes, BaseField.rnames, roi_pattern)
-        re_per_node_field = r'(^\s*{}\s*$)|(^\s*{}&(\<{}\>)+\s*$)'.format(roi_pattern, roi_pattern, rnode_cfg)
+        re_per_node_field = r'(^\s*{}\s*$)|(^\s*{}\s*&\s*(\<{}\>)+\s*$)'.format(roi_pattern, roi_pattern, rnode_cfg)
         pdict = PerNodeFieldDict()
         flag = False
         if re.match(re_per_node_field, cfg_line):
@@ -836,8 +836,8 @@ class GlobalCalibrationParamField(BaseField):
         rmethod_param_optypes = r'{}{}{}'.format(rmethod, rparams, roptypes)
         rmethod_param_layers = r'{}{}{}'.format(rmethod, rparams, rlayers)
         rmethod_param_names = r'{}{}{}'.format(rmethod, rparams, rnames)
-        one_method = r'\s*(({})|({})|({})|({}))\s*'.format(rmethod, rmethod_param,
-                                                           rmethod_param_optypes, rmethod_param_layers)
+        one_method = r'\s*(({})|({})|({})|({})|({}))\s*'.format(rmethod, rmethod_param,
+                                                                rmethod_param_optypes, rmethod_param_layers, rmethod_param_names)
         multi_methods = r'^{}(&{})*$'.format(one_method, one_method)
         gcstr = str(gc).lower().strip()
         if 'none' == gcstr:
@@ -1211,6 +1211,25 @@ class BiasEffectiveBitsField(BaseField):
                 f"in computation (lower bits will be set to 0), due to hardware restriction. {BaseField.per_node_cfg_usage}")
 
 
+@field_register('bias_effective_bits_auto_adaption', 'default')
+class BiasEffectiveBitsAutoAdaptionField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(us):
+        return f"Require the 'bias_effective_bits_auto_adaption' field must be in bool type, now is {type(us)} type, default value=False"
+
+    @staticmethod
+    def message():
+        return f"Whether to enable a local automatic search process (may not be optimal for end to end accuracy) to find a proper bias_bits value for compensating accuracy loss caused by 'bias_effective_bits < bias_bits'. {BaseField.per_node_cfg_usage}"
+
+
 @field_register('unify_shifts_for_aiff', 'default')
 class UnifyShiftsForAIFFField(BaseField):
     @staticmethod
@@ -1449,6 +1468,25 @@ class ResizeDegradeToNearestField(BaseField):
     @staticmethod
     def message():
         return f"Whether to degrade resize method to nearest neighbor to speed up resize. {BaseField.per_node_cfg_usage}"
+
+
+@field_register('unify_scales_for_kvc_concat', 'default')
+class UnifyScalesForKVCConcat(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'unify_scales_for_kvc_concat' field be 'False' or 'True', default value=False."
+
+    @staticmethod
+    def message():
+        return f"Used to quantize self-regression concat operator, which concat will have one ancestor input and multiple OpType.Input inputs, and its output will direclty gives to OpType.Input in host runtime. Enable this flag to steady the quantization by reusing the ancestor input multiple times. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('unify_scales_for_concat', 'default')

@@ -52,9 +52,12 @@ class CfgParser(object):
         for k, v in ALL_FIELDS.items():
             defaults.update({k: v.default()})
         if Target.optimized_target_level(ptarget) >= 1:
+            # x2
             defaults['bias_effective_bits'] = str(Target.aiff_bias_effective_bits(ptarget))
+            defaults['trigger_float_op'] = 'disable & <[RMSNorm]:float16_preferred!>'
         if Target.optimized_target_level(ptarget) >= 2:
             # defaults['trigger_float_op'] = 'disable & <[Softmax, MVN, LayerNorm, GroupNorm, InstanceNorm, RMSNorm]:float16_preferred!>'
+            # x3
             defaults['enable_pass_tune_op_complicated_activations'] = '[0][1]'
             defaults['enable_pass_tune_op_softmax'] = '[0][1]'
 

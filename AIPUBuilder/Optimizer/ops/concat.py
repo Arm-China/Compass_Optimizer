@@ -7,8 +7,43 @@ from AIPUBuilder.Optimizer.logger import *
 import functools
 
 
+def check_kvc_concat(self):
+    if 'unify_scales_for_kvc_concat' not in self.attrs:
+        return False
+    if not self.attrs['unify_scales_for_kvc_concat']:
+        return False
+    if len(self.parents) == 0:
+        return False
+    input_op = set()
+    for inp in self.parents:
+        input_op.add(inp.type)
+    if len(input_op) == 2 and OpType.Input in input_op:
+        return True
+    return False
+
+
 @quant_register(OpType.Concat)
 def concat_quantize(self, *args):
+    if check_kvc_concat(self):
+        real_inp = None
+        for inp in self.inputs:
+            if inp.pnode.type != OpType.Input:
+                real_inp = inp
+                break
+        for inp in self.inputs:
+            if inp.pnode.type != OpType.Input:
+                continue
+            inp.scale = real_inp.scale
+            inp.zerop = real_inp.zerop
+            inp.dtype = real_inp.dtype
+            inp.qbits = real_inp.qbits
+            inp.qinvariant = real_inp.qinvariant
+        self.outputs[0].scale = real_inp.scale
+        self.outputs[0].zerop = real_inp.zerop
+        self.outputs[0].dtype = real_inp.dtype
+        self.outputs[0].qbits = real_inp.qbits
+        self.outputs[0].qinvariant = real_inp.qinvariant
+        return
 
     q_mode_activation = self.attrs["q_mode_activation"]
     q_bits_activation = self.attrs["q_bits_activation"]
@@ -175,6 +210,16 @@ def concat(self, *args):
     axis = self.get_param('axis')
     out = self.outputs[0]
     inp_betensors = []
+    if check_kvc_concat(self):
+        real_inp = None
+        for inp in self.inputs:
+            if inp.pnode.type != OpType.Input:
+                real_inp = inp
+                break
+        for inp in self.inputs:
+            if inp.pnode.type != OpType.Input:
+                continue
+            inp.betensor = real_inp.betensor.clone()
     for i, inp in enumerate(self.inputs):
         inp_betensors.append(inp.betensor)
     if self.quantized:

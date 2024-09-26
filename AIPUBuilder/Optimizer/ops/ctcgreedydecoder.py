@@ -63,7 +63,7 @@ def ctcgreedydecoder(self, *args):
     seq_lens = self.inputs[1].betensor
     is_merge_repeated = self.get_param('merge_repeated')
     batch = inps.shape[0]
-    tout = torch.full([batch] + [*self.outputs[0].ir_shape][1:], -1)
+    tout = torch.full([batch] + [*self.outputs[0].ir_shape][1:], dtype2range(self.outputs[0].dtype)[1])
     for b in range(batch):
         inp = inps[b]
         seq_len = seq_lens[b].int().item()

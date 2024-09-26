@@ -68,9 +68,8 @@ def conv2d(self, *args):
         x = _conv2d_torch_impl(self, *args)
 
     shift_bk = None
-    if self.quantized and self.aasrb is not None:
+    if self.quantized and self.aasrb is not None and (dtype2bits(self.constants["weights"].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
         bias = self.constants['biases'].betensor.clone().float() + self.constants['biases'].broadcast_zerop
-        bias = aiff_clear_lower_bits_for_bias(bias, self)
         self.outputs[0].betensor = apply_with_activation(self, x,
                                                          *args, aasrb=(self.aasrb, bias))
         return self.outputs[0].betensor
@@ -264,7 +263,7 @@ def search_bias_bit_and_quantize(self, *args):
     compress_log_softmax = compressed_q_bias_data.log_softmax(dim=-1)
     float_quant_kld = torch.nn.functional.kl_div(quantize_log_softmax, float_softmax, reduction='batchmean')
     float_compress_kld = torch.nn.functional.kl_div(compress_log_softmax, float_softmax, reduction='batchmean')
-    if (float_quant_kld - float_compress_kld).abs() > 0.05:
+    if (float_quant_kld - float_compress_kld).abs() > 0.05 and self.get_attrs('bias_effective_bits_auto_adaption', optional=True, default_value=False):
         begin_bits = min(max(bias_effective_bits, 19), q_bits_bias - 1)
         end_bits = q_bits_bias
         bits = torch.arange(begin_bits, end_bits, device=dev)

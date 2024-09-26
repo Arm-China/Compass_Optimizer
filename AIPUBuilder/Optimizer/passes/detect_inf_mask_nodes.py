@@ -16,3 +16,5 @@ def detect_inf_mask_nodes(graph, config):
                         n.constants['weights'].ir_shape, device=n.constants['weights'].device) + 32767
                     n.constants['biases'].betensor = torch.zeros(
                         n.constants['biases'].ir_shape, device=n.constants['weights'].device) - 32767
+            if n.type == OpType.Constant:
+                n.constants['weights'].betensor[n.constants['weights'].betensor < -32767] = -32768

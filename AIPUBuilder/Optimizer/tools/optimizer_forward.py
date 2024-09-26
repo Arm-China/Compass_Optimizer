@@ -75,17 +75,26 @@ class OptForward(object):
         output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in g.output_tensors]
         return input_tensors, output_tensors
 
-    def forward(self, data, transfer_to_float=False, keep_tensors=False):
+    def forward(self, data, transfer_to_float=False, keep_tensors=False, fit_dtype=True, dump_dir=None):
         """
         :param data: input float data uses to forward
         :param transfer_to_float: whether dequantize the output data, default=False
         :param keep_tensors: whether reserve the intermediate data, default=False
+        :param fit_dtype: whether align tensors to dtypes in ir, default=True
+        :param dump_dir: whether dump all tensors to dump_dir
         :return: the forward result
         """
         output_data = []
         input_data = self.check_input_data(data)
+        if dump_dir is not None:
+            keep_tensors = True
+            if not os.path.exists(dump_dir):
+                os.makedirs(dump_dir)
         if input_data:
-            self.optimizer.g.enable_fit_dtype()
+            if fit_dtype:
+                self.optimizer.g.enable_fit_dtype()
+            else:
+                self.optimizer.g.disable_fit_dtype()
             out = self.optimizer.g.forward(input_data, keep_tensors=keep_tensors)
             self.optimizer.g.disable_fit_dtype()
             for o in out:
@@ -97,7 +106,12 @@ class OptForward(object):
                 if len(o.ir_shape) <= 1:
                     o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
-
+            if dump_dir is not None:
+                for n in self.optimizer.g.nodes:
+                    for out in n.outputs:
+                        path = (n.attrs['layer_id'] + '_[' + n.name + ']_' +
+                                out.name).replace('/', '_').replace(':', '_') + '.bin'
+                        out.betensor.cpu().numpy().astype(dtype2nptype(out.dtype)).tofile(os.path.join(dump_dir, path))
         return output_data
 
     def init_exe_debugger(self):
@@ -125,13 +139,14 @@ class OptForward(object):
         if OpType.Input in op_list:
             if not exclude:
                 op_list.remove(OpType.Input)
-            else:
+        else:
+            if exclude:
                 op_list.append(OpType.Input)
         for i, t in enumerate(self.optimizer.g.input_tensors):
             inp = PyTensor("tmp", data[i]).betensor
             t.betensor = inp
         assert len(self.optimizer.g.nodes) == len(self.aipugraph.nodes)
-
+        self.optimizer.g.enable_fit_dtype()
         refs = {}
         for node in self.optimizer.g.nodes:
             for parent in node.parents:
@@ -168,6 +183,7 @@ class OptForward(object):
                 pbar.update(1)
             pbar.refresh()
         outputs = self.optimizer.g.output_tensors
+        self.optimizer.g.disable_fit_dtype()
         result = []
         for o in outputs:
             if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
@@ -180,13 +196,15 @@ class OptForward(object):
             result.append(o_data)
         return result
 
-    def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False):
+    def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False, fit_dtype=True, dump_dir=None):
         """
         default this function is used when input data which is used to forward is quantized.
         :param quantized_data: the quantized data which is used to forward
         :param transfer_to_float: whether dequantize the output data, default=False
         :param batch_size: forward batch_size, default=1
         :param keep_tensors: whether reserve the intermediate data, default=False
+        :param fit_dtype: whether align tensors to dtypes in ir, default=True
+        :param dump_dir: whether dump all tensors to dump_dir
         :return: the forward result
         """
 
@@ -196,7 +214,8 @@ class OptForward(object):
         self.optimizer.g.current_batch_idx = 0
         dequantized_data = []
         for data, inp_t in zip(input_data, input_tensors):
-            d = linear_dequantize(PyTensor('null', data).betensor.long(), inp_t.broadcast_scale, inp_t.broadcast_zerop)
+            d = linear_dequantize(PyTensor('null', data).betensor, inp_t.broadcast_scale, inp_t.broadcast_zerop)
             dequantized_data.append(d)
-        out = self.forward(dequantized_data, transfer_to_float=transfer_to_float, keep_tensors=keep_tensors)
+        out = self.forward(dequantized_data, transfer_to_float=transfer_to_float,
+                           keep_tensors=keep_tensors, fit_dtype=fit_dtype, dump_dir=dump_dir)
         return out

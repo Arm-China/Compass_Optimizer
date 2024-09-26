@@ -25,7 +25,7 @@ def leakyrelu(self, *args):
         zeros = torch.zeros_like(inp.betensor)
         x = inp.betensor + inp.zerop
         # here, need not clamp, to use linear_requantize, we using a bigest value in hardware platform
-        tmp_qmin, tmp_qmax = bits2range(48, is_signed(out.dtype))
+        tmp_qmin, tmp_qmax = bits2range(48, True)
         y = linear_requantize(torch.minimum(x, zeros), negative_slope, negative_slope_shift, -
                               torch.maximum(x, zeros), tmp_qmin, tmp_qmax)
         # y = torch.round(torch.maximum(x, zeros) + ((negative_slope * torch.minimum(x, zeros)*(0.5 **negative_slope_shift)))).int()

@@ -25,12 +25,14 @@ weights_type=int8
 weights_offset=16924508
 weights_size=17384
 weights_shape=8692
-width=16384
-height=16384
+image_width=800
+image_height=800
 score_threshold_uint8=127
 box_shift=13
-
+proposal_normalized = true(default)
 '''
+
+
 _param_default_value = {
     'class_num': 21,
     'feature_map': [19, 10, 5, 3, 2, 1],
@@ -208,9 +210,10 @@ def decodebox_ssd(self, *args):
     if not self.quantized:
         score_threshold = self.get_param('score_threshold')
         variance = self.get_param('variance', optional=True, default_value=_param_default_value['variance'])
+        proposal_normalized = self.get_param('proposal_normalized', optional=True, default_value=True)
         config['h_min'], config['w_min'] = 0., 0.
-        config['h_max'] = self.get_param('height_max', optional=True, default_value=1.0)
-        config['w_max'] = self.get_param('width_max', optional=True, default_value=1.0)
+        config['h_max'] = 1.0 if proposal_normalized else self.get_param('image_height')
+        config['w_max'] = 1.0 if proposal_normalized else self.get_param('image_width')
         config['clip'] = self.get_param('clip', optional=True, default_value=True)
         config['variance'] = variance
         if len(self.inputs) < 3:
@@ -239,9 +242,9 @@ def decodebox_ssd(self, *args):
         config['out_is_signed'] = is_signed(self.inputs[1].dtype)
 
         config['h_min'] = 0
-        config['h_max'] = self.get_param('height')
+        config['h_max'] = self.get_param('image_height')
         config['w_min'] = 0
-        config['w_max'] = self.get_param('width')
+        config['w_max'] = self.get_param('image_width')
         config['clip'] = self.get_param('clip', optional=True, default_value=True)
         config['box_shift'] = self.get_param('box_shift')
 
@@ -352,8 +355,11 @@ def quantize_decodebox(self, *args):
 
         coord_zp = stats_coords.zerop
 
-    self.params['height'] = coord_scale
-    self.params['width'] = coord_scale
+    proposal_normalized = self.get_param('proposal_normalized', optional=True, default_value=True)
+    height_max = 1 if proposal_normalized else self.get_param('image_height')
+    width_max = 1 if proposal_normalized else self.get_param('image_width')
+    self.params['image_height'] = coord_scale * height_max
+    self.params['image_width'] = coord_scale * width_max
 
     # step3
     sign = is_signed(in_bbox.dtype)

@@ -25,14 +25,14 @@ def atanh_forward(self, *args):
             nan_mask = torch.isnan(out)
             infi_mask = torch.isinf(out)
             if True in nan_mask:
-                out[nan_mask] = OPT_INT_MAX
+                out[nan_mask] = torch.finfo(out.dtype).max
                 OPT_WARN(
                     f"{self} there are nan value in the output, please check the input range.Currently,nan is overridden with a maximum value {OPT_INT_MAX}, but this may make the result abnormal!")
 
             if True in infi_mask:
                 OPT_WARN(
                     f"{self} the output exists +/-INF, for the convenience of subsequent quantification, we do +/-INF clamp to [{OPT_INT_MIN},{OPT_INT_MAX}].")
-                out = torch.clamp(out, OPT_INT_MIN, OPT_INT_MAX)
+                out = torch.clamp(out, torch.finfo(out.dtype).min, torch.finfo(out.dtype).max)
         return out
     self.attrs['lambda_func'] = lambda x: approximated_float_forward(self,  x)
     self.outputs[0].betensor = activation_module.unknown_activation(self, *args)

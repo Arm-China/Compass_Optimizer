@@ -124,9 +124,9 @@ def lstm(self, *args):
         return [o.betensor for o in self.outputs]
 
     inp0 = self.inputs[0]
-    input_seq = inp0.betensor.float()
-    h_cell = self.inputs[1].betensor.float()
-    c_cell = self.inputs[2].betensor.float()
+    input_seq = inp0.betensor.double()
+    h_cell = self.inputs[1].betensor.double()
+    c_cell = self.inputs[2].betensor.double()
     batch_size = input_seq.shape[0]
     time_step = self.get_param('time_steps')
     input_size = self.get_param('input_size')
@@ -151,12 +151,12 @@ def lstm(self, *args):
         c_initial = torch.cat((c_initial, c_cell[current_c_initial_idx: current_c_initial_idx + 1]), dim=0)
 
     w = self.constants["weights"].betensor.clone()
-    bias = self.constants['biases'].betensor.clone().float()
+    bias = self.constants['biases'].betensor.clone().double()
     dev = inp0.device
     if self.quantized:
         w += self.constants["weights"].broadcast_zerop
         bias += self.constants['biases'].broadcast_zerop
-    weights = w.permute(1, 0).float()
+    weights = w.permute(1, 0).double()
     out_sequence = self.get_param('out_sequence')
     activations_list = self.get_param('activations') \
         if 'activations' in self.params else ['SIGMOID', 'TANH', 'TANH']
@@ -282,7 +282,6 @@ def lstm(self, *args):
         scale_ = self.constants["scale"].betensor
         shift_ = self.constants["shift"].betensor
         diff_shifts_ = self.constants["diff_shifts"].betensor
-
         if is_torch_tensor_with_multi_data(self.constants["weights"].scale):
             scale = scale_.to(dev)
             shift = shift_.to(dev)
@@ -313,12 +312,12 @@ def lstm(self, *args):
         act_qmax = 2 ** 31 - 1
         act_qmin = -2 ** 31
         for b in range(batch_size):
-            h_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
-            c_all = torch.zeros([1, cell_size], device=dev, dtype=torch.float)
-            h_prev = torch.unsqueeze(h_initial[b], dim=0)
-            c_prev = torch.unsqueeze(c_initial[b], dim=0)
+            h_all = torch.zeros([1, cell_size], device=dev, dtype=torch.double)
+            c_all = torch.zeros([1, cell_size], device=dev, dtype=torch.double)
+            h_prev = torch.unsqueeze(h_initial[b], dim=0).double()
+            c_prev = torch.unsqueeze(c_initial[b], dim=0).double()
             for ts in range(time_step):
-                in_ts = torch.reshape(input_seq[b, ts, :], (-1, input_size)).float()
+                in_ts = torch.reshape(input_seq[b, ts, :], (-1, input_size)).double()
                 x_by_wx = torch.matmul(in_ts, wx_q)
                 h_by_wh = torch.matmul(h_prev.to(wh_q.dtype), wh_q)
                 if dtype == 'int8':
@@ -348,7 +347,6 @@ def lstm(self, *args):
                     bias_s = linear_requantize(bias, 1, shift_[1] - m_shift, 0, act_qmin, act_qmax)
                     mat_sum = x_by_wx_s + re_scaled_h_by_wh_s + bias_s
                     mat_sum = torch.clamp(torch.round(mat_sum), act_qmin, act_qmax)
-
                     i_tmp, g_tmp, f_tmp, o_tmp = torch.chunk(mat_sum, 4, dim=1)
 
                     f_in = linear_requantize(f_tmp, ft_scale, m_shift, 0, qmin, qmax)
@@ -357,13 +355,13 @@ def lstm(self, *args):
                     o_in = linear_requantize(o_tmp, ot_scale, m_shift, 0, qmin, qmax)
 
                     # g_rnn_activation_func[activations_list[0]][3](f_in, ft_table).float()
-                    f = lookup_lut_powerof2(f_in, ft_table, lut_in_bits, True, lut_out_bits, True)
+                    f = lookup_lut_powerof2(f_in, ft_table, lut_in_bits, True, lut_out_bits, True).double()
                     # g_rnn_activation_func[activations_list[0]][3](i_in, it_table).float()
-                    i = lookup_lut_powerof2(i_in, it_table, lut_in_bits, True, lut_out_bits, True)
+                    i = lookup_lut_powerof2(i_in, it_table, lut_in_bits, True, lut_out_bits, True).double()
                     # g_rnn_activation_func[activations_list[1]][3](g_in, ct_table).float()
-                    g = lookup_lut_powerof2(g_in, ct_table, lut_in_bits, True, lut_out_bits, True)
+                    g = lookup_lut_powerof2(g_in, ct_table, lut_in_bits, True, lut_out_bits, True).double()
                     # g_rnn_activation_func[activations_list[0]][3](o_in, ot_table).float()
-                    o = lookup_lut_powerof2(o_in, ot_table, lut_in_bits, True, lut_out_bits, True)
+                    o = lookup_lut_powerof2(o_in, ot_table, lut_in_bits, True, lut_out_bits, True).double()
 
                 diff_shift = diff_shifts_[ts]
                 i_times_g = torch.multiply(i, g)
@@ -377,7 +375,7 @@ def lstm(self, *args):
 
                 re_scaled_c_tmp = linear_requantize(c_tmp, scale_[3], shift_[3]-diff_shift, 0, qmin+1, qmax)
                 ctmp_lut_out = lookup_lut_powerof2(re_scaled_c_tmp, h_table, lut_in_bits, True, lut_out_bits, True)
-                h_prev = torch.multiply(o, ctmp_lut_out).float()
+                h_prev = torch.multiply(o, ctmp_lut_out).double()
                 h_prev = linear_requantize(h_prev, scale_[4], shift_[4], 0, qmin+1, qmax)
                 c_prev = linear_requantize(c_tmp, scale_[5 + 2 * ts + 1], shift_[5 + 2 * ts + 1]-diff_shift,
                                            c_zerop[2 * ts + 1], qmin+1, qmax)

@@ -32,6 +32,8 @@ def deconv2d(self, *args):
     inp = self.inputs[0].betensor.float()
     weights = self.constants["weights"].betensor.clone().float()
     bias = self.constants['biases'].betensor.clone().float()
+    aasrb = self.get_param('remain_shift',
+                           optional=True, default_value=None)
     if self.quantized:
         inp += self.inputs[0].zerop
         w_zp = self.constants["weights"].broadcast_zerop
@@ -94,7 +96,7 @@ def deconv2d(self, *args):
         OPT_DEBUG('output shape x may be not correct,please check outpadding_x')
     x = nn.functional.conv_transpose2d(inp,
                                        weights,
-                                       bias,
+                                       bias if aasrb is None else None,
                                        stride=(stride_y, stride_x),
                                        padding=(0, 0),
                                        output_padding=(outpadding_y, outpadding_x),
@@ -109,6 +111,9 @@ def deconv2d(self, *args):
     w = x.shape[-1]
     crop_x = x[..., top_start:h-bottom_end, left_start:w-right_end]
     x = nchw2nhwc(crop_x)
-
+    if self.quantized and aasrb is not None and (dtype2bits(self.constants["weights"].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
+        self.outputs[0].betensor = apply_with_activation(self, x,
+                                                         *args, aasrb=(aasrb, bias))
+        return self.outputs[0].betensor
     self.outputs[0].betensor = apply_with_activation(self, x, *args)
     return self.outputs[0].betensor

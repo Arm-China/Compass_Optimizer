@@ -125,14 +125,13 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
     spatial_y, spatial_x = spatial
     roi_num = rois.shape[0]
     _, fm_height, fm_width, fm_channel = fm.shape[:]
-    out_data = []
     do_scale, do_shift = scale_shift_pairs['total_scale_shift']
     input1_scale, input1_shift = scale_shift_pairs['roi_scale_shift']
     total_shift = do_shift + spatial_shift
     half_pixel_offset = 2 ** (spatial_shift - 1) if is_half_pixel else 0  # 0.5 * 2 ** spatial_shift
     dev = fm.device
 
-    out = torch.zeros(roi_num, out_h, out_w, fm_channel)
+    out = torch.zeros([roi_num, out_h, out_w, fm_channel], device=dev)
     for box_idx in range(roi_num):
         batch_idx = rois[box_idx, 0]
         if batch_idx < 0:
@@ -147,10 +146,11 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
         x_start = (rois[box_idx, 2] * spatial_x * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
         y_end = (rois[box_idx, 3] * spatial_y * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
         x_end = (rois[box_idx, 4] * spatial_x * input1_scale * (0.5 ** input1_shift)).int() - half_pixel_offset
-        data = fm[batch_idx.long()].reshape(-1)
+        data = fm[batch_idx.long()].reshape(-1).double()
         # 2. Region out of bound:   || x1|x2 > inWidth || y1|y2 > inHeight
         if (x_end < x_start) | (y_end < y_start):
-            out_data.append(torch.zeros(1, out_w * out_h * fm_channel))
+            continue
+        if ((x_end.item() > (fm_width * (2 ** spatial_shift))) or (y_end.item() > (fm_height * (2 ** spatial_shift)))):
             continue
         if is_half_pixel:
             roi_width = x_end - x_start
@@ -158,8 +158,8 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
         else:
             roi_width = torch.maximum(x_end - x_start, torch.tensor(2 ** spatial_shift, device=dev))
             roi_height = torch.maximum(y_end - y_start, torch.tensor(2 ** spatial_shift, device=dev))
-        w_step_size = torch.div(roi_width, out_w * (2 ** spatial_shift), rounding_mode='trunc').int()
-        h_step_size = torch.div(roi_height, out_h * (2 ** spatial_shift), rounding_mode='trunc').int()
+        w_step_size = torch.div(roi_width, out_w * (2 ** spatial_shift), rounding_mode='trunc').long()
+        h_step_size = torch.div(roi_height, out_h * (2 ** spatial_shift), rounding_mode='trunc').long()
         w_step_size_mod = roi_width - w_step_size * (out_w * 2 ** spatial_shift)
         h_step_size_mod = roi_height - h_step_size * (out_h * 2 ** spatial_shift)
         if w_sample > 0:
@@ -177,6 +177,7 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
             else:
                 h_sample_ratio = h_step_size
         num_sample_points = w_sample_ratio * h_sample_ratio
+
         w_bin_size = torch.div(w_step_size * out_w * (2 ** spatial_shift) + w_step_size_mod,
                                w_sample_ratio * out_w * (2 ** spatial_shift), rounding_mode='trunc').int()
         h_bin_size = torch.div(h_step_size * out_h * (2 ** spatial_shift) + h_step_size_mod,
@@ -185,6 +186,7 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
             w_step_size_mod - w_bin_size * w_sample_ratio * out_w * (2 ** spatial_shift)
         h_bin_size_mod = h_step_size * out_h * (2 ** spatial_shift) + \
             h_step_size_mod - h_bin_size * h_sample_ratio * out_h * (2 ** spatial_shift)
+
         for i in range(out_h):
             for j in range(out_w):
                 w_start = w_step_size * j
@@ -225,7 +227,6 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
                             y1 = y2 = fm_height - 1
                             dy1 = 0
                         dy2 = yscale1 - dy1
-
                         if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
                             ws = [0, 0, 0, 0]
                             offsets = [0, 0, 0, 0]
@@ -276,7 +277,6 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
                             num_sample_points * num_sample_points * out_h * out_w)).round()
                 else:  # method == 'max'
                     pass
-                # out_data.append(torch.clamp(torch.round(torch.tensor(outdata_batch)), o_qmin, o_qmax))
                 out[box_idx, i, j, :] = torch.round(torch.tensor(outdata_batch))
     return out.to(fm.device)
 
@@ -298,7 +298,7 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
     _, fm_height, fm_width, fm_channel = fm.shape[:]
     total_shift = do_shift + spatial_shift
     dev = fm.device
-    out = torch.zeros(roi_num, out_h, out_w, fm_channel)
+    out = torch.zeros([roi_num, out_h, out_w, fm_channel], device=dev)
     for box_idx in range(roi_num):
         batch_idx = rois[box_idx, 0]
         if batch_idx < 0:
@@ -313,20 +313,24 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
         # y_end = ((rois[box_idx, 3] * spatial_y * roi_scale) >> roi_shift).int() - half_pixel_offset
         # x_end = ((rois[box_idx, 4] * spatial_x * roi_scale) >> roi_shift).int() - half_pixel_offset
         # lib impl
-        y_start = ((rois[box_idx, 1] * roi_scale * 0.5 ** roi_shift).int() * spatial_y) - half_pixel_offset
-        x_start = ((rois[box_idx, 2] * roi_scale * 0.5 ** roi_shift).int() * spatial_x) - half_pixel_offset
-        y_end = ((rois[box_idx, 3] * roi_scale * 0.5 ** roi_shift).int() * spatial_y) - half_pixel_offset
-        x_end = ((rois[box_idx, 4] * roi_scale * 0.5 ** roi_shift).int() * spatial_x) - half_pixel_offset
+        y_start = ((rois[box_idx, 1] * roi_scale * 0.5 ** roi_shift).long() * spatial_y) - half_pixel_offset
+        x_start = ((rois[box_idx, 2] * roi_scale * 0.5 ** roi_shift).long() * spatial_x) - half_pixel_offset
+        y_end = ((rois[box_idx, 3] * roi_scale * 0.5 ** roi_shift).long() * spatial_y) - half_pixel_offset
+        x_end = ((rois[box_idx, 4] * roi_scale * 0.5 ** roi_shift).long() * spatial_x) - half_pixel_offset
 
-        data = fm[batch_idx.long()].reshape(-1)
+        if ((x_end < x_start) or (y_end < y_start)):
+            continue
+        if ((x_end.item() > (fm_width * (2 ** spatial_shift))) or (y_end.item() > (fm_height * (2 ** spatial_shift)))):
+            continue
+        data = fm[batch_idx.long()].reshape(-1).double()
 
         roi_width = x_end - x_start
         roi_height = y_end - y_start
         if not is_half_pixel:
             roi_width = torch.maximum(roi_width, torch.tensor(2 ** spatial_shift, device=dev))
             roi_height = torch.maximum(roi_height, torch.tensor(2 ** spatial_shift, device=dev))
-        step_size_qw = (roi_width * out_w_scale) >> out_w_shift
-        step_size_qh = (roi_height * out_h_scale) >> out_h_shift
+        step_size_qw = int(roi_width * out_w_scale / (2 ** out_w_shift))
+        step_size_qh = int(roi_height * out_h_scale / (2 ** out_h_shift))
         # step_size_w = step_size_qw / spatial_shift
         # step_size_h = step_size_qh / spatial_shift
 
@@ -405,7 +409,7 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
                                                    ws[2] * data[offsets[2] + kk],
                                                    ws[3] * data[offsets[3] + kk],
                                                    ])
-                                max_4points = (max_4points * do_scale / 2 ** total_shift)
+                                max_4points = torch.round(max_4points * do_scale / 2 ** total_shift)
                                 outdata_batch[kk] = max([outdata_batch[kk], max_4points])
                 if method == 'avg':
                     '''

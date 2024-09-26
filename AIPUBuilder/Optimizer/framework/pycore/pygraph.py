@@ -579,11 +579,11 @@ class PyGraph:
 
     def enable_fit_dtype(self):
         for node in self.nodes:
-            node.enable_fit_dtype = True
+            node.fit_dtype_enabled = True
 
     def disable_fit_dtype(self):
         for node in self.nodes:
-            node.enable_fit_dtype = False
+            node.fit_dtype_enabled = False
 
     @classmethod
     def parse(cls, ir_txt, ir_bin):

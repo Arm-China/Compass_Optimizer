@@ -383,9 +383,17 @@ class QuantizeGraph(PyGraph):
 
     def quantize(self):
         import sys
-        from AIPUBuilder.Optimizer.logger import tqdm
+        from AIPUBuilder.Optimizer.logger import tqdm, OPT_WARN, OPT_DEBUG
+        from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyTensor
+        from AIPUBuilder.Optimizer.utils import (is_float, str2dtype, QuantMode,
+                                                 get_linear_quant_params_from_tensor,
+                                                 torch_type2dtype,
+                                                 linear_quantize_clip)
+
         if self.quantgraph is None:
             self.quantgraph = self.clone()
+
+        self.quantgraph.set_tensor_quantization_attrs()  # pylint: disable=no-member
 
         # record the map between quantized node's name and source node object pointer
         qnmap = {}
@@ -401,6 +409,85 @@ class QuantizeGraph(PyGraph):
                     # n.quantized = True
                 pbar.update(1)
             pbar.refresh()
+
+        graph = self.quantgraph
+        for qn in graph.nodes:
+            fd = qn.attrs['trigger_float_op'].name if isinstance(qn.attrs['trigger_float_op'], Dtype) \
+                else str(qn.attrs['trigger_float_op']).lower().strip()
+            if fd != 'disable' and qn.params['unquantifiable']:
+                if qn.type == OpType.Quantize:
+                    qn.params['quantize_scale'] = qn.outputs[0].scale
+                    qn.params['quantize_zp'] = qn.outputs[0].zerop
+                if qn.type == OpType.DeQuantize:
+                    qn.params['quantize_scale'] = qn.inputs[0].scale
+                    qn.params['quantize_zp'] = qn.inputs[0].zerop
+
+                if qn.type != OpType.Quantize:
+                    for i, t in enumerate(qn.outputs):
+                        t.scale = 1.0
+                        t.zerop = 0
+                        t.qbits = None
+                        t.dtype = t.ir_dtype
+                        t.qmin = None
+                        t.qmax = None
+                        t.qinvariant = None
+                    for i, t in enumerate(qn.placeholders):
+                        t.scale = 1.0
+                        t.zerop = 0
+                        t.qbits = None
+                        t.dtype = torch_type2dtype(t.betensor.dtype)
+                        t.qmin = None
+                        t.qmax = None
+                        t.qinvariant = None
+                    for k, t in qn.constants.items():
+                        t.scale = 1.0
+                        t.zerop = 0
+                        t.qbits = None
+                        t.dtype = t.ir_dtype
+                        t.qmin = None
+                        t.qmax = None
+                        t.qinvariant = None
+
+                o_dtype = str2dtype(fd)
+                for ot in qn.outputs:
+                    if is_float(ot.dtype):
+                        ot.dtype = o_dtype
+                if qn.type == OpType.Cast:
+                    qn.params['to_dtype'] = qn.outputs[0].dtype
+
+                if qn.type != OpType.Quantize and qn.type != OpType.DeQuantize:  # per-channel scale/zp would be in constants
+                    for key, ct in qn.constants.items():
+                        if is_float(ct.ir_dtype):
+                            ct.dtype = Dtype.FP32 if key in ['biases', 'negative_slope'] else o_dtype
+
+                if "weights" in qn.constants.keys() and qn.get_attrs("weight_only_quantization", optional=True, default_value=False):
+                    w = qn.constants["weights"]
+                    q_mode_weight = qn.attrs["q_mode_weight"]
+                    w.qbits = qn.attrs["q_bits_weight"]
+                    w.qinvariant = False
+                    # replace quantized weights if gptq optimization was applied
+                    if 'gptq_weights' in qn.attrs:
+                        bkey = qn.attrs['q_bits_weight']
+                        if bkey in qn.attrs['gptq_weights'].keys():
+                            OPT_DEBUG(f'gptq optimization was applied on {qn}')
+                            w.betensor = qn.attrs['gptq_weights'][bkey]
+                    if QuantMode.is_per_block(q_mode_weight):
+                        w.block_size = qn.attrs["weight_block_size"]
+                        from AIPUBuilder.Optimizer.features import statistic_and_calibration
+                        wb = PyTensor('weight_blocks')
+                        wb.betensor = w.betensor.reshape(-1, w.block_size)
+                        wb.key_axis = 0
+                        statistic_and_calibration(wb, qn.attrs, is_constant_tensor=True)
+                        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
+                            wb, QuantMode.to_per_channel(q_mode_weight), w.qbits, is_signed=True)
+                        qn.params['weight_block_size'] = w.block_size
+                    else:
+                        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
+                            w, q_mode_weight, w.qbits, is_signed=True)
+                    w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax)
+                    # currently lib can detect weight only quantization through IR Dtype info
+                    # qn.params['approximate_method'] = 'weight_only_quantization'
+                qn.approximate()
 
     def qforward(self, feed_data, disable_pbar=True, keep_tensors=False):
         return self.quantgraph.forward(feed_data, disable_pbar, keep_tensors)
@@ -454,6 +541,7 @@ class QuantizeGraph(PyGraph):
         from AIPUBuilder.Optimizer.utils import is_float, dtype2range, dtype2bits
         from AIPUBuilder.Optimizer.framework import OpType, get_tensor_default_property
         from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_WARN
+        import torch
 
         def _deduce_quantization_info_to_tensor_from_ir(node, updated_fields):
             in_out_tensors = [*node.inputs, *node.outputs]
@@ -495,6 +583,10 @@ class QuantizeGraph(PyGraph):
                 node.quantized = False
                 if node.get_param('is_perf_mode', optional=True, default_value=False):
                     node.approximated = True
+                if 'weights' in node.constants.keys():
+                    wt = node.constants["weights"]
+                    if not is_float(wt.dtype):
+                        node.attrs['weight_only_quantization'] = True
             else:
                 dtypes = [t.dtype for t in (list(node.outputs) + list(node.inputs))]
                 with_lut = False

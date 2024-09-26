@@ -176,3 +176,4 @@ from . import batchtospaceNd
 from . import adativepool
 from . import filterbox
 from . import atanh
+from . import affine_grid

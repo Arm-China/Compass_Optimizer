@@ -78,3 +78,31 @@ class FasterRcnnTorchmAPMetric(mAPMetric):
 
     def report(self):
         return "fasterrcnn torch mAP accuracy is %f" % (self.compute())
+
+
+@register_plugin(PluginType.Metric, '1.0')
+class RetinenateOnnxmAPMetric(mAPMetric):
+    """
+    This RetinenateOnnxmAPMetric is used for the metric of Retinenate_onnx model in Optimizer.
+    """
+
+    def __init__(self, class_num=264, start_label=0):
+        super().__init__()
+        self.class_num = class_num
+        self.start_label = start_label
+
+    def __call__(self, pred, target):
+        #total_class, class_label,box,boxnumperclass,score,keep
+        bbox_pre = pred[5]
+        pred_post = [pred[2], pred[4], bbox_pre, pred[6], pred[7], pred[8]]
+        super().__call__(pred_post, target)
+
+    def reset(self):
+        super().reset()
+
+    def compute(self):
+        result = super().compute()
+        return result
+
+    def report(self):
+        return "Retinenate onnx mAP accuracy is %f" % (self.compute())

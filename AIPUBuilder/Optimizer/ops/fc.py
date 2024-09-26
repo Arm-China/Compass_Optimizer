@@ -22,8 +22,8 @@ def fc(self, *args):
         # inp += self.inputs[0].zerop
         weights += self.constants["weights"].broadcast_zerop
         bias += self.constants['biases'].broadcast_zerop
-        if aasrb is not None:
-            bias = aiff_clear_lower_bits_for_bias(bias, self)
+        if aasrb is not None and (dtype2bits(self.constants["weights"].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
+
             x = inp @ weights.T
             self.outputs[0].betensor = apply_with_activation(self, x,
                                                              *args, aasrb=(aasrb, bias))

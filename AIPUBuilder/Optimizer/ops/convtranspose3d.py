@@ -33,6 +33,8 @@ def conv_transpose3d(self, *args):
     weights = self.constants["weights"].betensor.clone().float()
     # weights = weights.permute(4, 0, 3, 1, 2)  # [out_c, h, w, d, in_c] -> [in_c, out_c, d, h, w]
     bias = self.constants['biases'].betensor.clone().float()
+    aasrb = self.get_param('remain_shift',
+                           optional=True, default_value=None)
     if self.quantized:
         inp += self.inputs[0].broadcast_zerop
         weights += self.constants['weights'].broadcast_zerop
@@ -56,7 +58,7 @@ def conv_transpose3d(self, *args):
 
     x = torch.nn.functional.conv_transpose3d(inp,
                                              weights,
-                                             bias,
+                                             bias if aasrb is None else None,
                                              stride=stride,
                                              padding=0,
                                              output_padding=0,
@@ -85,5 +87,9 @@ def conv_transpose3d(self, *args):
 
     crop_x = x[..., pad_z_begin:d-pad_z_end, pad_y_begin:h-pad_y_end, pad_x_begin:w-pad_x_end]
     x = crop_x.permute(0, 2, 3, 4, 1)
+    if self.quantized and aasrb is not None and (dtype2bits(self.constants["weights"].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
+        self.outputs[0].betensor = apply_with_activation(self, x,
+                                                         *args, aasrb=(aasrb, bias))
+        return self.outputs[0].betensor
     self.outputs[0].betensor = apply_with_activation(self, x, *args)
     return self.outputs[0].betensor

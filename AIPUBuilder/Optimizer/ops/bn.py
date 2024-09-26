@@ -32,7 +32,6 @@ def batch_norm(self, *args):
         # inp += self.inputs[0].zerop
         weights += self.constants["weights"].broadcast_zerop
         bias += self.constants['biases'].broadcast_zerop
-
     inp_dim = inp.dim()
     perm = []
     if axis != inp_dim - 1 and inp_dim > 0:
@@ -40,7 +39,7 @@ def batch_norm(self, *args):
         perm = orig_perm[:axis] + orig_perm[axis+1:] + [orig_perm[axis]]
         inp = torch.permute(inp, perm)
 
-    x = torch.add(torch.multiply(inp, weights), bias)
+    x = torch.add(torch.multiply(inp, weights.float()), bias)
     if not self.outputs[0].is_perchannel_quantization():
         x = apply_with_activation(self, x, *args)
     if len(perm):

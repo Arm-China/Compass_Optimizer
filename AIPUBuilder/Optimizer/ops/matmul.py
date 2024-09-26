@@ -45,7 +45,7 @@ def matmul_forward(self, *args):
     if self.quantized:
         requant_shift = self.get_ir_field(['shift', 'shift_value'], default_value=0)
         requant_scale = self.get_ir_field(['scale', 'scale_value'], default_value=1)
-        if aasrb is not None:
+        if aasrb is not None and (dtype2bits(self.inputs[1].dtype) > 8 or dtype2bits(self.inputs[0].dtype) > 8):
             z, requant_shift = aiff_ahead_shift_bias(z, requant_shift, None, int(aasrb))
         z = linear_requantize(z, requant_scale, requant_shift, out.broadcast_zerop, out.qmin, out.qmax)
     else:
