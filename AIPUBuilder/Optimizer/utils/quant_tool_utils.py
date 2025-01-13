@@ -26,7 +26,7 @@ ASYM2SYM_OP_DICT = {  # (op.type)      : (tensor_idx,         QuantMode)
 }
 
 ABSORB_INPUT_SCALE_OP = [OpType.Convolution, OpType.FullyConnected, OpType.LayerNorm, OpType.BatchNorm]
-AIFF_AHEAD_SHIFT_OP = [OpType.Convolution, OpType.Convolution3D, OpType.ConvTranspose,
+AIFF_AHEAD_SHIFT_OP = [OpType.Convolution, OpType.Convolution3D, OpType.ConvTranspose, OpType.GRUv3,
                        OpType.ConvTranspose3D, OpType.DepthwiseConv, OpType.FullyConnected, OpType.MatMul]
 
 #########################################################################################################################
@@ -302,12 +302,25 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
     f_ranges = torch.where(f_ranges < QUANTIZE_ZERO_BAND, q_ranges, f_ranges)
     f_ranges = torch.where(torch.isnan(f_ranges), q_ranges, f_ranges)
     scale = q_ranges / f_ranges
-    zerop = torch.clamp(scale.mul(f_zfactor).round() - f_zoffset, -2 ** (bits - 1) + 1, 2 ** (bits - 1))
+    zerop = torch.clamp(scale.mul(f_zfactor).round() - f_zoffset, -2 ** (bits - 1) + 1, 2 ** (bits - 1)-1)
 
     return scale, zerop, q_min, q_max, bits2dtype(bits, is_signed)
 
 
-def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max, key_axis=None):
+def get_round_mode_func(round_mode):
+    round_mode = round_mode.upper()
+    if round_mode == 'CEIL':
+        def round_func(x): return torch.floor(x + 0.5)
+    elif round_mode == 'FLOOR':
+        round_func = torch.floor
+    elif round_mode == 'TRUNC':
+        round_func = torch.trunc
+    else:
+        round_func = torch.round
+    return round_func
+
+
+def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max, key_axis=None, round_func=get_round_mode_func('ROUND_TO_EVEN')):
     dev = x.device if isinstance(x, torch.Tensor) else None
     x_t, scale_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
         [x, scale, zero_point, clamp_min, clamp_max], device=dev)
@@ -316,7 +329,7 @@ def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max, key_axis=No
         scale_t = scale_t.reshape(scale_shape)
         zero_point_t = zero_point_t.reshape(scale_shape)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(scale_t * x_t.double() - zero_point_t), clamp_min_t, clamp_max_t).double()
+    y = torch.clamp(round_func(scale_t * x_t.float() - zero_point_t), clamp_min_t, clamp_max_t).float()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     if not torch.is_floating_point(x_t):
         xmin, xmax = dtype2range(torch_type2dtype(x_type))

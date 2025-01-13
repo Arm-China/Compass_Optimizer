@@ -13,6 +13,7 @@ __all__ = [
     'ALL_OPT_APPROX_OP_DICT',
     'QUANTIZE_DATASET_DICT',
     'QUANTIZE_METRIC_DICT',
+    'QUANTIZE_CONFIG_DICT',
     'op_register',
     'quant_register',
     'approx_register',
@@ -32,6 +33,8 @@ ALL_OPT_APPROX_OP_DICT = dict()
 
 QUANTIZE_DATASET_DICT = dict()
 QUANTIZE_METRIC_DICT = dict()
+QUANTIZE_CONFIG_DICT = dict()
+TRAIN_PLUGIN_DICT = dict()
 
 
 class OptBaseMetric(object):
@@ -220,6 +223,8 @@ def approx_register(optypes, version=1.0, *args):
 class PluginType(Enum):
     Dataset = 0x110
     Metric = 0x120
+    QConfig = 0x130
+    Train = 0x140
 
 
 DM_PLUGINS = {t: dict() for t in PluginType}
@@ -227,7 +232,7 @@ DM_VERSIONS = {t: dict() for t in PluginType}
 
 
 def register_plugin(type, version=0):
-    from AIPUBuilder.Optimizer.logger import OPT_WARN
+    from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
     global DM_PLUGINS, DM_VERSIONS
 
     def tofloat(str_version):
@@ -263,6 +268,20 @@ def register_plugin(type, version=0):
                     QUANTIZE_METRIC_DICT[metric_name] = cls
                     (OPT_WARN('this metric plugin(version=%s) %s has existed, and Optimizer will use the higher version(%s) to replace.'
                               % (str(prev_version), metric_name, version)))
+        elif type == PluginType.QConfig:
+            qconfig_name = cls.__name__.lower()
+            if qconfig_name not in QUANTIZE_CONFIG_DICT:
+                QUANTIZE_CONFIG_DICT[qconfig_name] = cls
+            else:
+                OPT_WARN(f"{qconfig_name} has registered.")
+        elif type == PluginType.Train:
+            train_loop_name = cls.__name__.lower()
+            if train_loop_name not in TRAIN_PLUGIN_DICT:
+                TRAIN_PLUGIN_DICT[train_loop_name] = cls
+            else:
+                OPT_WARN(f"{train_loop_name} has registered.")
+        else:
+            OPT_ERROR(f"Unsupported plugin type = {type}")
         if cls.__name__ not in DM_PLUGINS[type]:
             DM_PLUGINS[type][cls.__name__] = cls
             DM_VERSIONS[type][cls.__name__] = str(version)

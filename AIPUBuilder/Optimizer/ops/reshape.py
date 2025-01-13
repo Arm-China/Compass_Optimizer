@@ -2,18 +2,142 @@
 # Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
-
-from AIPUBuilder.Optimizer.logger import *
+from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
 import torch
+from functools import reduce
+
+
+def get_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape):
+    if len(in_ir_shape) != len(in_ds_shape):
+        OPT_WARN(f"In Reshape Op: in_ir_shape={in_ir_shape} and in_ds_shape = {in_ds_shape}, which"
+                 f"the length of runtime input shape(={len(in_ds_shape)}) != "
+                 f"the length of input ir_shape(={len(in_ir_shape)})")
+
+        in_ir_numel = reduce(lambda a, b: a*b, in_ir_shape)
+        in_ds_numel = reduce(lambda a, b: a*b, in_ds_shape)
+        # try to pop or insert 1 when ir_numel == ds_numel
+        if in_ir_numel == in_ds_numel:
+            if len(in_ir_shape) > len(in_ds_shape):
+                pop_num = 0
+                for i, in_ir_s in enumerate(in_ir_shape[::]):
+                    if in_ir_s == 1:
+                        in_ir_shape.pop(i-pop_num)
+                        pop_num += 1
+                        if len(in_ir_shape) == len(in_ds_shape):
+                            break
+            else:
+                insert_num = 0
+                for i, in_ds_s in enumerate(in_ds_shape[::]):
+                    if in_ds_s == 1 and i < len(in_ir_shape) and in_ir_shape[i] != 1:
+                        in_ir_shape.insert(i, 1)
+                        insert_num += 1
+                        if len(in_ir_shape) == len(in_ds_shape):
+                            break
+
+    if in_ir_shape == in_ds_shape:
+        return out_ir_shape
+
+    change_axis = []
+    for i, (irs, dss) in enumerate(zip(in_ir_shape, in_ds_shape)):
+        if irs != dss:
+            change_axis.append(i)
+
+    if len(change_axis) > 1:
+        OPT_WARN(f"dynamic shape has more than one change axis, which now does not support.")
+
+    change_axis = change_axis[0]
+
+    in_ps = 0
+    ot_ps = 0
+    in_begin = 0
+    ot_begin = 0
+
+    # [[[in_shape_axis], [out_shape_axis]]] like [[[0, 1], [0, 1, 2]], [[2], [3]]]
+    matched_axis = []
+    in_mul = in_ir_shape[0]
+    ot_mul = out_ir_shape[0]
+
+    while 1:
+        if in_mul == ot_mul:
+            in_visited = [v for v in range(in_begin, in_ps+1)]
+            ot_visited = [v for v in range(ot_begin, ot_ps+1)]
+            matched_axis.append([in_visited, ot_visited])
+            in_ps += 1
+            ot_ps += 1
+            in_begin = in_ps
+            ot_begin = ot_ps
+            if in_ps > len(in_ir_shape) - 1 and ot_ps > len(out_ir_shape) - 1:
+                break
+            elif in_ps > len(in_ir_shape) - 1 and ot_ps <= len(out_ir_shape) - 1:
+                ot_visited += [v for v in range(ot_ps, len(out_ir_shape))]
+                break
+            elif ot_ps > len(out_ir_shape) - 1 and in_ps <= len(in_ir_shape) - 1:
+                in_visited += [v for v in range(in_ps, len(in_ir_shape))]
+                break
+
+            in_mul = in_ir_shape[in_ps]
+            ot_mul = out_ir_shape[ot_ps]
+        elif in_mul < ot_mul:
+            in_ps += 1
+            in_mul *= in_ir_shape[in_ps]
+        else:  # in_mul > ot_mul:
+            ot_ps += 1
+            ot_mul *= out_ir_shape[ot_ps]
+
+    out_ds_shape = [-1] * len(out_ir_shape)
+    for match_a in matched_axis:
+        if len(match_a[0]) > 1 and len(match_a[1]) == 1:
+            mul = 1
+            for axis in match_a[0]:
+                mul *= in_ds_shape[axis]
+            out_ds_shape[match_a[1][0]] = mul
+        elif len(match_a[1]) > 1 and len(match_a[0]) == 1:
+            if change_axis in match_a[0]:
+                mul = 1
+                for i in match_a[1]:
+                    if out_ir_shape[i] == 1:
+                        out_ds_shape[i] = 1
+                        mul *= 1
+                        continue
+                    if in_ds_shape[match_a[0][0]] % out_ir_shape[i] == 0:
+                        out_ds_shape[i] = out_ir_shape[i]
+            else:
+                for i in match_a[1]:
+                    out_ds_shape[i] = out_ir_shape[i]
+        elif len(match_a[0]) == 1 and len(match_a[1]) == 1:
+            out_ds_shape[match_a[1][0]] = in_ds_shape[match_a[0][0]]
+        else:  # mulit-input axis <--> multi-output axis
+            # [[[0, 1], [0, 1, 2]], [[2], [3]]]
+            if change_axis not in match_a[0]:
+                for i in match_a[1]:
+                    out_ds_shape[i] = out_ir_shape[i]
+            else:
+                # [[[0, 1], [0, 1, 2]], [[2], [3]]]
+                mul = 1
+                in_idx = len(match_a[0]) - 1
+                for i in match_a[1][::-1]:
+                    mul *= out_ir_shape[i]
+                    if mul <= in_ir_shape[in_idx]:
+                        out_ds_shape[i] = out_ir_shape[i]
+                    else:
+                        in_idx -= 1
+                        mul = 1
+                        if in_idx < 0:
+                            break
+                        continue
+    return out_ds_shape
 
 
 @op_register(OpType.Reshape)
 def reshape(self, *args):
+    inp = self.inputs[0].betensor.clone()
+    out = self.outputs[0]
     try:
-        inp = self.inputs[0].betensor.clone()
-        out = self.outputs[0]
+        shape = get_ds_shape(list(self.inputs[0].ir_shape), list(out.ir_shape), list(inp.shape))
+        out.betensor = torch.reshape(inp, shape)
+        return out.betensor
+    except Exception as e:
         shape = list(out.ir_shape)[:]
-
         ir_batch = self.attrs['batch_size_in_IR'] if 'batch_size_in_IR' in self.attrs else 1
         batch_axis = 0
         for idx, ss in enumerate(shape):
@@ -28,41 +152,6 @@ def reshape(self, *args):
         if ir_batch != 0 and len(shape) != 0:
             # have batch_dim
             shape[batch_axis] = -1
-        out.betensor = torch.reshape(inp, shape)
-        return out.betensor
-    except Exception as e:
-        inp = self.inputs[0].betensor.clone()
-        real_inshape = list(inp.shape)
-        shape = list(out.ir_shape)
-        ir_inshape = list(self.inputs[0].ir_shape)
-        ir_outshape = shape[:]
-        diff_dim = -1
-        for i in range(len(real_inshape)):
-            if ir_inshape[i] != real_inshape[i]:
-                diff_dim = i
-                break
-
-        if diff_dim >= 0:
-            in_idx = 0
-            in_size = 1
-            out_idx = 0
-            out_size = 1
-            axis = -1
-            while in_idx < len(ir_inshape):
-                in_size *= ir_inshape[in_idx]
-                while out_idx < len(ir_outshape):
-                    if out_size >= in_size:
-                        break
-                    else:
-                        out_size *= ir_outshape[out_idx]
-                    if out_size == in_size and in_idx == diff_dim:
-                        axis = out_idx
-                        break
-                    out_idx += 1
-                in_idx += 1
-                if axis >= 0:
-                    break
-            shape[axis] = real_inshape[diff_dim]
         out.betensor = torch.reshape(inp, shape)
         return out.betensor
 

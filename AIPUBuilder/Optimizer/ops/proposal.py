@@ -61,10 +61,10 @@ def apply_box_deltas(self, config, score, deltas):
         height = self.get_param('height')
         width = self.get_param('width')
 
-        dy = deltas[:, :, 0].clone()
-        dx = deltas[:, :, 1].clone()
-        dh = deltas[:, :, 2].clone()
-        dw = deltas[:, :, 3].clone()
+        dy = deltas[:, :, 0].float().clone()
+        dx = deltas[:, :, 1].float().clone()
+        dh = deltas[:, :, 2].float().clone()
+        dw = deltas[:, :, 3].float().clone()
 
         dy /= config.STD_DIV[0]
         dx /= config.STD_DIV[1]
@@ -128,7 +128,9 @@ def apply_box_deltas(self, config, score, deltas):
 def _get_box_score(node, class_score, box_encoding, score_thresh):
     max_prop_num = node.outputs[0].ir_shape[1]
     arg_score = torch.where(class_score > score_thresh)[0].long()
-    box = torch.round(box_encoding[arg_score, :][:max_prop_num, :]).int()
+    box = box_encoding[arg_score, :][:max_prop_num, :]
+    if node.quantized:
+        box = torch.round(box).int()
     score = class_score[arg_score][:max_prop_num]
     outbox_idx = box.shape[0]
     return box, score, outbox_idx
@@ -137,6 +139,7 @@ def _get_box_score(node, class_score, box_encoding, score_thresh):
 def get_box_score(node, batch_class_score, batch_box_encoding):
     if not node.quantized:
         score_thresh = node.get_param('score_threshold')
+        batch_class_score = batch_class_score.float()
     else:
         score_thresh = node.get_param('score_threshold_value')
     max_prop_num = node.outputs[0].ir_shape[1]

@@ -16,7 +16,7 @@ def stridedslice(self, *args):
 
     strides = self.get_param('strides')
     begin = self.get_param('begin')
-    end = self.get_param('end')
+    end = self.get_param('end')[:]
     real_shape = list(x.shape)
     for i in range(len(end)):
         end[i] = min(real_shape[i], end[i])

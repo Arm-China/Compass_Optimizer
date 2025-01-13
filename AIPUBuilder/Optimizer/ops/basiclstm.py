@@ -411,6 +411,29 @@ def lstm(self, *args):
     return results
 
 
+def lstm_clear_lower_bits_for_bias(self, *args, dim=-1):
+    if QuantMode.is_per_channel(self.attrs["q_mode_weight"]):
+        # AIFF doesn't support per channel weight is not currently
+        return
+    bias = self.constants['biases']
+    shift = self.constants["shift"].betensor
+    lmin, lmax = bits2range(self.attrs['bias_effective_bits'], is_signed=True)
+    cell_size = self.params['cell_size']
+
+    bias_i, bias_g, bias_f, bias_o = torch.split(bias.betensor, cell_size, dim=dim)
+    bias_ifo = torch.cat([bias_i, bias_f, bias_o], dim=dim)
+    if dtype2bits(self.inputs[0].dtype) <= 8:
+        bias_ifo = compress_int32_to_int16(bias_ifo, lmin, lmax, 0)
+        bias_g = compress_int32_to_int16(bias_g, lmin, lmax, 0)
+    else:
+        bias_ifo = compress_int32_to_int16(bias_ifo, lmin, lmax, shift[1] - self.params['lut_shift_value'])
+        bias_g = compress_int32_to_int16(bias_g, lmin, lmax, shift[1] - self.params['lut_shift_value'])
+
+    bias_i, bias_f, bias_o = torch.split(bias_ifo, cell_size, dim=dim)
+    new_bias = torch.cat([bias_i, bias_g, bias_f, bias_o], dim=dim)
+    bias.betensor = new_bias
+
+
 @quant_register(OpType.BasicLSTM)
 def lstm_quantize(self, *args):
     def hwa_zy_clamp_lut(lut):
@@ -493,6 +516,8 @@ def lstm_quantize(self, *args):
     w.qbits = q_bits_weight
     w.qinvariant = False
 
+    xw_scale = inp.scale * w.scale
+
     # quantize placeholders
     h_all = self.placeholders[0]
     h_all.scale, h_all.zerop, h_all.qmin, h_all.qmax, h_all.dtype = \
@@ -501,20 +526,6 @@ def lstm_quantize(self, *args):
     h_all.qbits = q_bits_activation
     h_all.qinvariant = False
     h_scale = h_all.scale
-
-    # quantized bias
-    xw_scale = inp.scale * w.scale
-    b.zerop = 0
-    b.scale = xw_scale
-    b.qmin = -2 ** (q_bits_bias - 1)
-    b.qmax = 2 ** (q_bits_bias - 1) - 1
-    b.qbits = q_bits_bias
-
-    b.betensor = linear_quantize_clip(bias, xw_scale, b.zerop, b.qmin, b.qmax)
-    b.dtype = bits2dtype(b.qbits, is_signed=True)
-    b.qinvariant = False
-
-    absorb_input_h_zp_to_bias(self, *args)
 
     hw_do_scale, hw_do_scale_type, hw_do_shift, hw_do_shift_type = \
         get_scale_approximation_params(inp.scale / h_scale,
@@ -633,6 +644,19 @@ def lstm_quantize(self, *args):
     #     dtype2nptype(bits2dtype(q_bits_activation, is_signed=True))))
     # self.constants["zerop"].dtype = bits2dtype(q_bits_activation, is_signed=True)
     # self.params['h_zerop'] = int(h_all.zerop)
+
+    # quantized bias
+    b.zerop = 0
+    b.scale = xw_scale
+    b.qmin = -2 ** (q_bits_bias - 1)
+    b.qmax = 2 ** (q_bits_bias - 1) - 1
+    b.qbits = q_bits_bias
+    b.betensor = linear_quantize_clip(bias, xw_scale, b.zerop, b.qmin, b.qmax)
+    b.dtype = bits2dtype(b.qbits, is_signed=True)
+    b.qinvariant = False
+
+    absorb_input_h_zp_to_bias(self, *args)
+    lstm_clear_lower_bits_for_bias(self, *args)
 
     for out in self.outputs:
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(

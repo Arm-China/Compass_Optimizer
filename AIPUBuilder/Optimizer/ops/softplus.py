@@ -38,7 +38,7 @@ def softplus(self, *args):
 def softplus_approx(self, *args):
     def set_min_max(inp, use_dynamic_lut):
         if use_dynamic_lut:
-            clip_min = inp.min if inp.max < -6 else -6
+            clip_min = inp.min if inp.min < -6 else -6
             clip_max = inp.max
         else:
             clip_min = -6

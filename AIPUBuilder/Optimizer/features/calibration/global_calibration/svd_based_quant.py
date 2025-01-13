@@ -185,12 +185,9 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
 
         # for s in torch.linspace(w.broadcast_scale.item()*0.65, w.broadcast_scale.item()*1.65, 100) :
         for f in torch.linspace(alpha, beta, nsteps):
-            btensor = torch.tensor(np.random.randint(w.qmin, w.qmax, inp.ir_shape), device=inp.device)
             w_sim.min, w_sim.max = w.min*f, w.max*f
             s, w_sim.zerop, w_sim.qmin, w_sim.qmax, w_sim.dtype = get_linear_quant_params_from_tensor(
                 w_sim, q_mode_weight, q_bits_weight, is_signed=True)
-            # btensor = torch.tensor(np.random.randint(w.qmin,w.qmax,inp.ir_shape),device=inp.device)
-            # fbetensor = torch.tensor(np.random.rand(w.qmin,w.qmax,inp.ir_shape),device=inp.device)
             weights = linear_quantize_clip(w.betensor, s,  w_sim.zerop, w.qmin, w.qmax)
             if 'biases' in n.constants:
                 b = n.constants["biases"]
@@ -207,13 +204,15 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(local_rescale,
                                                                                               mult_bits=multiplier_bits,
                                                                                               force_shift_positive=n.force_shift_positive)
-            x = nn.functional.linear(btensor.double(), weights, bias,)
+            btensor = torch.tensor(np.random.randint(w.qmin, w.qmax, inp.ir_shape),
+                                   device=inp.device, dtype=weights.dtype)
+            x = nn.functional.linear(btensor, weights, bias,)
             x = linear_requantize(x, do_scale, do_shift, out.broadcast_zerop,
                                   out.qmin, out.qmax, key_axis)
             fout = linear_dequantize(x, out.scale, out.zerop, key_axis=None)
 
             fbtensor = linear_dequantize(btensor, inp_scale, n.inputs[0].broadcast_zerop, key_axis=None)
-            fx = nn.functional.linear(fbtensor, w.betensor.float(), b.betensor.float(),)
+            fx = nn.functional.linear(fbtensor.float(), w.betensor.float(), b.betensor.float(),)
 
             # qS = torch.abs(torch.fft.fft(fout))
             # S = torch.abs(torch.fft.fft(fx))

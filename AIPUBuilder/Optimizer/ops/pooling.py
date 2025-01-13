@@ -110,7 +110,7 @@ def pooling(self, *args):
             if self.quantized:
                 y_sum = torch.clamp(y_sum, -2 ** 31, 2 ** 31)
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-                    1. / y_area, mult_bits=8, force_shift_positive=False)
+                    self.outputs[0].scale / self.inputs[0].scale / y_area, mult_bits=8, force_shift_positive=False)
                 y = linear_requantize(y_sum, do_scale, do_shift,
                                       self.outputs[0].zerop, out.qmin, out.qmax)
             else:
@@ -140,7 +140,7 @@ def pooling(self, *args):
             if self.quantized:
                 y_sum = torch.clamp(y_sum, -2 ** 31, 2 ** 31)
                 do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(
-                    1. / y_area, mult_bits=8, force_shift_positive=False)
+                    self.outputs[0].scale / self.inputs[0].scale / y_area, mult_bits=8, force_shift_positive=False)
                 output_zp = nhwc2nchw(self.outputs[0].broadcast_zerop) if is_torch_tensor_with_multi_data(
                     self.outputs[0].zerop) else self.outputs[0].zerop
                 y = linear_requantize(y_sum, do_scale, do_shift, output_zp, out.qmin, out.qmax)

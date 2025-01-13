@@ -130,7 +130,7 @@ _tensor_default_property = {
     "mse": None,
     "debug_flag": 0,
     "need_deleted": False,
-    "is_act": False
+    "is_act": False,
 }
 
 
@@ -143,7 +143,7 @@ class PyTensor:
     import numpy as np
     from typing import Union
     from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
-    __slots__ = tuple(_tensor_default_property.keys()) + ('name', 'betensor', 'attrs')
+    __slots__ = tuple(_tensor_default_property.keys()) + ('name', 'betensor', 'attrs', 'detiled_betensor')
 
     def __init__(self, name: str, shape_or_arr: Union[TensorShape, np.ndarray, torch.Tensor] = TensorShape(), dtype: Union[Dtype, None] = None):
         import torch
@@ -193,6 +193,7 @@ class PyTensor:
         self.ir_shape = TensorShape(self.betensor.shape)
         self.block_size = None
         self.attrs = dict()
+        self.detiled_betensor = None
 
     def __getattribute__(self, name):
         # Multi GPU wrapper
@@ -278,7 +279,7 @@ class PyTensor:
         import copy
         import torch
         if name is None:
-            name = self.name + '_clone' if not self.name.endswith("_clone") else self.name
+            name = self.name + '_clone'
         t = self.__class__(name, self.betensor)
         for k in _tensor_default_property.keys():
             v = self.__getattribute__(k)
@@ -583,7 +584,7 @@ class PyTensor:
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if isinstance(max_v, torch.Tensor):
             self._max = max_v.reshape([-1])
-        elif max is None:
+        elif max_v is None:
             self._max = None
         else:
             self.max = torch_tensor(max_v, device=self.device)
@@ -602,7 +603,7 @@ class PyTensor:
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if isinstance(min_v, torch.Tensor):
             self._min = min_v.reshape([-1])
-        elif min is None:
+        elif min_v is None:
             self._min = None
         else:
             self.min = torch_tensor(min_v, device=self.device)
@@ -618,6 +619,112 @@ class PyTensor:
             if v != other_v:
                 return False
         return True
+
+    @staticmethod
+    def detile(betensor, axis=None, is_act=False):
+        def _is_tile(data, per_size, num, dim):
+            splits = torch.split(data, [per_size] * num, dim=dim)
+            s0 = splits[0]
+            is_tile = True
+            for si in splits[1:]:
+                if not torch.equal(s0, si):
+                    is_tile = False
+                    break
+            return is_tile, s0
+
+        data = betensor.clone()
+        is_tile = False
+        axes = axis
+        if axis is not None:
+            if not isinstance(axis, (list, tuple)) and isinstance(axis, int):
+                axes = [axis]
+        if data.unique().numel() == 1:
+            data = data.unique().reshape([1] * len(data.shape))
+            is_tile = True
+        else:
+            shape = data.shape
+            for i in range(len(shape)):
+                if isinstance(axes, (list, tuple)) and i not in axes:
+                    continue
+                if shape[i] == 1:
+                    continue
+                is_tile, detile_data = _is_tile(data, 1, shape[i], i)
+                if is_tile:
+                    data = detile_data
+        if not is_act:
+            def _factors(s):
+                fctrs = []
+                for i in range(2, s):
+                    if s % i == 0:
+                        fctrs.append(i)
+                return fctrs
+            shape = data.shape
+            for i, s in enumerate(list(shape)):
+                if isinstance(axes, (list, tuple)) and i not in axes:
+                    continue
+                if s <= 1:
+                    continue
+                factors = _factors(s)
+                for fc in factors:
+                    is_tile, detile_data = _is_tile(data, fc, int(s/fc), i)
+                    if is_tile:
+                        data = detile_data
+                        break
+
+        return data if is_tile else betensor
+
+    def detile_betensor(self):
+
+        if self.detiled_betensor is not None:
+            return self.detiled_betensor
+
+        def _is_tile(data, per_size, num, dim):
+            splits = torch.split(data, [per_size] * num, dim=dim)
+            s0 = splits[0]
+            is_tile = True
+            for si in splits[1:]:
+                if not torch.equal(s0, si):
+                    is_tile = False
+                    break
+            return is_tile, s0
+
+        data = self.betensor.clone()
+        is_tile = False
+        if data.unique().numel() == 1:
+            data = data.unique().reshape([1] * len(data.shape))
+            is_tile = True
+        else:
+            shape = data.shape
+            for i in range(len(shape)):
+                if shape[i] == 1:
+                    continue
+                is_tile, detile_data = _is_tile(data, 1, shape[i], i)
+                if is_tile:
+                    data = detile_data
+        if not self.is_act:
+            def _factors(s):
+                fctrs = []
+                for i in range(2, s):
+                    if s % i == 0:
+                        fctrs.append(i)
+                return fctrs
+            shape = data.shape
+            for i, s in enumerate(list(shape)):
+                if s <= 1:
+                    continue
+                factors = _factors(s)
+                for fc in factors:
+                    is_tile, detile_data = _is_tile(data, fc, int(s/fc), i)
+                    if is_tile:
+                        data = detile_data
+                        break
+
+        if not torch.equal(data, self.betensor):
+            self.detiled_betensor = data
+        else:
+            # avoid repeat calling the detile process and now id(self.detiled_betensor) == id(self.betensor)
+            self.detiled_betensor = self.betensor
+        return self.detiled_betensor
 
 
 PyTensor.shape = property(lambda self: self.betensor.shape, None)

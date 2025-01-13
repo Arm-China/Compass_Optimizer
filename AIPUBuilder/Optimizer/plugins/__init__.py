@@ -30,6 +30,7 @@ from . import aipubt_dataset_numpymultiinputNCHW
 from . import aipubt_dataset_tensorfromnumpymultiinput
 from . import aipubt_dataset_stable_diffusion_unet
 from . import aipubt_dataset_bevformer
+from . import aipubt_dataset_bevformer_static
 from . import aipubt_dataset_llama2
 from . import aipubt_dataset_cocokp
 
@@ -70,11 +71,13 @@ from . import aipubt_metric_roc
 from . import aipubt_metric_imdb
 from . import aipubt_metric_LMHead
 from . import aipubt_metric_cocokeypoint
+from . import aipubt_metric_RMSE
 
 try:
     from AIPUBuilder.Optimizer.plugins.aipubt_metric_bevformer import BEVFormerMetric
 except Exception as e:
-    from AIPUBuilder.Optimizer.logger import OPT_DEBUG
+    pass
+    # from AIPUBuilder.Optimizer.logger import OPT_DEBUG
     # OPT_DEBUG(f"import bevformermetric failed")
 
 # for built in op
@@ -83,3 +86,6 @@ from . import aipubt_op_tile
 # # for test debug
 from . import aipubt_dataset_OpTestNumpyZipped
 from . import aipubt_metric_OpTestCosDistance
+
+# for qconfig
+from . import aipubt_qconfig_bevformer

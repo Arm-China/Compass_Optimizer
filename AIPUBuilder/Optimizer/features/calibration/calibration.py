@@ -66,11 +66,7 @@ def apply_global_calibration(g, cdataloader, strategy):
         elif 'svd_quant' == mname:
             svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes)
         elif 'mvn_correction' == mname:
-            try:
-                from AIPUBuilder.Optimizer.experiment.mvn_correction import mvn_correction_global_calibration
-                mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
-            except Exception as e:
-                OPT_ERROR(f"call mvn_correction_global_calibration failed: {e}")
+            mvn_correction_global_calibration(g, cdataloader, mparams, mscopes)
         else:
             pass
 

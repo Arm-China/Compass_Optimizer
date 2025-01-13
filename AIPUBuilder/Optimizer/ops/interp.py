@@ -27,7 +27,7 @@ align_corners and asymmetric are mutually exclusive.
 
 
 def _scaler(i, ratio, mode, input_size, out_size):
-    i = torch.tensor(i).double()
+    i = i.double()
     if mode == 'half_pixel':
         return (i + 0.5) * (1. / ratio) - 0.5 if ratio is not None else ((i + 0.5) * input_size / out_size) - 0.5
     elif mode == 'align_corners':
@@ -142,7 +142,7 @@ def compute_weight_coefficients(input_size, output_size, rscale, mode, exclude_o
     bound_w_max = []
     scale_buffer = torch.zeros([windowsize * output_size], device=dev)
     for coord in range(output_size):
-        center = 0.5 + _scaler(coord, rscale, mode, input_size, output_size)
+        center = 0.5 + _scaler(torch.tensor(coord), rscale, mode, input_size, output_size)
         total_weight = 0.0
         fmin = math.floor(center - support + 0.5)
         fmax = math.floor(center + support + 0.5)

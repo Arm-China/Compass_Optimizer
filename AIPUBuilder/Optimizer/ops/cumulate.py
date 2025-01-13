@@ -129,6 +129,13 @@ def cumulate_quantize(self, *args):
         out, q_mode_activation, out.qbits, is_signed=out_signed)
     out.qinvariant = False
 
+    if inp.qinvariant:
+        out.scale = 1
+        out.zerop = 0
+        out.qbits, out.dtype = range2dtype(
+            out.extrema_min, out.extrema_max, force_int=out_signed)
+        out.qinvariant = True
+        out.qmin, out.qmax = dtype2range(out.dtype)
     if method == 'SUM':
         do_scale, do_scale_type, do_shift, do_shift_type = \
             get_scale_approximation_params(out.scale/inp.scale,

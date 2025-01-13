@@ -32,7 +32,7 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
     for n, qn in zip(float_graph.nodes, quant_graph.nodes):
         n.forward()
         qn.forward()
-        if n.type != qn.type or n.name != qn.name:
+        if (n.type != qn.type and qn.type != OpType.NoOp) or n.name != qn.name:
             OPT_ERROR(
                 f"check_nodes_similarity: failed to match layer, one is '{n.type} {n.name}' and another is '{qn.type} {qn.name}'. ")
         for float_t, t in zip(n.outputs, qn.outputs):

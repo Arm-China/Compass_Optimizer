@@ -32,6 +32,10 @@ def batch_norm(self, *args):
         # inp += self.inputs[0].zerop
         weights += self.constants["weights"].broadcast_zerop
         bias += self.constants['biases'].broadcast_zerop
+
+    if inp.shape[axis] != self.inputs[0].ir_shape[axis]:
+        weights = PyTensor.detile(weights, axis)
+        bias = PyTensor.detile(bias, axis)
     inp_dim = inp.dim()
     perm = []
     if axis != inp_dim - 1 and inp_dim > 0:

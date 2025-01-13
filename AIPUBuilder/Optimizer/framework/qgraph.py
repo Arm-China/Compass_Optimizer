@@ -332,6 +332,30 @@ class QuantizeGraph(PyGraph):
         OPT_INFO('Succesfully loaded statistic info from file: ' + statistic_info_fname)
         return True
 
+    def set_fp_tensor_after_update_quantization_attr(self):
+        import sys
+        from AIPUBuilder.Optimizer.logger import tqdm
+        from AIPUBuilder.Optimizer.utils import str2dtype, is_float
+        from AIPUBuilder.Optimizer.framework import Dtype, OpType
+        with tqdm(total=len(self.nodes), desc='update_fp_tensor_quantization_attrs', file=sys.stdout, leave=False) as pbar:
+            for n in self.nodes:
+                if n.params['unquantifiable']:
+                    if n.type == OpType.Quantize:
+                        continue
+                    fd = (
+                        n.attrs["trigger_float_op"].name
+                        if isinstance(n.attrs["trigger_float_op"], Dtype)
+                        else str(n.attrs["trigger_float_op"]).lower().strip()
+                    )
+                    o_dtype = str2dtype(fd)
+                    for ot in n.outputs:
+                        if is_float(ot.ir_dtype):
+                            ot.dtype = o_dtype
+                        else:
+                            ot.dtype = ot.ir_dtype
+                pbar.update(1)
+            pbar.refresh()
+
     def set_tensor_quantization_attrs(self):
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm
@@ -410,17 +434,16 @@ class QuantizeGraph(PyGraph):
                 pbar.update(1)
             pbar.refresh()
 
-        graph = self.quantgraph
-        for qn in graph.nodes:
+        for qn in self.quantgraph.nodes:
             fd = qn.attrs['trigger_float_op'].name if isinstance(qn.attrs['trigger_float_op'], Dtype) \
                 else str(qn.attrs['trigger_float_op']).lower().strip()
             if fd != 'disable' and qn.params['unquantifiable']:
                 if qn.type == OpType.Quantize:
-                    qn.params['quantize_scale'] = qn.outputs[0].scale
-                    qn.params['quantize_zp'] = qn.outputs[0].zerop
+                    qn.set_ir_field('quantize_scale', qn.outputs[0].scale, Dtype.FP32)
+                    qn.set_ir_field('quantize_zp', qn.outputs[0].zerop, Dtype.INT32)
                 if qn.type == OpType.DeQuantize:
-                    qn.params['quantize_scale'] = qn.inputs[0].scale
-                    qn.params['quantize_zp'] = qn.inputs[0].zerop
+                    qn.set_ir_field('quantize_scale', qn.inputs[0].scale, Dtype.FP32)
+                    qn.set_ir_field('quantize_zp', qn.inputs[0].zerop, Dtype.INT32)
 
                 if qn.type != OpType.Quantize:
                     for i, t in enumerate(qn.outputs):

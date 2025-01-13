@@ -16,6 +16,33 @@ def select_forward(self, *args):
     condition = inp0.betensor
     x1 = inp1.betensor
     x2 = inp2.betensor
+
+    def set_can_detile(t):
+        if t.pnode is None:
+            can_detile = False
+        else:
+            pow_nods, count_root, count_constant = t.pnode.get_ancestors()
+            can_detile = True if count_root > 0 and count_root == count_constant else False
+        return can_detile
+    inp0_can_detile = self.get_attrs('inp0_can_detile', optional=True, default_value=None)
+    inp1_can_detile = self.get_attrs('inp1_can_detile', optional=True, default_value=None)
+    inp2_can_detile = self.get_attrs('inp2_can_detile', optional=True, default_value=None)
+    if inp0_can_detile is None:
+        inp0_can_detile = set_can_detile(self.inputs[0])
+        self.attrs['inp0_can_detile'] = inp0_can_detile
+    if inp1_can_detile is None:
+        inp1_can_detile = set_can_detile(self.inputs[1])
+        self.attrs['inp1_can_detile'] = inp1_can_detile
+    if inp2_can_detile is None:
+        inp2_can_detile = set_can_detile(self.inputs[2])
+        self.attrs['inp2_can_detile'] = inp2_can_detile
+    if inp0_can_detile:
+        condition = self.inputs[0].detile_betensor()
+    if inp1_can_detile:
+        x1 = self.inputs[1].detile_betensor()
+    if inp2_can_detile:
+        x2 = self.inputs[2].detile_betensor()
+
     if self.quantized:
         scale1, scale2 = self.params["scale_value"]
         shift1, shift2 = self.params["shift_value"]

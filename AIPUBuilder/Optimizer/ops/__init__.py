@@ -177,3 +177,11 @@ from . import adativepool
 from . import filterbox
 from . import atanh
 from . import affine_grid
+from . import globalpooling
+from . import slotupdate
+from . import queryrebatch
+from . import nonzero
+from . import noop
+from . import unique
+from . import isinf
+from . import isnan

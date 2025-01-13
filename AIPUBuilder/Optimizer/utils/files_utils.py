@@ -8,7 +8,7 @@ __all__ = ['make_path', 'make_dir_path']
 
 def make_path(path):
     dpath = os.path.dirname(path)
-    if not os.path.exists(dpath):
+    if dpath != '' and not os.path.exists(dpath):
         os.makedirs(dpath)
     return path
 

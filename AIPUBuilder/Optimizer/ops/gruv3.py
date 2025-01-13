@@ -4,7 +4,6 @@
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.ops.rnn import *
-from AIPUBuilder.Optimizer.ops.conv import clear_lower_bits_for_bias
 from AIPUBuilder.Optimizer.logger import *
 import torch.nn as nn
 
@@ -189,14 +188,27 @@ def gruv3(self, *args):
                 scale.append(requant_scale[start_idx: start_idx + step].to(inp0.betensor.device))
                 shift.append(requant_shift[start_idx: start_idx + step].to(inp0.betensor.device))
                 start_idx += step
-        if dtype == 'int8':
-            act_qmax = 2 ** 31 - 1
-            act_qmin = -2 ** 31
-        elif dtype == 'int16':
-            act_qmax = 2 ** 47 - 1
-            act_qmin = -2 ** 47
-            qmax = 2**15 - 1
-            qmin = -qmax
+
+        # Here lib use the default value 15, but the default value of 15 may cause a loss of accuracy
+        # and it is better that lib can use remain_shift
+        aasrb = self.get_param('remain_shift', optional=True, default_value=10)
+        act_qmin, act_qmax = -2 ** 31, 2 ** 31 - 1
+        input_bits = dtype2bits(self.inputs[0].dtype)
+        shift0_zeros_tensor = torch.zeros_like(shift[0], device=inp0.betensor.device)
+        shift1_zeros_tensor = torch.zeros_like(shift[1], device=inp0.betensor.device)
+        shift2_zeros_tensor = torch.zeros_like(shift[2], device=inp0.betensor.device)
+        shift3_zeros_tensor = torch.zeros_like(shift[3], device=inp0.betensor.device)
+        mtp_trsh_rz_h = shift0_zeros_tensor if input_bits <= 8 else torch.max(shift[0] - aasrb, shift0_zeros_tensor)
+        mtp_trsh_rz_x = shift1_zeros_tensor if input_bits <= 8 else torch.max(shift[1] - aasrb, shift1_zeros_tensor)
+        itp_trsh_rz_h = shift0_zeros_tensor if input_bits <= 8 else torch.min(
+            shift0_zeros_tensor+aasrb, shift[0]) + mtp_trsh_rz_x
+        itp_trsh_rz = shift1_zeros_tensor if input_bits <= 8 else torch.min(shift1_zeros_tensor+aasrb, shift[1])
+
+        mtp_trsh_c_h = shift2_zeros_tensor if input_bits <= 8 else torch.max(shift[2] - aasrb, shift2_zeros_tensor)
+        mtp_trsh_c_x = shift3_zeros_tensor if input_bits <= 8 else torch.max(shift[3] - aasrb, shift3_zeros_tensor)
+        itp_trsh_c_h = shift2_zeros_tensor if input_bits <= 8 else torch.min(
+            shift2_zeros_tensor+aasrb, shift[2]) + mtp_trsh_c_x
+        itp_trsh_c = shift3_zeros_tensor if input_bits <= 8 else torch.min(shift3_zeros_tensor+aasrb, shift[3])
 
         for b in range(batch_size):
             state = torch.unsqueeze(in_state[b], dim=0).float()
@@ -205,37 +217,68 @@ def gruv3(self, *args):
                 in_ts = torch.reshape(input_seq[b, ts, :], (-1, input_size)).float()
                 x_by_wg = torch.matmul(in_ts, wx_gk_q)
                 h_by_wg = torch.matmul(state, wh_gk_q)
-                re_scaled_h_by_wg = linear_requantize(h_by_wg, scale[0], shift[0], 0, act_qmin, act_qmax)
+                if input_bits <= 8:
+                    re_scaled_h_by_wg = linear_requantize(h_by_wg, scale[0], shift[0], 0, act_qmin, act_qmax)
 
-                mat_sum = x_by_wg + re_scaled_h_by_wg + torch.unsqueeze(gates_bias_q, 0)
-                rescaled_mat_sum = linear_requantize(mat_sum, scale[1], shift[1], 0, qmin, qmax)
-                rt_zt_lut_out = lookup_lut_powerof2(rescaled_mat_sum, rt_table, lut_in_bits, True, lut_out_bits, True)
-                r, u = torch.chunk(rt_zt_lut_out, 2, dim=1)
+                    mat_sum = x_by_wg + re_scaled_h_by_wg + torch.unsqueeze(gates_bias_q, 0)
+                    rescaled_mat_sum = linear_requantize(mat_sum, scale[1], shift[1], 0, qmin, qmax)
+                    rt_zt_lut_out = lookup_lut_powerof2(rescaled_mat_sum, rt_table,
+                                                        lut_in_bits, True, lut_out_bits, True)
+                    r, u = torch.chunk(rt_zt_lut_out, 2, dim=1)
 
-                x_by_wc = torch.matmul(in_ts, wx_ck_q)
-                if 'version' in self.params and self.params['version'] == "GRUV1":
-                    hidden_scale = self.params["hidden_scale_value"]
-                    hidden_shift = self.params["hidden_shift_value"]
-                    h_by_wc = torch.add(torch.matmul(state, wh_ck_q), torch.unsqueeze(hidden_bias_q, 0))
-                    h_by_wc = linear_requantize(h_by_wc, hidden_scale, hidden_shift, 0, qmin, qmax)
-                    h_by_wc = torch.multiply(r, h_by_wc)
-                else:
-                    factor = 256.0 if dtype == 'int8' else 65536.0
-                    hprev_r = torch.round(torch.div(torch.multiply(r, state), factor))
-                    h_by_wc = torch.matmul(hprev_r, wh_ck_q)
-                re_scaled_h_by_wc = linear_requantize(h_by_wc, scale[2], shift[2], 0, act_qmin, act_qmax)
-                mat_sum2 = x_by_wc + re_scaled_h_by_wc + torch.unsqueeze(candidate_bias_q, 0)
+                    x_by_wc = torch.matmul(in_ts, wx_ck_q)
+                    if 'version' in self.params and self.params['version'] == "GRUV1":
+                        hidden_scale = self.params["hidden_scale_value"]
+                        hidden_shift = self.params["hidden_shift_value"]
+                        h_by_wc = torch.add(torch.matmul(state, wh_ck_q), torch.unsqueeze(hidden_bias_q, 0))
+                        h_by_wc = linear_requantize(h_by_wc, hidden_scale, hidden_shift, 0, qmin, qmax)
+                        h_by_wc = torch.multiply(r, h_by_wc)
+                    else:
+                        factor = 256.0
+                        hprev_r = torch.round(torch.div(torch.multiply(r, state), factor))
+                        h_by_wc = torch.matmul(hprev_r, wh_ck_q)
+                    re_scaled_h_by_wc = linear_requantize(h_by_wc, scale[2], shift[2], 0, act_qmin, act_qmax)
+                    mat_sum2 = x_by_wc + re_scaled_h_by_wc + torch.unsqueeze(candidate_bias_q, 0)
 
-                rescaled_mat_sum2 = linear_requantize(mat_sum2, scale[3], shift[3], 0, qmin, qmax)
+                    rescaled_mat_sum2 = linear_requantize(mat_sum2, scale[3], shift[3], 0, qmin, qmax)
+                else:  # int16
+                    h_by_wg = linear_requantize(h_by_wg, 1, mtp_trsh_rz_h, 0, act_qmin, act_qmax)
+                    re_scaled_h_by_wg = linear_requantize(h_by_wg, scale[0], itp_trsh_rz_h, 0, act_qmin, act_qmax)
+                    x_by_wg = linear_requantize(x_by_wg, 1, mtp_trsh_rz_x, 0, act_qmin, act_qmax)
+                    gates_bias_q = linear_requantize(gates_bias_q, 1, mtp_trsh_rz_x, 0, act_qmin, act_qmax)
+                    mat_sum = x_by_wg + re_scaled_h_by_wg + torch.unsqueeze(gates_bias_q, 0)
+                    rescaled_mat_sum = linear_requantize(mat_sum, scale[1], itp_trsh_rz, 0, qmin, qmax)
+                    rt_zt_lut_out = lookup_lut_powerof2(rescaled_mat_sum, rt_table,
+                                                        lut_in_bits, True, lut_out_bits, True)
+                    r, u = torch.chunk(rt_zt_lut_out, 2, dim=1)
+
+                    x_by_wc = torch.matmul(in_ts, wx_ck_q)
+                    if 'version' in self.params and self.params['version'] == "GRUV1":
+                        hidden_scale = self.params["hidden_scale_value"]
+                        hidden_shift = self.params["hidden_shift_value"]
+                        hidden_bias_q = linear_requantize(hidden_bias_q, 1, mtp_trsh_c_h, 0, act_qmin, act_qmax)
+                        h_by_wc = torch.add(torch.matmul(state, wh_ck_q), torch.unsqueeze(hidden_bias_q, 0))
+                        h_by_wc = linear_requantize(h_by_wc, hidden_scale, hidden_shift, 0, qmin, qmax)
+                        h_by_wc = torch.multiply(r, h_by_wc)
+                    else:
+                        factor = 65536.0
+                        hprev_r = torch.round(torch.div(torch.multiply(r, state), factor))
+                        h_by_wc = torch.matmul(hprev_r, wh_ck_q)
+                    x_by_wc = linear_requantize(x_by_wc, 1, mtp_trsh_c_x, 0, act_qmin, act_qmax)
+                    h_by_wc = linear_requantize(h_by_wc, 1, mtp_trsh_c_h, 0, act_qmin, act_qmax)
+                    re_scaled_h_by_wc = linear_requantize(h_by_wc, scale[2], itp_trsh_c_h, 0, act_qmin, act_qmax)
+                    candidate_bias_q = linear_requantize(candidate_bias_q, 1, mtp_trsh_c_x, 0, act_qmin, act_qmax)
+                    mat_sum2 = x_by_wc + re_scaled_h_by_wc + torch.unsqueeze(candidate_bias_q, 0)
+                    rescaled_mat_sum2 = linear_requantize(mat_sum2, scale[3], itp_trsh_c, 0, qmin, qmax)
                 c = lookup_lut_powerof2(rescaled_mat_sum2, ht_table, lut_in_bits, True, lut_out_bits, True)
                 max_pre = qmax
                 c_times_1_minus_u = (max_pre - u) * c
                 rescaled_c_times_1_minus_u = linear_requantize(
                     c_times_1_minus_u, scale[4], shift[4], 0, act_qmin, act_qmax)
-
                 state = rescaled_c_times_1_minus_u + u * state
-                state = linear_requantize(state, scale[5], shift[5], 0, qmin, qmax)
+                state = linear_requantize(state, scale[5], shift[5], 0, qmin+1, qmax)
                 state_all = state if ts == 0 else torch.cat((state_all, state), dim=0)
+
             state_last = state if b == 0 else torch.cat((state_last, state), dim=0)
             state_all = torch.unsqueeze(state_all, dim=0)
             state_batch = state_all if b == 0 else torch.cat((state_batch, state_all), dim=0)
@@ -374,6 +417,8 @@ def gruv3_quantize(self, *args):
     weights.dtype = bits2dtype(weights.qbits, is_signed=True)
     weights.qinvariant = False
 
+    xwc_scale = inp.scale * wx_ck_t_scale
+    cb_scale = xwc_scale
     # quantized bias
     b = self.constants["biases"]
     bias = b.betensor
@@ -423,23 +468,6 @@ def gruv3_quantize(self, *args):
         factor = 2 ** q_bits_activation
         hwc_scale = h_scale * f_out_scale * wh_ck_t_scale
         quantized_bias = torch.zeros([0], device=inp.betensor.device)
-
-    xwc_scale = inp.scale * wx_ck_t_scale
-    # torch.min(xwc_scale, hwc_scale) if isinstance(xwc_scale, torch.Tensor) else min(xwc_scale, hwc_scale)  # xwc_scale if xwc_scale <= hwc_scale else hwc_scale
-    cb_scale = xwc_scale
-    candidate_bias_q = linear_quantize_clip(candidate_bias, cb_scale, zerop, qmin, qmax)
-    quantized_bias = torch.cat((gates_bias_q, candidate_bias_q, quantized_bias), dim=0)
-    b.scale = torch.cat([gb_scale, cb_scale], dim=0)  # min(gb_scale, cb_scale)
-    b.zerop = torch.zeros_like(b.scale)
-    b.qmin = qmin
-    b.qmax = qmax
-    b.qbits = q_bits_bias
-    b.betensor = quantized_bias
-    b.dtype = bits2dtype(b.qbits, is_signed=True)
-    b.qinvariant = False
-
-    absorb_input_h_zp_to_bias(self, *args)
-    clear_lower_bits_for_bias(self, *args)
 
     # get_scale_approximation_params = compute_requantization_param
     hwg_do_scale, hwg_do_scale_type, hwg_do_shift, hwg_do_shift_type = \
@@ -503,8 +531,61 @@ def gruv3_quantize(self, *args):
         self.params["scale_value"] = scale_value
         self.params["scale_type"] = [do_scale_type] * len(scale_value)
 
+    # torch.min(xwc_scale, hwc_scale) if isinstance(xwc_scale, torch.Tensor) else min(xwc_scale, hwc_scale)  # xwc_scale if xwc_scale <= hwc_scale else hwc_scale
+    candidate_bias_q = linear_quantize_clip(candidate_bias, cb_scale, zerop, qmin, qmax)
+    quantized_bias = torch.cat((gates_bias_q, candidate_bias_q, quantized_bias), dim=0)
+    b.scale = torch.cat([gb_scale, cb_scale], dim=0)
+    b.zerop = torch.zeros_like(b.scale)
+    b.qmin = qmin
+    b.qmax = qmax
+    b.qbits = q_bits_bias
+    b.betensor = quantized_bias
+    b.dtype = bits2dtype(b.qbits, is_signed=True)
+    b.qinvariant = False
+
+    if 'remain_shift' in self.attrs:
+        self.params['remain_shift'] = self.attrs['remain_shift']
+
+    absorb_input_h_zp_to_bias(self, *args)
+    gru_clear_lower_bits_for_bias(self, *args)
+
     for out in self.outputs:
         out.qbits = q_bits_activation
         out.scale, out.zerop, out.qmin, out.qmax, out.dtype = get_linear_quant_params_from_tensor(
             out, QuantMode.to_symmetric(q_mode_activation), out.qbits, is_signed=True)
         out.qinvariant = False
+
+
+def gru_clear_lower_bits_for_bias(self, *args, dim=-1):
+    if QuantMode.is_per_channel(self.attrs["q_mode_weight"]):
+        # AIFF doesn't support per channel weight is not currently supported
+        return
+    bias = self.constants['biases']
+    lmin, lmax = bits2range(self.attrs['bias_effective_bits'], is_signed=True)
+    cell_size = self.params['cell_size']
+    shift_value = self.params['shift_value']
+    aasrb = self.get_param('remain_shift', optional=True, default_value=15)
+
+    gate_bias = bias.betensor[:2 * cell_size]
+    candidate_bias = bias.betensor[2 * cell_size: 3 * cell_size]
+    bn = None
+    if bias.betensor.shape[0] == 4 * cell_size:
+        bn = bias.betensor[3 * cell_size:]
+
+    gate_preshift = 0
+    candidate_preshift = 0
+    bn_preshift = 0
+    if dtype2bits(self.inputs[0].dtype) > 8:
+        gate_preshift = max(shift_value[1] - aasrb, 0)
+        candidate_preshift = max(shift_value[3] - aasrb, 0)
+        bn_preshift = max(shift_value[2] - aasrb, 0)
+
+    gate_bias = compress_int32_to_int16(gate_bias, lmin, lmax, gate_preshift)
+    candidate_bias = compress_int32_to_int16(candidate_bias, lmin, lmax, candidate_preshift)
+    if bn is not None:
+        bn = compress_int32_to_int16(bn, lmin, lmax, bn_preshift)
+
+    new_bias = torch.cat([gate_bias, candidate_bias], dim=dim)
+    if bn is not None:
+        new_bias = torch.cat([new_bias, bn], dim=dim)
+    bias.betensor = new_bias

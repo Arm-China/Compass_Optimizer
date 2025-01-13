@@ -35,7 +35,7 @@ def digit_version(version_str):
 
 
 @register_plugin(PluginType.Dataset, '1.0')
-class BevFormerDataset(Dataset):
+class BevFormerStaticDataset(Dataset):
 
     def __init__(self, data_file=None, label_file=None):
         self.prev_bev_flag = None
@@ -166,11 +166,11 @@ class BevFormerDataset(Dataset):
             return ref_2d
 
     def generate_lidar2img(self, lidar2img):
-        ref_3d = BevFormerDataset.get_reference_points(self.bev_h,
-                                                       self.bev_w,
-                                                       self.point_cloud_range[5] - self.point_cloud_range[2],
-                                                       self.num_points_in_pillar,
-                                                       device=self.device)
+        ref_3d = BevFormerStaticDataset.get_reference_points(self.bev_h,
+                                                             self.bev_w,
+                                                             self.point_cloud_range[5] - self.point_cloud_range[2],
+                                                             self.num_points_in_pillar,
+                                                             device=self.device)
         ref_point_cam, bev_mask = self.point_sampling(lidar2img, ref_3d, self.point_cloud_range)
         return ref_point_cam, bev_mask
 
@@ -243,7 +243,7 @@ class BevFormerDataset(Dataset):
         clip_v = reference_points_cam.new_tensor(25.)
         reference_points_cam = torch.clamp(reference_points_cam, -clip_v, clip_v)
 
-        if 1:
+        if 0:
             bs = 1
             D = 8
             indexes = []

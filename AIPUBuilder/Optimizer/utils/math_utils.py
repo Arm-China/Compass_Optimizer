@@ -270,7 +270,7 @@ def broadcasting_transform(x0, x1):
     # align axis
     x0_shape, x1_shape = x0.shape, x1.shape
     max_len = max(len(x0_shape), len(x1_shape))
-    tile_a, tile_b = [1 for c in range(max_len)], [1 for c in range(max_len)]
+    tile_a, tile_b = [1] * max_len, [1] * max_len
     x0, x1 = x0.tile(tile_a), x1.tile(tile_b)
 
     # check broadcast params
@@ -280,6 +280,10 @@ def broadcasting_transform(x0, x1):
             tile_a[local_axis] = x1.shape[local_axis]
         elif x1.shape[local_axis] == 1 and x0.shape[i] % x1.shape[local_axis] == 0:
             tile_b[local_axis] = x0.shape[local_axis]
+        elif x1.shape[local_axis] % x0.shape[local_axis] == 0:
+            tile_a[local_axis] = int(x1.shape[local_axis] / x0.shape[local_axis])
+        elif x0.shape[local_axis] % x1.shape[local_axis] == 0:
+            tile_b[local_axis] = int(x0.shape[local_axis] / x1.shape[local_axis])
         elif x1.shape[local_axis] % x0.shape[local_axis] != 0 or x0.shape[local_axis] % x1.shape[local_axis] != 0:
             OPT_WARN('tensors are non-broadcastable')
     x0, x1 = x0.tile(tile_a), x1.tile(tile_b)

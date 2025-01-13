@@ -56,7 +56,13 @@ if hasattr(AIPUBuilder, '__release__') and AIPUBuilder.__dict__.get('__release__
 
     def base_logger(msg, *args, workflow_name='', op_name='', **kwargs):
         ltime = __time__()
-        log_head = BT_NAME + ' [' + ltime + ']'
+        prefix_header = BT_NAME
+        if ('prefix_header' in kwargs and kwargs['prefix_header'] is not None and
+                isinstance(kwargs['prefix_header'], str) and len(kwargs['prefix_header']) > 1):
+            prefix_header = kwargs['prefix_header']
+        log_head = prefix_header + ' [' + ltime + ']'
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name
         op_name = op_name + ' ' if len(op_name) else op_name
@@ -160,9 +166,19 @@ else:
     __func__ = get_function_name
     __filen__ = get_file_name
 
+    def get_prefix_header(**kwargs):
+        prefix_header = BT_NAME
+        if ('prefix_header' in kwargs and kwargs['prefix_header'] is not None and
+                isinstance(kwargs['prefix_header'], str) and len(kwargs['prefix_header']) > 1):
+            prefix_header = kwargs['prefix_header']
+        return prefix_header
+
     def OPT_INFO(msg, *args, workflow_name='', log_once=False, **kwargs):
         ltime = __time__()
-        log_head = BT_NAME + ' [' + ltime + ']'
+        prefix_header = get_prefix_header(**kwargs)
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
+        log_head = prefix_header + ' [' + ltime + ']'
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name
         log_body = workflow_name + msg + ('' if len(args_str) == 0 else args_str)
@@ -185,7 +201,10 @@ else:
         ltime = ''
         fname = __filen__()
         lineno = __line__()
-        log_head = BT_NAME + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
+        prefix_header = get_prefix_header(**kwargs)
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
+        log_head = prefix_header + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
 
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name
@@ -203,7 +222,10 @@ else:
         ltime = __time__()
         fname = __filen__()
         lineno = __line__()
-        log_head = BT_NAME + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
+        prefix_header = get_prefix_header(**kwargs)
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
+        log_head = prefix_header + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
 
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name
@@ -221,7 +243,10 @@ else:
         ltime = __time__()
         fname = __filen__()
         lineno = __line__()
-        log_head = BT_NAME + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
+        prefix_header = get_prefix_header(**kwargs)
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
+        log_head = prefix_header + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
 
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name
@@ -239,7 +264,10 @@ else:
         ltime = __time__()
         fname = __filen__()
         lineno = __line__()
-        log_head = BT_NAME + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
+        prefix_header = get_prefix_header(**kwargs)
+        if prefix_header != BT_NAME:
+            kwargs.pop('prefix_header')
+        log_head = prefix_header + ' [' + ltime + ' ' + fname + ':' + str(lineno) + ']'
 
         args_str = ' '.join(args) + ' '.join(kwargs.values())
         workflow_name = workflow_name + ' ' if len(workflow_name) else workflow_name

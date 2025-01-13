@@ -6,6 +6,7 @@ import re
 from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_INFO, OPT_WARN
 from AIPUBuilder.Optimizer.framework import (QUANTIZE_METRIC_DICT,
                                              QUANTIZE_DATASET_DICT,
+                                             QUANTIZE_CONFIG_DICT,
                                              OpType, PyNode)
 from AIPUBuilder.Optimizer.utils import string_to_base_type, QuantMode, AIFF_AHEAD_SHIFT_OP
 
@@ -13,13 +14,18 @@ DEFAULT_FIELDS = {}
 HIDDEN_FIELDS = {}
 
 
-def field_register(field, ftype='default'):
+def field_register(field, ftype='default', fscope='ptq'):
+    if ftype.lower() == 'default' and fscope not in DEFAULT_FIELDS:
+        DEFAULT_FIELDS.update({fscope: {}})
+    if ftype.lower() == 'hidden' and fscope not in HIDDEN_FIELDS:
+        HIDDEN_FIELDS.update({fscope: {}})
+
     def wrapper(cls):
         if ftype.lower() == 'default':
-            DEFAULT_FIELDS.update({field: cls})
+            DEFAULT_FIELDS[fscope].update({field: cls})
 
         if ftype.lower() == 'hidden':
-            HIDDEN_FIELDS.update({field: cls})
+            HIDDEN_FIELDS[fscope].update({field: cls})
         return cls
     return wrapper
 
@@ -270,6 +276,31 @@ class OutputDirField(BaseField):
     @staticmethod
     def message():
         return f"A path to save the output IR, calibration statistic file and quantization configuration json file."
+
+
+@field_register('qconfig', 'default')
+class QConfigField(BaseField):
+    @staticmethod
+    def _all_plugins():
+        return [k for k in QUANTIZE_CONFIG_DICT.keys()]
+
+    @staticmethod
+    def default():
+        return ''
+
+    @staticmethod
+    def parse(d):
+        _plugins = str([k for k in QConfigField._all_plugins()] + [''])
+        return (not isinstance(d, (tuple, list))) and (d.lower() in _plugins), d
+
+    @staticmethod
+    def error(d):
+        _plugins = str([k for k in QConfigField._all_plugins()] + [''])
+        return f"Require the 'qconfig' field must be in {_plugins}, and do not support multi-qconfig,  now qconfig = {d}."
+
+    @staticmethod
+    def message():
+        return f"A QConfig plugin name used to create a QConfig plugin script which can program each layer's quantization configuration. Now Optimizer supports qconfig plugin names: {QConfigField._all_plugins()}"
 
 
 @field_register('dataset', 'default')
@@ -1864,7 +1895,7 @@ class TrimInfinityField(BaseField):
 
     @staticmethod
     def error(ti):
-        return (f"Must be `method(min_value, max_value)`, "
+        return (f"trim_infinity_before_statistic field must be `method(min_value, max_value)`, "
                 f"where values <= `min_value` or >= `max_value` will be treated as infinite values (need: min_value <= 0 <= max_value), `method` decides how to deal with infinite values and currently "
                 f"supports `clip` (infinite values will be clamped into [min_value, max_value]) and `second` (infinite values will be replaced by min/max values "
                 f"after excluding infinite values). "
@@ -2200,6 +2231,26 @@ class CompatQuantizedModelSimplifyDequantizeQuantizeField(BaseField):
         return (f"Whether enable to simplify the dequantize and quantize, and merge the dequantized and quantize to qnn op in qat model.")
 
 
+@field_register('compat_quantized_model_force_weight_asym', 'hidden')
+class CompatQuantizedModelForceWeightAsymField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the bool 'compat_quantized_model_force_weight_asym' field, "
+                f"now is {eap}, default value= {CompatQuantizedModelForceWeightAsymField.default()}.")
+
+    @staticmethod
+    def message():
+        return (f"when enable force weight asymmetric, qtlib will keep asymmetric weight and not transform the asymmetric weigth to symmetric weight.")
+
+
 @field_register('regularize_activation_perchannel_scales', 'hidden')
 class RegularizeActivationPerchannelScalesField(BaseField):
     @staticmethod
@@ -2439,4 +2490,57 @@ class IgnoreMissingStat(BaseField):
             remains undefined, errors may occurs in quantization without a warning."
 
 
-ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}
+@field_register('modify_batch_dim', 'default')
+class ModifyBatchDim(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        res = BaseField._re_parse(us, r'^\d+|(false)|(FALSE)|(False)$')
+        return res[0], eval(str(res[1]))
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'modify_batch_dim' field be 'False' or integer greater than 0, default value=False."
+
+    @staticmethod
+    def message():
+        return "Default is False, if set an integer, will try to modify the batch size of entire graph. Note that\
+            this will be processed before calibration stage."
+
+
+@field_register('export_parallel_batch', 'default')
+class ExportParallelBatch(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        res = BaseField._re_parse(us, r'^\d+|(false)|(FALSE)|(False)$')
+        return res[0], eval(str(res[1]))
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'export_parallel_batch' field be 'False' or integer greater than 0, default value=False."
+
+    @staticmethod
+    def message():
+        return "Default is False, if set an integer, will try to copy graph n times and connect them with Split OP after Inputs and Concat OP after outputs."
+
+
+# ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}
+ALL_FIELDS = {}
+
+
+def get_all_fields():
+    global ALL_FIELDS
+    for fscope, fields in DEFAULT_FIELDS.items():
+        ALL_FIELDS.update(**fields)
+    for fscope, fields in HIDDEN_FIELDS.items():
+        ALL_FIELDS.update(**fields)
+
+
+get_all_fields()

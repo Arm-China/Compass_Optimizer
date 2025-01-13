@@ -403,3 +403,15 @@ def generate_lut_with_placeholders(node, activation_idx, activation, q_mode_acti
             node.constants[lut_name] = lut
 
     return in_scale, out_scale
+
+
+def compress_int32_to_int16(array, lmin, lmax, pre_shift=0):
+    import math
+    bmin = min(array.min().item(), -1)
+    bmax = max(array.max().item(), 1)
+    lbits = math.ceil(max(math.log2(bmax / lmax), math.log2(bmin / lmin)))
+    if lbits > pre_shift:
+        array = ((array.long() >> lbits) << lbits).long()
+    else:
+        array = ((array.long() >> pre_shift) << pre_shift).long()
+    return array

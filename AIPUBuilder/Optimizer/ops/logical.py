@@ -23,6 +23,26 @@ def logical(self, *args):
         inp1 = self.inputs[1]
         ref_val = inp1.betensor
 
+        def set_can_detile(t):
+            if t.pnode is None:
+                can_detile = False
+            else:
+                pow_nods, count_root, count_constant = t.pnode.get_ancestors()
+                can_detile = True if count_root > 0 and count_root == count_constant else False
+            return can_detile
+        inp0_can_detile = self.get_attrs('inp0_can_detile', optional=True, default_value=None)
+        inp1_can_detile = self.get_attrs('inp1_can_detile', optional=True, default_value=None)
+        if inp0_can_detile is None:
+            inp0_can_detile = set_can_detile(self.inputs[0])
+            self.attrs['inp0_can_detile'] = inp0_can_detile
+        if inp1_can_detile is None:
+            inp1_can_detile = set_can_detile(self.inputs[1])
+            self.attrs['inp1_can_detile'] = inp1_can_detile
+        if inp0_can_detile:
+            inp = self.inputs[0].detile_betensor()
+        if inp1_can_detile:
+            ref_val = self.inputs[1].detile_betensor()
+
         if method_ in ('AND', 'OR', 'XOR'):
             inp = inp.type(torch.bool)
             ref_val = ref_val.type(torch.bool)
@@ -79,7 +99,11 @@ def logical_quantize(self, *args):
                           * 8192, 32767) / (inp_scale_max / inp_scale_min))
             scale0 = (inp_scale_max / inp0.scale) * nfactor
             scale1 = (inp_scale_max / inp1.scale) * nfactor
-
+        # if scale0 or scale1 is float32 1.0, int(scale0) is 0, which cause unexpected result
+        if scale0 < 1:
+            scale0 = 1
+        if scale1 < 1:
+            scale1 = 1
         self.params["scale_value"] = [int(scale0), int(scale1)]
         self.params["scale_type"] = [Dtype.UINT16]*2
 

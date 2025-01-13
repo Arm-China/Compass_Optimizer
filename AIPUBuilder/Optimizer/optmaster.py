@@ -77,6 +77,8 @@ class OptMaster(object):
             argv.calibration_batch_size = 1
             argv.metric_batch_size = 1
         self.batch_size_in_IR = config_info['batch_size']
+        if argv.modify_batch_dim:
+            modify_batch_dim(self.g, argv)
         # this only uses to check beteween the return item len and the input Op num.
         checker_dataloader = None
         collate_fn = None
@@ -232,6 +234,10 @@ class OptMaster(object):
             node.attrs['batch_size_in_IR'] = self.batch_size_in_IR
             node.attrs['calculate_running_time'] = False
             node.attrs['trigger_float_op_bkup'] = node.attrs['trigger_float_op']
+
+        if self.hparams.qconfig != '':
+            OPT_INFO(f"now use qconfig to re-configure quantize method")
+            QUANTIZE_CONFIG_DICT[self.hparams.qconfig.lower()](self.g, self.hparams)()
 
         # do a forward to check graph firstly and init placeholders,
         # force each op to be able to handle all zero inputs.
@@ -523,6 +529,8 @@ class OptMaster(object):
         self.g.quantgraph = self.g.clone() if self.dataloader4debug is not None else self.g
         unify_scales_for_multi_inputs_op_pass(self.g.quantgraph, self.hparams)
         self.g.quantize()
+        from AIPUBuilder.Optimizer.passes.merge_inserted_op import merge_inserted_op
+        merge_inserted_op(self.g.quantgraph, self.hparams)
 
     def enable_fake_quant_scopes_for_debug(self, fake_quant_scopes):
         #################################################################################
@@ -577,7 +585,13 @@ class OptMaster(object):
                 n.params['D_dynamic_shape'] = dynamic_top_shape[:-1] + "]"
                 n.params['D_layer_id'] = n.attrs.get('layer_id', 'unknown')
 
-        qg.serialize(name + ".txt", name + ".bin")
+        if self.hparams.export_parallel_batch:
+            graph = qg.clone()
+            copy_parallel_batch(graph, self.hparams)
+            graph.serialize(name + ".txt", name + ".bin")
+            del graph
+        else:
+            qg.serialize(name + ".txt", name + ".bin")
 
         # currently no need, because it's better to be hanled by GUI.
         # write opt_config_file for debug usage or internal development usage
@@ -645,14 +659,18 @@ class OptMaster(object):
 
     def report(self):
         report_dict = {}
-        out_scale = []
-        inp_scale = []
+        out_qinfos = []
+        inp_qinfos = []
         if self.g.quantgraph is not None:
+            def _scale_zp_format(s):
+                if isinstance(s, torch.Tensor):
+                    s = s.cpu().numpy().tolist() if s.numel() > 1 else s.item()
+                return s
             for inp in self.g.quantgraph.input_tensors:
-                inp_scale.append(inp.scale)
+                inp_qinfos.append([_scale_zp_format(inp.scale), _scale_zp_format(inp.zerop), inp.dtype])
             for out in self.g.quantgraph.output_tensors:
-                out_scale.append(out.scale)
-            report_dict.update({'scale': {'out': out_scale, 'in': inp_scale}})
+                out_qinfos.append([_scale_zp_format(out.scale), _scale_zp_format(out.zerop), out.dtype])
+            report_dict.update({'qinfos(scale, zp, dtype)': {'out': out_qinfos, 'in': inp_qinfos}})
 
         if self.validation_dataloader is not None:
             fp_ms = []

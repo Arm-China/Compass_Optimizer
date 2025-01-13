@@ -175,6 +175,12 @@ class CfgParser(object):
                     if not hasattr(dataset_cls, 'collate_fn'):
                         OPT_WARN(f"collate_fn is undefined in dataset plugin,"
                                  f" please implement collate_fn yourself to override the default collate_fn of Torch.")
+        if argv['without_batch_dim'] and argv['modify_batch_dim']:
+            OPT_ERROR("When without_batch_dim=true, can not enable modify_batch_dim")
+            ret = ret and False
+        if argv['without_batch_dim'] and argv['export_parallel_batch']:
+            OPT_ERROR("When without_batch_dim=true, can not enable export_parallel_batch")
+            ret = ret and False
         return ret
 
     def update(self):
@@ -223,10 +229,11 @@ def show_plugins(metric_dict, dataset_dict):
 def fields_to_str():
     os_str = 'Now Optimizer supports configurated parameters in .cfg file:\n'
     show_dict = {}
-    for key, val in DEFAULT_FIELDS.items():
-        if key in ['graph', 'bin', 'model_name', ]:
-            continue
-        show_dict.update({key: val.message()})
+    for fscope, fields in DEFAULT_FIELDS.items():
+        for key, val in fields.items():
+            if key in ['graph', 'bin', 'model_name', ]:
+                continue
+            show_dict.update({key: val.message()})
 
     max_len = max([len(k) for k in show_dict.keys()])
     for k, v in show_dict.items():

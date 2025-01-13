@@ -49,6 +49,7 @@ class PyGraph:
     def clone(self):
         import copy
         from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
+        from AIPUBuilder.Optimizer.framework import OPT_DEBUG
         g = self.__class__(self.name)
         nmap = {}
         emap = {}
@@ -57,7 +58,11 @@ class PyGraph:
             for k, v in n.params.items():
                 pn.params[k] = copy.deepcopy(v)
             for k, v in n.attrs.items():
-                pn.attrs[k] = copy.deepcopy(v)
+                try:
+                    pn.attrs[k] = copy.deepcopy(v)
+                except:
+                    OPT_DEBUG(f"failed at deepcopy attrs ({k})({v}) of node {n}, in graph.clone()")
+                    continue
             for k, v in n.constants.items():
                 pv = v.clone(v.name)
                 pn.constants[k] = pv

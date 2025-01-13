@@ -3,7 +3,6 @@
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
-
 from AIPUBuilder.Optimizer.logger import *
 from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
 from AIPUBuilder.Optimizer.ops.activation import apply_with_activation, with_activation_out_is_signed, \
@@ -226,8 +225,32 @@ def eltwise(self, *args):
     inp0 = self.inputs[0]
     inp1 = self.inputs[1]
     out = self.outputs[0]
-    x0 = inp0.betensor.to(torch.int64) if self.quantized else inp0.betensor.float()
-    x1 = inp1.betensor.to(torch.int64) if self.quantized else inp1.betensor.float()
+
+    def set_can_detile(t):
+        if t.pnode is None:
+            can_detile = False
+        else:
+            pow_nods, count_root, count_constant = t.pnode.get_ancestors()
+            can_detile = True if count_root > 0 and count_root == count_constant else False
+        return can_detile
+
+    inp0_can_detile = self.get_attrs('inp0_can_detile', optional=True, default_value=None)
+    inp1_can_detile = self.get_attrs('inp1_can_detile', optional=True, default_value=None)
+    if inp0_can_detile is None:
+        inp0_can_detile = set_can_detile(inp0)
+        self.attrs['inp0_can_detile'] = inp0_can_detile
+    if inp1_can_detile is None:
+        inp1_can_detile = set_can_detile(inp1)
+        self.attrs['inp1_can_detile'] = inp1_can_detile
+    x0 = inp0.betensor
+    x1 = inp1.betensor
+    if inp0_can_detile:
+        x0 = inp0.detile_betensor()
+    if inp1_can_detile:
+        x1 = inp1.detile_betensor()
+    x0 = x0.to(torch.int64) if self.quantized else x0.float()
+    x1 = x1.to(torch.int64) if self.quantized else x1.float()
+
     if method in {"ADD", "SUB", "MAX", "MIN"}:
         if self.quantized:
             scales = self.get_ir_field(['scale_value', 'scale'])

@@ -28,6 +28,21 @@ def softmax_quantize(self, *args):
     smethod = int(extra_params[0] if len(extra_params) > 0 else 1)
     if QuantMode.is_per_channel(q_mode_activation) == True and 2 == smethod:
         OPT_FATAL("Softmax currently not support per-channel quantization with extra_params[0] == 2")
+
+    # Check feature map size
+    shape = inp.ir_shape
+    h, w, c = 0, 0, 0
+    if shape.dim() == 2:
+        h = w = shape[0]
+        c = shape[1]
+    elif shape.dim() == 3:
+        h, w = shape[:2]
+        c = shape[2]
+    elif shape.dim() == 4:
+        h, w = shape[1:3]
+        c = shape[-1]
+
+    min_compatible_zhouyi_target = self.attrs["min_compatible_zhouyi_target"].upper()
     if 1 == smethod:
         adjust_q = int(extra_params[1] if len(extra_params) > 1 else 1)
         do_scale, do_scale_type, do_shift, do_shift_type = \
@@ -71,7 +86,7 @@ def softmax_quantize(self, *args):
                                                                                                   out.qbits,
                                                                                                   out_sign)
         self.params["quantize_method"] = 'LUT'
-        mbits = max(8, 32 - ibits) if len(extra_params) < 2 else int(extra_params[1])
+        mbits = max(16, 32 - ibits) if len(extra_params) < 2 else int(extra_params[1])
         max_val = torch.tensor((1 << mbits) - 1, device=dev)
         max_inp = torch.log(max_val)
         lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
@@ -88,6 +103,16 @@ def softmax_quantize(self, *args):
         self.params["shift_type"] = do_shift_type
         self.params["scale_value"] = int(do_scale)
         self.params["scale_type"] = do_scale_type
+        if Target.optimized_target_level(min_compatible_zhouyi_target) >= 2 and \
+                axis == (len(inp.ir_shape) - 1) and inp.ir_shape[-1] <= 4096 and \
+                not (h == 1 and w == 1 or len(shape) == 2):
+            # Use X3 Softmax INT AIFF
+            lut_items_in_bits = Target.aiff_lut_items_in_bits(min_compatible_zhouyi_target)
+            self.params['is_perf_mode'] = True
+            flut = 2 ** torch.linspace(0.0, 1.0, steps=2**lut_items_in_bits + 1, device=dev)
+            flut = to_fp24(flut)
+            self.constants["float_lut"] = PyTensor(
+                self.name + "/fp24_lut", flut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
 
 
 @approx_register(OpType.Softmax)
@@ -117,6 +142,31 @@ def softmax(self, *args):
     shape_value_in_axis = inp.betensor.shape[axis]
     in_size = inp.betensor.numel() / shape_value_in_axis
     if self.quantized:
+        if self.get_param('is_perf_mode', optional=True, default_value=False) and self.get_param('quantize_method', optional=True, default_value="") == 'LUT':
+            # X3 AIFF INT Forward
+            vx = inp.betensor.float()
+            vx = to_fp24(vx)
+            max_v, _ = vx.max(axis, keepdim=True)
+            tmp = to_fp24(torch.tensor(-1 / (0.6931471 * inp.scale)))  # 0.69 = log(2)
+            f_vdata = to_fp24((max_v - vx) * tmp)
+
+            pow2_f_lut = self.constants["float_lut"].betensor.float()
+            yy = x3_aiff_exp_approximation(f_vdata, pow2_f_lut)
+            y_sum = yy.sum(axis, keepdim=True)
+            y_sum = to_fp24(y_sum)
+
+            score = to_fp24(1 / y_sum)
+
+            yy16 = yy.half()
+            yy24 = to_fp24(yy16.float())
+
+            yy24 = yy24 * out.scale
+            score = yy24 * score
+            score = torch.round(score)
+            score -= out.zerop
+            score = torch.clamp(score, out.qmin, out.qmax)
+            out.betensor = score.reshape(vx.shape)
+            return out.betensor
         adjust_q = self.get_param('adjust_q', optional=True, default_value=-1)
         new_alg = adjust_q >= 0
         x = inp.betensor

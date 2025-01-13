@@ -33,16 +33,8 @@ def concat_quantize(self, *args):
         for inp in self.inputs:
             if inp.pnode.type != OpType.Input:
                 continue
-            inp.scale = real_inp.scale
-            inp.zerop = real_inp.zerop
-            inp.dtype = real_inp.dtype
-            inp.qbits = real_inp.qbits
-            inp.qinvariant = real_inp.qinvariant
-        self.outputs[0].scale = real_inp.scale
-        self.outputs[0].zerop = real_inp.zerop
-        self.outputs[0].dtype = real_inp.dtype
-        self.outputs[0].qbits = real_inp.qbits
-        self.outputs[0].qinvariant = real_inp.qinvariant
+            inp.clone_qinfo(real_inp)
+        self.outputs[0].clone_qinfo(real_inp)
         return
 
     q_mode_activation = self.attrs["q_mode_activation"]

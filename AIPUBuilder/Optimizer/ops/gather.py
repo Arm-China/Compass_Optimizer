@@ -95,7 +95,10 @@ def gather(self, *args):
         OPT_DEBUG(f"try normal impl gather failed, now try the dynamic shape impl: {e}")
         inp0_betensors = self.inputs[0].betensor.clone()
         inp1_betensors = self.inputs[1].betensor.clone()
-        self.outputs[0].betensor = inp0_betensors[inp1_betensors.long()]
+        index = inp1_betensors.long()
+        if inp1_betensors.numel() == 1 and len(self.inputs[0].ir_shape) - len(self.outputs[0].ir_shape) == 1:
+            index = inp1_betensors.item()
+        self.outputs[0].betensor = inp0_betensors[index]
 
     return self.outputs[0].betensor
 

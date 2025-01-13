@@ -43,12 +43,9 @@ def conv2d_tf_impl(self, *args):
     if self.quantized:
         # input's zerop has been absorbed to bias.
         # inp += self.inputs[0].zerop
-        pad_val = -self.inputs[0].zerop
-        w_zp = self.constants["weights"].zerop
-        w_zshape = [1] * weights.dim()
-        w_zshape[0] = -1
-        weights += w_zp.reshape(w_zshape) if isinstance(w_zp, torch.Tensor) else w_zp
-        bias += self.constants['biases'].zerop
+        pad_val = -self.inputs[0].zerop[0]
+        weights += self.constants["weights"].broadcast_zerop
+        bias += self.constants['biases'].broadcast_zerop
 
     inp = inp.cpu().numpy()
     weight = weights.cpu().numpy()

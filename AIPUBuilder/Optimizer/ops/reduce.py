@@ -77,9 +77,11 @@ def reduce(self, *args):
     elif method == 'PROD':
         if self.quantized:
             inp_betensor = (inp.betensor + int(inp.zerop)).long()
+            inp_signed = torch.min(inp.qmin + inp.zerop) < 0
             shift = self.params["shift_value"]
             scale = self.params["scale_value"]
-            threshold_min, threshold_max = bits2range(16, is_signed(inp.dtype))
+
+            threshold_min, threshold_max = bits2range(16, inp_signed)
             inp_bak = inp_betensor.clone()
             input_dim = inp_betensor.dim()  # 4
             input_shape = list(inp_betensor.shape)

@@ -42,8 +42,56 @@ class BaseInsertOp(object):
     def whether_an_inserted_op(self, node, target_type):
         return node.type == target_type and node.additional
 
+    @staticmethod
+    def in_tensor_consumers(n, t):
+        consumers = []
+        t_producers = t.pnode
+        if t.pnode is not None:
+            for pc in t_producers.children:
+                if t in pc.inputs:
+                    consumers.append(pc)
+        return consumers
 
-class InsertQuantizeOp(BaseInsertOp):
+
+class BaseQDQOp(BaseInsertOp):
+    def __init__(self, graph, config=None):
+        super().__init__(graph, config)
+
+    def _multi_branch_merge_critria(self, n, target_type):
+        flag = False
+        if n.type == target_type:
+            consumers = InsertQuantizeOp.in_tensor_consumers(n, n.inputs[0])
+            if len(consumers) > 1:
+                flag = True
+                for consumer in consumers:
+                    if consumer.type != target_type:
+                        flag = False
+                        break
+                    if not consumer.outputs[0].is_qinfo_equal(n.outputs[0]):
+                        flag = False
+                        break
+                if flag:
+                    return flag, consumers
+        return flag, []
+
+    def _multi_branch_merge(self, merged_nodes, reserved_n):
+        for mn in merged_nodes:
+            children = mn.children
+            for cn in children:
+                idx = cn.remove_input(mn.outputs[0])
+                cn.add_input(reserved_n.outputs[0], idx)
+        for mn in merged_nodes:
+            self.g.remove_node(mn)
+
+    def merge_multi_branch(self, target_type):
+        for n in self.g.nodes:
+            matched, merged_node = self._multi_branch_merge_critria(n, target_type)
+            if matched and len(merged_node):
+                merged_node.remove(n)
+                self._multi_branch_merge(merged_node, n)
+
+
+class InsertQuantizeOp(BaseQDQOp):
     def __init__(self, graph, config=None):
         super().__init__(graph, config)
 
@@ -63,9 +111,13 @@ class InsertQuantizeOp(BaseInsertOp):
             if inpt.qbits is None or inpt.qmin is None or inpt.qmax is None:
                 OPT_ERROR(f"the input({inpt.name}) of {n} doesn't quantize in InsertQuantizeOp.")
             n.params['unquantifiable'] = True
+            n.params['round_mode'] = "ROUND_TO_EVEN"
+
+        #  merge multi-quantize with same tensors
+        self.merge_multi_branch(OpType.Quantize)
 
 
-class InsertDeQuantizeOp(BaseInsertOp):
+class InsertDeQuantizeOp(BaseQDQOp):
     def __init__(self, graph, config=None):
         super().__init__(graph, config)
 
@@ -83,6 +135,9 @@ class InsertDeQuantizeOp(BaseInsertOp):
         for n in self.inserted_ops:
             n.params['unquantifiable'] = True
             n.attrs['trigger_float_op'] = n.children[0].attrs['trigger_float_op']
+
+        #  merge multi-dequantize with same tensors
+        self.merge_multi_branch(OpType.DeQuantize)
 
 
 class InsertPadOp(BaseInsertOp):
@@ -157,6 +212,8 @@ class InsertCastOp(BaseInsertOp):
         dummy_op.params['only_for_quantized'] = True
         dummy_op.params['to_dtype'] = bits2dtype(
             dummy_op.attrs['q_bits_activation'], is_signed=is_signed(dummy_op.outputs[0].dtype))
+        dummy_op.params['ignore_scale_zp'] = True
+        dummy_op.params['clip_mode'] = 'TRUNCATION'
         return dummy_op
 
     def _whether_need_adapt_input_dtype(self, node):
@@ -165,7 +222,7 @@ class InsertCastOp(BaseInsertOp):
         inputs_dtype = [t.dtype for t in node.inputs]
         outputs_dtype = [t.dtype for t in node.outputs]
         lib_dtype_spec = node.get_lib_dtype_spec()
-        ret = False
+        lib_not_impl = False
         if len(lib_dtype_spec) > 0:
             matched = False
             for spec in lib_dtype_spec:
@@ -174,8 +231,8 @@ class InsertCastOp(BaseInsertOp):
                 matched = indtype_matched and spec.out_dtypes == outputs_dtype  # whether match output dtypes
                 if matched:  # find the lib already impl in_dtypes and out_dtypes
                     break
-            ret = not matched
-        return ret
+            lib_not_impl = not matched
+        return lib_not_impl
 
     def _criteria(self):
 
@@ -185,7 +242,8 @@ class InsertCastOp(BaseInsertOp):
             (node.type in self.op_need_cast_dtypes_for_lib)
             and (not self.whether_an_inserted_op(parent_node))
             and self._whether_need_adapt_input_dtype(node)
-            and (not node.get_param('unquantifiable', optional=True, default_value=False)),
+            and (not node.get_param('unquantifiable', optional=True, default_value=False) or
+                 (node.get_param('unquantifiable', optional=True, default_value=False) and not is_float(edge_tensor.ir_dtype))),
 
             # insert cast op for OPs like lstm, gru which ask for specific inputs be quantized with symmetric mode
             lambda node, parent_node, edge_tensor:
@@ -218,9 +276,9 @@ class InsertCastOp(BaseInsertOp):
             if len(spec.in_dtypes) != len(cast_child_node.inputs):
                 continue
             spec_output_type = spec.out_dtypes
-            # exclude the float dtype impl
-            dt_float = any([is_float(dt) for dt in spec.out_dtypes + spec.in_dtypes])
-            if dt_float:
+            spec_has_float = any([is_float(dt) for dt in spec.out_dtypes + spec.in_dtypes])
+            cur_has_float = any([is_float(t.dtype) for t in cast_child_node.inputs + cast_child_node.outputs])
+            if spec_has_float ^ cur_has_float:
                 continue
             if output_dtype == spec_output_type:
                 candidates.append([spec.in_dtypes, 0.0])
@@ -313,6 +371,8 @@ class InsertCastOp(BaseInsertOp):
             for cast_n in inserted_ops:
                 cast_n.params['unquantifiable'] = any([is_float(dt)
                                                       for dt in [cast_n.inputs[0].dtype, cast_n.params['to_dtype']]])
+                if cast_n.params['unquantifiable']:
+                    cast_n.outputs[0].ir_dtype = cast_n.params['to_dtype']
 
             # jira cal-3352
             if need_update_quantization:

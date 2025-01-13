@@ -31,8 +31,8 @@ def iou(x0, y0, x1, y1, box_id, box_index):
     intersection_ymax = torch.min(ymax_A, ymax_B)
     intersection_xmax = torch.min(xmax_A, xmax_B)
 
-    intersection_h = torch.max(intersection_ymax - intersection_ymin, torch.tensor(0.0).to(x0.device))
-    intersection_w = torch.max(intersection_xmax - intersection_xmin, torch.tensor(0.0).to(x0.device))
+    intersection_h = torch.max(intersection_ymax - intersection_ymin, torch.tensor(0).to(x0.device))
+    intersection_w = torch.max(intersection_xmax - intersection_xmin, torch.tensor(0).to(x0.device))
     return intersection_w, intersection_h
 
 
@@ -46,10 +46,10 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
     iou_threshold = self.get_param('iou_threshold')
     areas_shift = self.params['areas_shift'] if self.quantized else 0
 
-    y0 = box[:, 0].float()
-    x0 = box[:, 1].float()
-    y1 = box[:, 2].float()
-    x1 = box[:, 3].float()
+    y0 = box[:, 0]
+    x0 = box[:, 1]
+    y1 = box[:, 2]
+    x1 = box[:, 3]
 
     if self.quantized:
         areas = torch.abs((y1 - y0) * (x1 - x0)).long()
@@ -114,6 +114,7 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
         if score_value <= score_threshold:
             score_cand = del_tensor_from_index(score_cand, argmax_idx)
             box_index = del_tensor_from_index(box_index, argmax_idx)
+            suppress_begin_index = del_tensor_from_index(suppress_begin_index, argmax_idx)
         else:
             score_cand[argmax_idx] = score_value
 
@@ -137,10 +138,10 @@ def single_nms(self, box, score, max_nms_box_num):
     nms_score = torch.zeros((max_nms_box_num))
     keep = torch.zeros((max_nms_box_num))
 
-    y0 = box[:, 0].float()
-    x0 = box[:, 1].float()
-    y1 = box[:, 2].float()
-    x1 = box[:, 3].float()
+    y0 = box[:, 0]
+    x0 = box[:, 1]
+    y1 = box[:, 2]
+    x1 = box[:, 3]
 
     # it will set optional to False when parser add 'score_threshold' in future
     score_threshold = float(self.get_param('score_threshold', optional=True, default_value='-inf'))
@@ -210,8 +211,10 @@ def single_nms(self, box, score, max_nms_box_num):
 def Nms(self, *args):
     out = self.outputs[:]
     # get bottom node
-    batch_proposal_boxes = self.inputs[0].betensor + (torch_tensor(
-        0, device=self.inputs[0].device) if not self.quantized else self.inputs[0].zerop)
+    if self.quantized and not is_float(self.inputs[0].dtype):
+        batch_proposal_boxes = self.inputs[0].betensor.int() + self.inputs[0].zerop
+    else:
+        batch_proposal_boxes = self.inputs[0].betensor.float()
     # batch_boxNum_perClass and batch_total_class_num are not quantized, so their zerop is 0
     batch_boxNum_perClass = self.inputs[1].betensor
     batch_total_class_num = self.inputs[2].betensor

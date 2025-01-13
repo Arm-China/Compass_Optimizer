@@ -434,9 +434,9 @@ def winograd_conv_1D_HP(self, inp, weights, bias, m=2, r=3, DEBUG=True):
         self.constants['WinogradWeights'] = winograd_weights_t
 
     if self.quantized:
-        Gg_weights = weights
+        Gg_weights = weights.float()
     else:
-        Gg_weights = self.attrs['WinogradWeights'].permute((0, 3, 1, 2))
+        Gg_weights = self.attrs['WinogradWeights'].permute((0, 3, 1, 2)).float()
 
     def DataReverseMethod(benchmark=False):
         data_reverse = torch.zeros((Batch, _Cin, LoopHeight, LoopWidth, _KernelHeight, TileInWidth), device=inp.device)
@@ -529,7 +529,7 @@ def winograd_conv_1D_HP(self, inp, weights, bias, m=2, r=3, DEBUG=True):
             _out = method3(benchmark)
         else:
             _out = method3(benchmark)
-        return _out
+        return _out.float()
 
     if DEBUG:
         StartTime = datetime.datetime.now()
