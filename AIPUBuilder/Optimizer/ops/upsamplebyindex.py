@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -30,7 +30,7 @@ def upsamplebyindex(self, *args):
     top_hw_dims = top_height * top_width
 
     top_data = torch.zeros(
-        (current_batch, top_height, top_width, top_channels), device=values.device)
+        (current_batch, top_height, top_width, top_channels), device=values.device) - self.inputs[0].zerop
 
     if flatten_dim == 'HW':
         top_data = nhwc2nchw(top_data)

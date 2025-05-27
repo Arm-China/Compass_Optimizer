@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -17,6 +17,12 @@ def stridedslice(self, *args):
     strides = self.get_param('strides')
     begin = self.get_param('begin')
     end = self.get_param('end')[:]
+
+    # batch dim, need cover all batch
+    batch_size_in_IR = self.get_attrs("batch_size_in_IR", optional=True, default_value=1)
+    if batch_size_in_IR != 0 and end[0] == self.inputs[0].ir_shape[0]:
+        end[0] = x.shape[0]
+
     real_shape = list(x.shape)
     for i in range(len(end)):
         end[i] = min(real_shape[i], end[i])
@@ -38,10 +44,10 @@ def stridedslice(self, *args):
             actual_index = []
             inorder_batch_size_idx = range(0, batch_size, 1) if end_index > start_index else range(batch_size-1, -1, -1)
             for batch_idx in inorder_batch_size_idx:
-                current_batch_idx = (start_data_idx + batch_idx) % ir_batch_size
+                current_batch_idx = (start_data_idx + batch_idx) % batch_size
                 if current_batch_idx in batch_index:
                     actual_index.append(batch_idx)
-        x = x.index_select(axis, torch.tensor(actual_index, device=x.device))
+        x = x.index_select(axis, torch.tensor(actual_index, device=x.device).int())
     self.outputs[0].betensor = x
     return x
 

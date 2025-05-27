@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.relu import *
 from AIPUBuilder.Optimizer.ops.clip import *

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
@@ -7,9 +7,92 @@ import torch
 from functools import reduce
 
 
+def _get_out_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape, change_axis, matched_axis, enable_symb=False):
+
+    def _gen(shape, enable_symb):
+        if enable_symb:
+            from AIPUBuilder._C._tongue import Expr, Symbol
+            return Expr(shape)
+        else:
+            return shape
+
+    if not enable_symb:
+        init_one = 1
+        in_ds_shape_t = in_ds_shape[:]
+        out_ds_shape = [-1] * len(out_ir_shape)
+    else:
+        from AIPUBuilder._C._tongue import Expr, Symbol
+        init_one = Expr(1)
+        in_ds_shape_t = [Expr(Symbol(f"s{k}")) for k in range(len(in_ir_shape))]
+        out_ds_shape = [Expr(-1)] * len(out_ir_shape)
+
+    for match_a in matched_axis:
+        if len(match_a[0]) > 1 and len(match_a[1]) == 1:
+            mul = init_one
+            for axis in match_a[0]:
+                mul *= in_ds_shape_t[axis]
+            out_ds_shape[match_a[1][0]] = mul
+        elif len(match_a[1]) > 1 and len(match_a[0]) == 1:
+            if change_axis in match_a[0]:
+                mul = init_one
+                for i in match_a[1]:
+                    if out_ir_shape[i] == 1:
+                        out_ds_shape[i] = init_one
+                        mul *= init_one
+                        continue
+                    if in_ds_shape[match_a[0][0]] % out_ir_shape[i] == 0:
+                        out_ds_shape[i] = _gen(out_ir_shape[i], enable_symb)
+            else:
+                for i in match_a[1]:
+                    out_ds_shape[i] = _gen(out_ir_shape[i], enable_symb)
+        elif len(match_a[0]) == 1 and len(match_a[1]) == 1:
+            out_ds_shape[match_a[1][0]] = in_ds_shape_t[match_a[0][0]]
+        else:  # mulit-input axis <--> multi-output axis
+            # [[[0, 1], [0, 1, 2]], [[2], [3]]]
+            if change_axis not in match_a[0]:
+                for i in match_a[1]:
+                    out_ds_shape[i] = _gen(out_ir_shape[i], enable_symb)
+            else:
+                """
+                for multi in axis to multi out axis,
+                defaultly from end to front transverse the matched axis.
+                """
+                # [[[0, 1], [0, 1, 2]], [[2], [3]]]
+                mul = init_one
+                if len(match_a[0]) <= len(match_a[1]):
+                    in_idx = len(match_a[0]) - 1
+                    for i in match_a[1][::-1]:
+                        mul *= _gen(out_ir_shape[i], enable_symb)
+                        if mul <= in_ir_shape[in_idx]:
+                            out_ds_shape[i] = _gen(out_ir_shape[i], enable_symb)
+                        else:
+                            in_idx -= 1
+                            mul = init_one
+                            if in_idx < 0:
+                                break
+                            continue
+                else:
+                    """
+                    SAM2 model: reshape: [[1, 3670016, 2, 1], [1, 1, 28672, 256], [1, 524288, 2, 1], [1, 1, 2048, 256]]
+                    """
+                    out_idx = len(match_a[1]) - 1
+                    for i in match_a[0][::-1]:
+                        mul *= _gen(in_ir_shape[i], enable_symb)
+                        if mul <= out_ir_shape[out_idx]:
+                            out_ds_shape[i] = _gen(out_ir_shape[i], enable_symb)
+                        else:
+                            out_idx -= 1
+                            mul = 1
+                            if out_idx < 0:
+                                break
+                            continue
+
+    return out_ds_shape
+
+
 def get_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape):
     if len(in_ir_shape) != len(in_ds_shape):
-        OPT_WARN(f"In Reshape Op: in_ir_shape={in_ir_shape} and in_ds_shape = {in_ds_shape}, which"
+        OPT_WARN(f"In Reshape Op: in_ir_shape={in_ir_shape} and in_ds_shape = {in_ds_shape}, which "
                  f"the length of runtime input shape(={len(in_ds_shape)}) != "
                  f"the length of input ir_shape(={len(in_ir_shape)})")
 
@@ -35,7 +118,7 @@ def get_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape):
                             break
 
     if in_ir_shape == in_ds_shape:
-        return out_ir_shape
+        return out_ir_shape, False
 
     change_axis = []
     for i, (irs, dss) in enumerate(zip(in_ir_shape, in_ds_shape)):
@@ -59,6 +142,14 @@ def get_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape):
 
     while 1:
         if in_mul == ot_mul:
+            # try the more shape=1 to one visited vector
+            if in_mul == 1:
+                while in_ps + 1 < len(in_ir_shape) - 1 and in_ir_shape[in_ps + 1] == 1:
+                    in_ps += 1
+                    in_mul *= in_ir_shape[in_ps]
+                while ot_ps + 1 < len(out_ir_shape) - 1 and out_ir_shape[ot_ps + 1] == 1:
+                    ot_ps += 1
+                    ot_mul *= out_ir_shape[ot_ps]
             in_visited = [v for v in range(in_begin, in_ps+1)]
             ot_visited = [v for v in range(ot_begin, ot_ps+1)]
             matched_axis.append([in_visited, ot_visited])
@@ -84,48 +175,30 @@ def get_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape):
             ot_ps += 1
             ot_mul *= out_ir_shape[ot_ps]
 
-    out_ds_shape = [-1] * len(out_ir_shape)
-    for match_a in matched_axis:
-        if len(match_a[0]) > 1 and len(match_a[1]) == 1:
-            mul = 1
-            for axis in match_a[0]:
-                mul *= in_ds_shape[axis]
-            out_ds_shape[match_a[1][0]] = mul
-        elif len(match_a[1]) > 1 and len(match_a[0]) == 1:
-            if change_axis in match_a[0]:
-                mul = 1
-                for i in match_a[1]:
-                    if out_ir_shape[i] == 1:
-                        out_ds_shape[i] = 1
-                        mul *= 1
-                        continue
-                    if in_ds_shape[match_a[0][0]] % out_ir_shape[i] == 0:
-                        out_ds_shape[i] = out_ir_shape[i]
-            else:
-                for i in match_a[1]:
-                    out_ds_shape[i] = out_ir_shape[i]
-        elif len(match_a[0]) == 1 and len(match_a[1]) == 1:
-            out_ds_shape[match_a[1][0]] = in_ds_shape[match_a[0][0]]
-        else:  # mulit-input axis <--> multi-output axis
-            # [[[0, 1], [0, 1, 2]], [[2], [3]]]
-            if change_axis not in match_a[0]:
-                for i in match_a[1]:
-                    out_ds_shape[i] = out_ir_shape[i]
-            else:
-                # [[[0, 1], [0, 1, 2]], [[2], [3]]]
-                mul = 1
-                in_idx = len(match_a[0]) - 1
-                for i in match_a[1][::-1]:
-                    mul *= out_ir_shape[i]
-                    if mul <= in_ir_shape[in_idx]:
-                        out_ds_shape[i] = out_ir_shape[i]
-                    else:
-                        in_idx -= 1
-                        mul = 1
-                        if in_idx < 0:
-                            break
-                        continue
-    return out_ds_shape
+    # OPT_INFO(f"matched_axis = {matched_axis}")
+    out_ds_shape = _get_out_ds_shape(in_ir_shape, out_ir_shape, in_ds_shape, change_axis, matched_axis)
+
+    out_ds_shape_symb = []
+    try:
+        from AIPUBuilder._C._tongue import Expr, Symbol
+        enable_symb = True
+        out_ds_shape_symb = _get_out_ds_shape(
+            in_ir_shape, out_ir_shape, in_ds_shape, change_axis, matched_axis, enable_symb=enable_symb)
+        if -1 in out_ds_shape:
+            in_ds_shape_symb = [Expr(Symbol(f"s{k}")) for k in range(len(in_ir_shape))]
+            neg_index = out_ds_shape.index(-1)
+            for mt in matched_axis:
+                in_axis, out_axis = mt[0], mt[1]
+                if neg_index in out_axis:
+                    in_mul = reduce(lambda a, b: a * b, [in_ds_shape_symb[i] for i in in_axis])
+                    out_axis_cp = out_axis[:]
+                    out_axis_cp.remove(neg_index)
+                    out_mul = reduce(lambda a, b: a * b, [out_ds_shape_symb[i] for i in out_axis_cp] + [Expr(1)])
+                    out_ds_shape_symb[neg_index] = in_mul.floordiv(out_mul)
+    except Exception as e:
+        OPT_WARN(f"when try to import AIPUBuilder._C._tongue and gen ds_output_shape_symbol failed, {e}")
+
+    return out_ds_shape, out_ds_shape_symb
 
 
 @op_register(OpType.Reshape)
@@ -133,8 +206,15 @@ def reshape(self, *args):
     inp = self.inputs[0].betensor.clone()
     out = self.outputs[0]
     try:
-        shape = get_ds_shape(list(self.inputs[0].ir_shape), list(out.ir_shape), list(inp.shape))
+        shape, false_or_symb_shape = get_ds_shape(list(self.inputs[0].ir_shape), list(out.ir_shape), list(inp.shape))
         out.betensor = torch.reshape(inp, shape)
+        if self.is_dynamic:
+            if isinstance(false_or_symb_shape, bool):
+                if 'ds_output_shape' not in self.params:
+                    self.params['ds_output_shape'] = [f"{shape}".replace(" ", "")]
+            else:
+                if len(false_or_symb_shape):
+                    self.params['ds_output_shape'] = [f"{false_or_symb_shape}".replace(" ", "")]
         return out.betensor
     except Exception as e:
         shape = list(out.ir_shape)[:]

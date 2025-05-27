@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 from abc import abstractmethod
 import torch
 import numpy as np
@@ -182,6 +182,7 @@ def shuffle(d, g, low, high):
             first = i
             second = torch.randint(0, i, [1]).item()
             swap(data, first, second)
+        return data
     else:
         __urngrange = g.max() - g.min()
         __urange = high - low

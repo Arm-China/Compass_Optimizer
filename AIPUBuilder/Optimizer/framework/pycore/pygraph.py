@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -26,6 +26,14 @@ class PyGraph:
         self.input_tensors = ()
         self.output_tensors = ()
         self.ref_count_tensors = {}
+        self.op_need_cast_dtypes_for_lib = {}
+        # store dict about {subgraph_name:PyGraph_instance} that will be used in control operators like Loop/If
+        # should make sure root graph and every subgraph are all DAG
+        self.subgraph_map = {}
+        # store the main graph it's belong to if it's a subgraph
+        # nested subgraphs are all registered in root graph's subgrap_map
+        # all subgraph have empty subgraph_map, only root graph has root graph == None
+        self.root_graph = None
 
     def subgraph_view(self, nodes):
         from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
@@ -104,6 +112,12 @@ class PyGraph:
             olist.append(emap[t.name])
         g.output_tensors = tuple(olist)
         g.init_networkx()
+        g.op_need_cast_dtypes_for_lib = self.op_need_cast_dtypes_for_lib
+        g.subgraph_map = {}
+        for sname, sg in self.subgraph_map.items():
+            g.subgraph_map[sname] = sg.clone()
+            g.subgraph_map[sname].root_graph = g
+        g.root_graph = self.root_graph
 
         return g
 
@@ -598,8 +612,8 @@ class PyGraph:
 
     @classmethod
     def parse_without_weight(cls, ir_txt):
-        from AIPUBuilder.Optimizer.framework.pycore.pyir import parse_graph_from_ir_without_weight
-        g = parse_graph_from_ir_without_weight(ir_txt)
+        from AIPUBuilder.Optimizer.framework.pycore.pyir import parse_graph_from_ir
+        g = parse_graph_from_ir(ir_txt, '')
         return g
 
     def __repr__(self):

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -36,12 +36,13 @@ def select_forward(self, *args):
     if inp2_can_detile is None:
         inp2_can_detile = set_can_detile(self.inputs[2])
         self.attrs['inp2_can_detile'] = inp2_can_detile
-    if inp0_can_detile:
-        condition = self.inputs[0].detile_betensor()
-    if inp1_can_detile:
-        x1 = self.inputs[1].detile_betensor()
-    if inp2_can_detile:
-        x2 = self.inputs[2].detile_betensor()
+    if self.inputs[0].ir_shape != self.inputs[0].shape or self.inputs[1].ir_shape != self.inputs[1].shape or self.inputs[2].ir_shape != self.inputs[2].shape:
+        if inp0_can_detile:
+            condition = self.inputs[0].detile_betensor()
+        if inp1_can_detile:
+            x1 = self.inputs[1].detile_betensor()
+        if inp2_can_detile:
+            x2 = self.inputs[2].detile_betensor()
 
     if self.quantized:
         scale1, scale2 = self.params["scale_value"]

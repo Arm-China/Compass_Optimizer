@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
@@ -49,11 +49,11 @@ def matmul_forward(self, *args):
             z, requant_shift = aiff_ahead_shift_bias(z, requant_shift, None, int(aasrb))
         z = linear_requantize(z, requant_scale, requant_shift, out.broadcast_zerop, out.qmin, out.qmax)
     else:
-        if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name + "/matmul_result", z.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            self.placeholders.append(ph0)
-        self.placeholders[0].betensor = z.clone().detach()
-        self.placeholders[0].key_axis = self.outputs[0].key_axis
+        # if len(self.placeholders) < 1:
+        #     ph0 = PyTensor(self.name + "/matmul_result", z.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        #     self.placeholders.append(ph0)
+        # self.placeholders[0].betensor = z.clone().detach()
+        # self.placeholders[0].key_axis = self.outputs[0].key_axis
         z *= self.get_param('fused_multiplier', optional=True, default_value=1)
     out.betensor = z
     return out.betensor
@@ -82,10 +82,10 @@ def matmul_quantize(self, *args):
     if 'fused_multiplier' in self.params:
         fused_multiplier = self.params['fused_multiplier']
         self.params.pop('fused_multiplier')
-        plh = self.placeholders[0]
-        plh.qbits = q_bits_activation
-        plh.scale, plh.zerop, plh.qmin, plh.qmax, plh.dtype = get_linear_quant_params_from_tensor(
-            plh, q_mode_activation, plh.qbits, is_signed=out_signed)
+        # plh = self.placeholders[0]
+        # plh.qbits = q_bits_activation
+        # plh.scale, plh.zerop, plh.qmin, plh.qmax, plh.dtype = get_linear_quant_params_from_tensor(
+        #     plh, q_mode_activation, plh.qbits, is_signed=out_signed)
         # out_scale = (1.0 if out.qinvariant else plh.scale)
         out_scale = out.scale * fused_multiplier
     if is_torch_tensor_with_multi_data(inp0.scale) or is_torch_tensor_with_multi_data(inp1.scale):

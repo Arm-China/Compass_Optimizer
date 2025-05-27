@@ -26,7 +26,7 @@ In addition to this readme file, you can find a more detailed tutorial document 
   - Adaquant: Refer to [Improving Post Training Neural Quantization: Layer-wise Calibration and Integer Programming](https://arxiv.org/abs/2006.10518)
 
 - Compatible with all Zhouyi NPU series processors, specially optimizing the quantization schemes and the whole computation graph.
-
+- Support finetuning models by using quantization aware training with respect to Zhouyi NPU, please refer to [Compass_QAT](./AIPUBuilder/Optimizer/qat/readme.md)
 
 ### Quick Start
 

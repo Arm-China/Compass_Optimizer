@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -163,7 +163,8 @@ def eltwise_quantizes(self, *args):
             scale1 = torch_tensor(1, device=inp0.device)
             self.attrs['need_align_scales'] = False
             OPT_DEBUG(f"{self} this layer does not need to align input branches' scale/zerop.")
-            self.attrs['optimization_info']['unify_scales_for_multi_inputs_operator'] = True
+            if 'optimization_info' in self.attrs:
+                self.attrs['optimization_info']['unify_scales_for_multi_inputs_operator'] = True
 
         scale_name = 'scale' if is_torch_tensor_with_multi_data(scale0) else 'scale_value'
         shift_name = 'shift' if is_torch_tensor_with_multi_data(do_shift) else 'shift_value'
@@ -244,10 +245,11 @@ def eltwise(self, *args):
         self.attrs['inp1_can_detile'] = inp1_can_detile
     x0 = inp0.betensor
     x1 = inp1.betensor
-    if inp0_can_detile:
-        x0 = inp0.detile_betensor()
-    if inp1_can_detile:
-        x1 = inp1.detile_betensor()
+    if self.inputs[0].ir_shape != self.inputs[0].shape or self.inputs[1].ir_shape != self.inputs[1].shape:
+        if inp0_can_detile:
+            x0 = inp0.detile_betensor()
+        if inp1_can_detile:
+            x1 = inp1.detile_betensor()
     x0 = x0.to(torch.int64) if self.quantized else x0.float()
     x1 = x1.to(torch.int64) if self.quantized else x1.float()
 

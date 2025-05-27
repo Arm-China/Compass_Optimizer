@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -105,6 +105,7 @@ register_optype('CELU')
 register_optype('CRELU')
 register_optype('CTCBeamDecoder')
 register_optype('CTCGreedyDecoder')
+register_optype('CacheUpdate')
 register_optype('Cast')
 register_optype('Ceil')
 register_optype('ChannelShuffle')
@@ -229,6 +230,7 @@ register_optype('SquaredDifference')
 register_optype('Squeeze')
 register_optype('StridedSlice')
 register_optype('Sub')
+register_optype('Swish')
 register_optype('THRESHOLDEDRELU')
 register_optype('Tan')
 register_optype('Tanh')

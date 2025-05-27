@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import OPT_WARN
@@ -68,7 +68,7 @@ def mod(self, *args):
         '''if we want to use np.fmod or np.mod:'''
         # out = _func_map[fmod](np_dividend, np_divisor)
         # out = torch.tensor(out, device=dividend.betensor.device)
-        out = _func_map[fmod](dividend.betensor, divisor.betensor)
+        out = _func_map[fmod](dividend.betensor.float(), divisor.betensor.float())
 
     self.outputs[0].betensor = out
     return self.outputs[0].betensor

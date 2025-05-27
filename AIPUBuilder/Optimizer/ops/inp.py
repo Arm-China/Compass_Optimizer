@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -42,10 +42,14 @@ def inp_quantize(self, *args):
                   top_type_original, workflow_name='quantize', op_name=str(self.type))
 
         if self.type == OpType.Constant:
-            out.qbits, out.dtype = range2dtype(out.extrema_min, out.extrema_max, force_int=self.force_dtype_int)
-            out_signed = is_signed(out.dtype) or self.force_dtype_int
-            out.qbits = max(out.qbits, q_bits_activation)
-            out.dtype = bits2dtype(out.qbits, is_signed=out_signed)
+            out.qbits, out.dtype = range2dtype(out.extrema_min, out.extrema_max,
+                                               force_int=is_signed(original_top_dtype) or self.force_dtype_int)
+            if out.qbits < dtype2bits(original_top_dtype) or self.force_dtype_int:
+                out.qbits = max(out.qbits, q_bits_activation)
+                out.dtype = bits2dtype(out.qbits, is_signed=is_signed(out.dtype))
+            else:
+                out.dtype = original_top_dtype
+                out.qbits = dtype2bits(out.dtype)
         else:
             out.dtype = original_top_dtype
             if dtype2bits(original_top_dtype) > 32:

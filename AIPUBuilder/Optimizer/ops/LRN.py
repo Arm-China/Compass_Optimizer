@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -16,6 +16,7 @@ def _get_lut_bits(q_activation_bits, offset_bits):
 
 @op_register(OpType.LRN)
 def LRN(self, *args):
+    from AIPUBuilder.Optimizer.analyzer.cosine import align_shape_by_padding
     _SUPPORT_METHOD = ['ACROSS_CHANNELS', 'WITHIN_CHANNEL']
     inpt = self.inputs[0].betensor
     method = self.get_param('method').upper()
@@ -27,9 +28,9 @@ def LRN(self, *args):
     bias = self.get_param('bias')
     alpha = self.get_param('alpha')
     beta = self.get_param('beta')
-    input = nhwc2nchw(inpt)
+    inputt = nhwc2nchw(inpt)
     if not self.quantized:
-        inputs_square = torch.square(input)
+        inputs_square = torch.square(inputt.float())
         if method == 'ACROSS_CHANNELS':
             # outt = torch.nn.functional.local_response_norm(input, size, alpha=alpha, beta=beta, k=bias)
             inputs_square = inputs_square.unsqueeze(1)
@@ -43,7 +44,7 @@ def LRN(self, *args):
                                                         count_include_pad=False)
             square_sum = square_sum.squeeze(1) / size
             denominator = torch.pow((bias + alpha * square_sum), beta)
-            outt = input / denominator
+            outt = inputt / denominator
             if len(self.placeholders) < 1:
                 ph0 = PyTensor(self.name+"/square_sum", square_sum.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
                 self.placeholders.append(ph0)
@@ -56,9 +57,12 @@ def LRN(self, *args):
                                                         # divisor_override=1,
                                                         count_include_pad=False)
             denominator = torch.pow((bias + alpha * square_sum), beta)
-            outt = input / denominator
+
+            inputt, denominator = align_shape_by_padding(inputt, denominator)
+
+            outt = inputt / denominator
     else:
-        input = input + self.inputs[0].zerop
+        inputt = inputt + self.inputs[0].zerop
         do_scale, do_scale_n = self.get_param('scale_value'), self.get_param('scale_sum_value')
         do_shift, do_shift_n = self.get_param('shift_value'), self.get_param('shift_sum_value')
         lut = self.constants['lut']
@@ -69,7 +73,7 @@ def LRN(self, *args):
         lut_in_qmin, lut_in_qmax = bits2range(lut_in_bits, False)
         lut_out_bits = 16
 
-        inputs_square = torch.square(input)
+        inputs_square = torch.square(inputt)
         dtype = inputs_square.type()
         if method == 'ACROSS_CHANNELS':
             inputs_square = inputs_square.unsqueeze(1)
@@ -88,7 +92,7 @@ def LRN(self, *args):
                                                         padding=int((size-1.0)/2),
                                                         divisor_override=1,
                                                         count_include_pad=False)
-
+            inputt, square_sum = align_shape_by_padding(inputt, square_sum)
         avg_pool = linear_requantize(square_sum.type(dtype), do_scale_n, do_shift_n, 0, lut_in_qmin, lut_in_qmax)
         avg_pool = torch.reshape(avg_pool.squeeze(1), (-1,))
         in_is_signed = False  # becasue the square_sum is unsigned.
@@ -98,8 +102,8 @@ def LRN(self, *args):
                                     in_is_signed,
                                     lut_out_bits,
                                     is_signed(lut.dtype))
-        lut_v = torch.reshape(lut_v, input.shape)
-        outt = input * lut_v
+        lut_v = torch.reshape(lut_v, inputt.shape)
+        outt = inputt * lut_v
         outt = linear_requantize(outt,
                                  do_scale,
                                  do_shift,

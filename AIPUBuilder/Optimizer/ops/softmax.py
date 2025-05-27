@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import math
 from AIPUBuilder.Optimizer.framework import *
@@ -142,12 +142,13 @@ def softmax(self, *args):
     shape_value_in_axis = inp.betensor.shape[axis]
     in_size = inp.betensor.numel() / shape_value_in_axis
     if self.quantized:
-        if self.get_param('is_perf_mode', optional=True, default_value=False) and self.get_param('quantize_method', optional=True, default_value="") == 'LUT':
+        if self.get_param('is_perf_mode', optional=True, default_value=False) and self.get_param('quantize_method', optional=True, default_value="") == 'LUT' and 'float_lut' in self.constants:
             # X3 AIFF INT Forward
             vx = inp.betensor.float()
             vx = to_fp24(vx)
             max_v, _ = vx.max(axis, keepdim=True)
-            tmp = to_fp24(torch.tensor(-1 / (0.6931471 * inp.scale)))  # 0.69 = log(2)
+            tmp = to_fp24(construct_torch_tensor(-1 / (0.6931471 * inp.scale),
+                          device=inp.betensor.device))  # 0.69 = log(2)
             f_vdata = to_fp24((max_v - vx) * tmp)
 
             pow2_f_lut = self.constants["float_lut"].betensor.float()

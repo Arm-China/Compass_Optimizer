@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -59,10 +59,11 @@ def div_mod_forward(self, *args):
 
     input0 = inp0.betensor.long()
     input1 = inp1.betensor.long()
-    out0.betensor = torch.zeros_like(inp0.betensor, device=inp0.betensor.device).to(torch_out_dtype)
-    out1.betensor = torch.zeros_like(inp0.betensor, device=inp0.betensor.device).to(torch_out_dtype)
+    input0, input1 = broadcasting_transform(input0, input1)
+    out0.betensor = torch.zeros_like(input0, device=inp0.betensor.device).to(torch_out_dtype)
+    out1.betensor = torch.zeros_like(input0, device=inp0.betensor.device).to(torch_out_dtype)
 
-    nonzeros_mask = inp1.betensor != 0
+    nonzeros_mask = input1 != 0
     quotient = torch.div(input0[nonzeros_mask], input1[nonzeros_mask], rounding_mode=mode)
     remainder = input0[nonzeros_mask] - input1[nonzeros_mask] * quotient
 

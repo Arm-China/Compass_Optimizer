@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.ops.pad import pad
 from AIPUBuilder.Optimizer.ops.multibox_transform_Loc import calculate_box_quantization, apply_box_deltas, apply_box_deltas_q
@@ -28,7 +28,7 @@ def boundingbox(self, *args):
     box_delta = self.inputs[1].betensor
 
     if not self.quantized:
-        refined_box = apply_box_deltas(self, proposal_box, box_delta)
+        refined_box = apply_box_deltas(self, proposal_box.float(), box_delta.float())
     else:
         # x,y (box_delta[0:2]) need convert to symetric,dh,dw as lut index, zerop is aborbed to lut
         box_delta[..., 0:2] = box_delta[..., 0:2] + self.inputs[1].zerop

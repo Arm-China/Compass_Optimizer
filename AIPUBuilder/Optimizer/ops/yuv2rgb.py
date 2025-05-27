@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -37,7 +37,7 @@ def yuvTorgb(self, *args):
     vv = inp[:, height * width + height // 2 * width // 2:].reshape([batch, 1, height // 2, width // 2])
     uv = torch.cat([uu, vv], 1)
 
-    uv444 = torch.nn.functional.interpolate(torch.tensor(uv), size=[height, width], mode='nearest')
+    uv444 = torch.nn.functional.interpolate(uv.float(), size=[height, width], mode='nearest')
     # 420->422
     for h in range(1, height - 1):
         if h % 2 == 1:

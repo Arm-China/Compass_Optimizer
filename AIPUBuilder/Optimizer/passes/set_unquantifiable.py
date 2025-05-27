@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import Dtype, OpType
 from AIPUBuilder.Optimizer.utils import (
@@ -96,16 +96,26 @@ def set_unquantifiable(graph, config=None):
                     break
 
         """
-        when trigger_float_op is enable for compass FloatIR, one node(like ArgMinMax op) has float input dtype and int
+        1. when trigger_float_op is enable for compass FloatIR, one node(like ArgMinMax op) has float input dtype and int
         output dtype, and its child node(like Reshape op) has int input and output. the node's unquantifiable is true,
         and its child node's unquantifiable is false (when set_unquantifiabel, has_float == false).
         when the edge of two ops is qinvariant == true, unquantifiable==true node and unquantifiable==false would not
         insert the quantized op. so avoid the above situation, we change the child node's unquantifiable to true.
+
+        2. jira CP-15040: jira issue: when one op(like gruv1) does not have lib float implementation, so its's unquantifiable=false,
+        but its one input is qinvariant, so gruv1's unquantifiable changes from false to true, which leads to no quantize
+        op inserted in input edge, but lib does not implement the float16 dtype, so crash.
+        current fix method: check all the input's qinvariant and unquantifiable, if all true, will change the gruv1
+        unquantifiable from false to true. if this method does not fix other issue (like gruv1 the two input actually are
+        qinvariant, and lib does not implement the float16 dtype), maybe should add one params to indicate the float16 dtype
+        lib not implement, and should not change from false to true.
         """
         unquantifiable = n.params["unquantifiable"]
+        unquantifiable_flag = not unquantifiable and len(n.inputs)
         for inp in n.inputs:
             inp_producer_unquantifiable = inp.pnode.params["unquantifiable"]
-            if inp.qinvariant and inp_producer_unquantifiable and not unquantifiable:
-                n.params["unquantifiable"] = True
-                n.attrs["trigger_float_op"] = inp.pnode.attrs["trigger_float_op"]
-                break
+            unquantifiable_flag = unquantifiable_flag and inp.qinvariant and inp_producer_unquantifiable
+
+        if unquantifiable_flag:
+            n.params["unquantifiable"] = True
+            n.attrs["trigger_float_op"] = n.inputs[0].pnode.attrs["trigger_float_op"]

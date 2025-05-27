@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.logger import *
@@ -23,6 +23,14 @@ def modify_batch_dim(graph: PyGraph, config):
                 node.outputs[0].ir_shape = TensorShape(new_shape)
         if node.type == OpType.Reshape:
             node.params['shape'] = list(node.outputs[0].ir_shape)
+        if node.type == OpType.Slice:
+            begin = node.params['begin']
+            end = node.params['end']
+            full_shape = node.inputs[0].ir_shape
+            begin = [min(full_shape[i], begin[i]) for i in range(len(full_shape))]
+            end = [min(full_shape[i], end[i]) for i in range(len(full_shape))]
+            node.params['begin'] = begin
+            node.params['end'] = end
 
 
 def copy_parallel_batch(graph: PyGraph, config):

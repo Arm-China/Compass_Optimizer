@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 
 import os
@@ -11,9 +11,7 @@ from AIPUBuilder.Optimizer.framework import (
 )
 from AIPUBuilder.Optimizer.passes import (convert_resize_to_convolution,
                                           decompose_nonmonotonic_activations,
-                                          tune_op_complicated_activations,
-                                          tune_op_trigonometric_activations,
-                                          tune_op_softmax)
+                                          tune_op_passes)
 
 
 class QTLibOptimize(object):
@@ -27,11 +25,39 @@ class QTLibOptimize(object):
             convert_resize_to_convolution(self.g, self.hparams)
         if self.hparams.enable_pass_decompose_nonmonotonic_activations:
             decompose_nonmonotonic_activations(self.g, self.hparams)
-        if self.hparams.enable_pass_tune_op_complicated_activations:
-            tune_op_complicated_activations(self.g, self.hparams)
-            tune_op_trigonometric_activations(self.g, self.hparams)
-        if self.hparams.enable_pass_tune_op_softmax:
-            tune_op_softmax(self.g, self.hparams)
+        tune_op_passes(self.g, self.hparams)
+
+    def _set_tensor_bits(self, qtlibg, optg):
+        def _set_bits(t, bits):
+            if t.quantization.bits != bits:
+                t.quantization.bits = bits
+        name_to_node = {}
+        for n in qtlibg.nodes:
+            name_to_node.update({n.name: n})
+
+        hparams = self.hparams
+        for on in optg.nodes:
+            qn = name_to_node[on.name]
+            if str(on.type) != str(qn.type):
+                OPT_ERROR(f"different node")
+                continue
+
+            act_bits = hparams.activation_bits.get(on)
+            wt_bits = hparams.weight_bits.get(on)
+            bs_bits = hparams.bias_bits.get(on)
+            lut_bits = hparams.lut_items_in_bits.get(on)
+
+            for ot in qn.outputs:
+                _set_bits(ot, act_bits)
+
+            for ck, cv in qn.constants.items():
+                if ck == "biases":
+                    _set_bits(cv, bs_bits)
+                else:
+                    _set_bits(cv, wt_bits)
+
+            from AIPUBuilder.core import NodeParamValue
+            qn.attrs['lut_items_in_bits'] = NodeParamValue(lut_bits)
 
     def __call__(self):
 
@@ -68,7 +94,7 @@ class QTLibOptimize(object):
             ] = self.hparams.compat_quantized_model_unify_shifts_mode
             n.attrs['force_weight_asym'] = self.hparams.compat_quantized_model_force_weight_asym
             # now qat model fixed to 13bits
-            n.attrs["multiplier_bits"] = 13
+            n.attrs["multiplier_bits"] = self.hparams.multiplier_bits if self.hparams.multiplier_bits != '' else 13
             if "conv_from_resize_opt" not in n.attrs:
                 n.attrs["trigger_float_op"] = (
                     "float16_preferred"
@@ -94,6 +120,7 @@ class QTLibOptimize(object):
                 ] = self.hparams.compat_quantized_model_eliminate_cast
 
         cg = convert_opt_graph_to_aipu_graph(self.g)
+        # self._set_tensor_bits(cg, self.g)
         qtlib_quantize_transform(
             cg, run_mode=self.hparams.compat_quantized_model_strategy
         )

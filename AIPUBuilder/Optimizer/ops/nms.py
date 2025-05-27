@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -55,15 +55,17 @@ def single_softnms(self, box, score, max_nms_box_num_per_class):
         areas = torch.abs((y1 - y0) * (x1 - x0)).long()
         areas = areas >> areas_shift
         iou_thresh_shift = self.params['iou_thresh_shift']
+        score = score.int()
     else:
         areas = torch.abs((y1 - y0) * (x1 - x0))
         iou_thresh_shift = 0
+        score = score.float()
 
     current_box_num = box.shape[0]
-    greater_score_thres_mask = score.float() > score_threshold
+    greater_score_thres_mask = score > score_threshold
     box_index = torch.arange(current_box_num, device=score.device)[greater_score_thres_mask]
     suppress_begin_index = torch.zeros_like(box_index, device=score.device)
-    score_cand = score[greater_score_thres_mask].double().clone()
+    score_cand = score[greater_score_thres_mask].clone()
     selected_boxes_index = []
 
     keep_idx = 0

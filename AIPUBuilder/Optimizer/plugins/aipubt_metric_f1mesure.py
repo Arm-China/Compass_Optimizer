@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -31,8 +31,8 @@ class F1scoreMetric(mIoUMetricBase):
 
     def compute(self):
         conf = self.confusion_matrix
-        pred = (np.diag(conf) / conf.sum(0).astype(np.float))[1]
-        recall = (np.diag(conf) / conf.sum(1).astype(np.float))[1]
+        pred = (np.diag(conf) / conf.sum(0).astype(np.float32))[1]
+        recall = (np.diag(conf) / conf.sum(1).astype(np.float32))[1]
         f1score = 2*(recall*pred)/(recall+pred)
         return f1score
 

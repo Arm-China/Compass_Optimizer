@@ -241,7 +241,7 @@ class WiderFaceMetric(OptBaseMetric):
 
         N = boxes.shape[0]
         K = target_boxes.shape[0]
-        ious = np.zeros((N, K), dtype=np.float)
+        ious = np.zeros((N, K), dtype=np.float32)
 
         for k in range(K):
             box_area = (target_boxes[k, 2] + 1) * \

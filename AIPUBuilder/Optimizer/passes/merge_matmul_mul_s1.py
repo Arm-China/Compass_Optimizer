@@ -1,8 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
+import torch
+
+
+def merge_constant_mul_to_bn(graph, config=None):
+    '''
+    Find
+    |   Constant
+    |       |
+    \       /
+        Mul
+    To
+    BatchNorm
+    '''
+    pending = []
+    for node in graph.nodes:
+        if node.type != OpType.Mul:
+            continue
+        if not OpType.Constant in [node.parents[0].type, node.parents[1].type]:
+            continue
+        if node.parents[0].type == OpType.Constant:
+            cnode = node.parents[0]
+            lnode = node.parents[1]
+        else:
+            cnode = node.parents[1]
+            lnode = node.parents[0]
+        if len(cnode.children) > 1 or cnode.outputs[0] in graph.output_tensors:
+            # constant's output has more than one comsumer
+            continue
+        if cnode.constants['weights'].betensor.flatten().shape[0] > 1:
+            continue
+        if (cnode.constants['weights'].betensor.ceil() - cnode.constants['weights'].betensor.floor()).max() == 0:
+            # batchnorm not support qinvariant operation
+            continue
+
+        scale = cnode.constants['weights'].betensor.flatten()[0].item()
+        node.remove_input(cnode.outputs[0])
+        pending.append(cnode)
+        node.type = OpType.BatchNorm
+        node.params['axis'] = len(lnode.outputs[0].ir_shape) - 1
+        node.params['epsilon'] = 0
+        wtshape = TensorShape([lnode.outputs[0].ir_shape[-1]])
+        w_t = PyTensor(node.name+"_weight", wtshape)
+        w_t.ir_dtype = Dtype.FP32
+        w_t.betensor = torch.zeros([node.outputs[0].ir_shape[-1]],
+                                   device=cnode.constants['weights'].betensor.device) + scale
+        b_t = PyTensor(node.name+"_bias", wtshape)
+        b_t.ir_dtype = Dtype.FP32
+        b_t.betensor = torch.zeros_like(w_t.betensor)
+        node.constants['weights'] = w_t
+        node.constants['biases'] = b_t
+
+    for p in pending:
+        graph.remove_node(p)
 
 
 def merge_matmul_mul(graph, config=None):
@@ -51,7 +104,7 @@ def merge_matmul_mul(graph, config=None):
                     break
                 else:
                     break
-            for sn in snodes:
+            for sn in snodes[:-1]:
                 for st in (sn.inputs + sn.outputs):
                     if st in (graph.input_tensors + graph.output_tensors):
                         flag = False
@@ -103,17 +156,26 @@ def merge_matmul_mul(graph, config=None):
                 pnodes.append(head.parents[0])
             else:
                 break
-        if not (len(bn) == 2 and bn[0].type == OpType.BatchNorm and bn[1].type == OpType.BatchNorm):
+        match = True if len(bn) > 0 else False
+        for n in bn:
+            if not n.type == OpType.BatchNorm:
+                match = False
+                break
+        if not match:
             continue
         # assert if two bn are scaling operation
         w1 = bn[0].constants['weights'].betensor.unique()
         b1 = bn[0].constants['biases'].betensor.unique()
         if not (1 == w1.numel() and 1 == b1.numel() and 0. == b1.item() and w1.item() > 0.):
             continue
-        w2 = bn[1].constants['weights'].betensor.unique()
-        b2 = bn[1].constants['biases'].betensor.unique()
-        if not (1 == w2.numel() and 1 == b2.numel() and 0. == b2.item() and w2.item() > 0.):
-            continue
+        if len(bn) == 1:
+            w2 = 1
+            b2 = 0
+        else:
+            w2 = bn[1].constants['weights'].betensor.unique()
+            b2 = bn[1].constants['biases'].betensor.unique()
+            if not (1 == w2.numel() and 1 == b2.numel() and 0. == b2.item() and w2.item() > 0.):
+                continue
         # Remove two bn and add fuse_multiplier
         node.params['fused_multiplier'] = w1*w2
         node.attrs['fused_multiplier'] = w1*w2

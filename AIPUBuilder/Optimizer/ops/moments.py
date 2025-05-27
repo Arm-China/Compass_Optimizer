@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -98,7 +98,7 @@ def moments_forward(self, *args):
         else:
             out1.betensor = linear_requantize(t_var, do_scale, do_shift, out1.zerop, out1.qmin, out1.qmax).int()
     else:
-        t_std, t_mean = torch.std_mean(inp.betensor, dim=axis, keepdim=keep_dim, unbiased=False)
+        t_std, t_mean = torch.std_mean(inp.betensor.float(), dim=axis, keepdim=keep_dim, unbiased=False)
         out0.betensor = t_mean
         out1.betensor = t_std * t_std
 

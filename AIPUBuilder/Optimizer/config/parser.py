@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import os
 import re
@@ -139,17 +139,18 @@ class CfgParser(object):
 
         if argv['statistic_file'] == '' and str(argv['calibration_strategy_for_activation']).lower() != 'in_ir':
             compat_quantized_model = ''
-            with open(argv['graph'], 'r') as f:
-                for line in f.readlines():
-                    line = line.strip().replace('\n', '').replace(' ', '')
-                    if 'compat_quantized_model=' in line:
-                        compat_quantized_model = line.split('=')[-1].lower()
-                        break
+            if ALL_FIELDS['graph'].default() != argv['graph']:
+                with open(argv['graph'], 'r') as f:
+                    for line in f.readlines():
+                        line = line.strip().replace('\n', '').replace(' ', '')
+                        if 'compat_quantized_model=' in line:
+                            compat_quantized_model = line.split('=')[-1].lower()
+                            break
 
-            if argv['calibration_data'] == '' and compat_quantized_model != 'true':
-                OPT_WARN(f"please set 'calibration_data' field in cfg file if want to statistic quantization values."
-                         f" And Optimizer will use all zeros dataset for statistic tensors information.")
-                # ret = ret and True
+                if argv['calibration_data'] == '' and compat_quantized_model != 'true':
+                    OPT_WARN(f"please set 'calibration_data' field in cfg file if want to statistic quantization values."
+                             f" And Optimizer will use all zeros dataset for statistic tensors information.")
+                    # ret = ret and True
 
         if argv['dataset'] == '' and argv['calibration_data'] != '':
             OPT_ERROR("please set 'dataset' field in cfg file if want to statistic quantization values")

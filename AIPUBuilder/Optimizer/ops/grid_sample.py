@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -125,8 +125,8 @@ def quant_grid_sample(self, inp0, inp1, method, padding_mode, align_corners, do_
         if method == 'nearest':
             q_ix += 2 ** (gridx_shift - 1)
             q_iy += 2 ** (gridy_shift - 1)
-            q_ix = torch.clamp(q_ix, q16_qmin, q16_qmax)
-            q_iy = torch.clamp(q_iy, q16_qmin, q16_qmax)
+            q_ix = torch.clamp(q_ix, q16_qmin, q16_qmax).long()
+            q_iy = torch.clamp(q_iy, q16_qmin, q16_qmax).long()
             left_x = (q_ix >> gridx_shift).long()
             top_y = (q_iy >> gridy_shift).long()
             quant_output[n, :, :, :] = PixelAtGrid(feature, n, feature_channel, top_y, left_x,

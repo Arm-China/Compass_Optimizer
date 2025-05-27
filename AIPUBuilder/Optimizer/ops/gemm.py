@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -40,8 +40,8 @@ def gemm(self, *args):
             '''do_scale=[doscale, inp_scale0, inp_scale1]'''
             beta = self.get_param('beta')
             beta_sign = -1 if beta < 0 else 1
-            bias = self.inputs[2].betensor + self.inputs[2].zerop
-            req_z = z * do_scale[1] * alph_sign
+            bias = self.inputs[2].betensor.long() + self.inputs[2].zerop
+            req_z = z.long() * do_scale[1] * alph_sign
             req_bias = bias * do_scale[2] * beta_sign
             zsum = req_z + req_bias
             z = linear_requantize(zsum, do_scale[0], do_shift, out.zerop, out.qmin, out.qmax)
@@ -53,7 +53,7 @@ def gemm(self, *args):
         if len(self.inputs) == 3:
             beta = self.get_param('beta')
             inp2 = self.inputs[2]
-            z = z + inp2.betensor * beta
+            z = z + inp2.betensor.float() * beta
     out.betensor = z
     return out.betensor
 

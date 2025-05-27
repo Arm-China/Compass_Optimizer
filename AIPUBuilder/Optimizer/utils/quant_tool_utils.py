@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import torch
 import functools
@@ -577,3 +577,38 @@ def calc_SQNR(gt, pt):
     Ps = torch.norm(x)
     Pn = torch.norm(x-y)
     return 20 * torch.log10(Ps/Pn)
+
+
+def set_ds_constant_shape(self):
+    is_constant_shape = False
+    # When the ds_output_shape field is not present, the ds shape is inferred by the graph builder
+    ds_output_shape_constant_list = None
+    if 'ds_output_shape_constant' in self.attrs:
+        if self.attrs["ds_output_shape_constant"] == 'all':
+            ds_output_shape_constant_list = [1] * len(self.outputs)
+        elif self.attrs["ds_output_shape_constant"] == 'disable':
+            ds_output_shape_constant_list = [0] * len(self.outputs)
+        else:
+            ds_output_shape_constant_list = eval(self.attrs["ds_output_shape_constant"])
+            if len(ds_output_shape_constant_list) > len(self.outputs):
+                ds_output_shape_constant_list = ds_output_shape_constant_list[:len(self.outputs)]
+            elif len(ds_output_shape_constant_list) < len(self.outputs):
+                diff = len(self.outputs) - len(ds_output_shape_constant_list)
+                ds_output_shape_constant_list += ([0] * diff)
+            else:
+                pass
+        if len(ds_output_shape_constant_list) == ds_output_shape_constant_list.count(1):
+            self.params['ds_output_shape'] = [list(out.ir_shape) for out in self.outputs]
+            is_constant_shape = True
+        elif len(ds_output_shape_constant_list) > 1 and ds_output_shape_constant_list.count(1):
+            if 'ds_output_shape' not in self.params:
+                OPT_WARN(
+                    f"layer_id={self.attrs['layer_id']},layer_type={self.type}, the ds_output_shape is not derived. If you want to set a constant_shape, first derive the ds_output_shape of the op.")
+            else:
+                for idx, item in enumerate(ds_output_shape_constant_list):
+                    if item == 1:
+                        self.params['ds_output_shape'][idx] = list(self.outputs[idx].ir_shape)
+                        is_constant_shape = True
+        else:
+            pass
+    return is_constant_shape

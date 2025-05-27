@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -95,7 +95,9 @@ def NMS_F(boxes, scores, iou_thresh):
     y2 = boxes[:, 3]
 
     areas = (x2 - x1+1) * (y2 - y1+1)
-    order = torch.argsort(torch.flatten(scores), descending=True)
+    #order = torch.argsort(torch.flatten(scores), descending=True)
+    order = torch.linspace(0, len(torch.flatten(scores))-1,
+                           steps=len(torch.flatten(scores)), device=scores.device).long()
     keep = []
     while order.shape[0] > 0:
         i = order[0]
@@ -151,18 +153,6 @@ def NMS_Q(box, score, iou_threshold=None):
     return keep
 
 
-class Generateproposals_Context:
-    def __init__(self):
-        self.tile_anchor_done = False
-        self.wa = None
-        self.ha = None
-        self.xcenter_a = None
-        self.ycenter_a = None
-
-
-generateproposals_context = Generateproposals_Context()
-
-
 @op_register(OpType.GenerateProposals)
 def generateproposals(self, *args):
     check_bottom_nodes(self)
@@ -177,31 +167,6 @@ def generateproposals(self, *args):
     batch_num = class_score.shape[0]
     feat_stride = 16  # image_height / box_encoding.shape[1]
     num_anchors = 12  # class_score.shape[3]
-
-    if not generateproposals_context.tile_anchor_done and not self.quantized:
-        _anchors = self.constants["weights"].betensor
-        generateproposals_context.tile_anchor_done = True
-        height, width = class_score.shape[1:3]
-        shift_x = torch.arange(width, dtype=torch.float32, device=class_score.device) * feat_stride
-        shift_y = torch.arange(height, dtype=torch.float32, device=class_score.device) * feat_stride
-
-        shift_y, shift_x = torch.meshgrid(shift_x, shift_y)  # [width, height]
-        shifts = torch.vstack((torch.flatten(shift_x), torch.flatten(shift_y),
-                               torch.flatten(shift_x), torch.flatten(shift_y))).permute(1, 0)
-
-        K = shifts.shape[0]
-        A = _anchors.shape[0]
-        anchor_box = torch.reshape(_anchors, (1, A, 4)) + torch.reshape(shifts, (1, K, 4)).permute((1, 0, 2))
-        anchor_box = torch.reshape(anchor_box, (K * A, 4))
-
-        if not self.quantized:
-            wa = (anchor_box[:, 2] - anchor_box[:, 0] + 1.0)
-            ha = (anchor_box[:, 3] - anchor_box[:, 1] + 1.0)
-            generateproposals_context.wa = wa.cpu().numpy()
-            generateproposals_context.ha = ha.cpu().numpy()
-            generateproposals_context.xcenter_a = (anchor_box[:, 0] + 0.5 * wa).cpu().numpy()
-            generateproposals_context.ycenter_a = (anchor_box[:, 1] + 0.5 * ha).cpu().numpy()
-
     box_encoding = torch.reshape(box_encoding, (batch_num, -1, 4))  # [K*A, 4]
     total_box_num = class_score.shape[1]*class_score.shape[2]*class_score.shape[3]
     out_boxes = torch.zeros([batch_num, max_prop, 4], device=class_score.device)
@@ -213,13 +178,35 @@ def generateproposals(self, *args):
     if not self.quantized:
         coords_stats = []
         box_stats = []
-        wa = torch.tensor(generateproposals_context.wa, device=dev)
-        ha = torch.tensor(generateproposals_context.ha, device=dev)
-        ycenter_a = torch.tensor(generateproposals_context.ycenter_a, device=dev)
-        xcenter_a = torch.tensor(generateproposals_context.xcenter_a, device=dev)
+        _anchors = self.constants["weights"].betensor
+        if _anchors.shape[0] != box_encoding.shape[1]:
+            height, width = class_score.shape[1:3]
+            shift_x = torch.arange(width, dtype=torch.float32, device=_anchors.device) * feat_stride
+            shift_y = torch.arange(height, dtype=torch.float32, device=_anchors.device) * feat_stride
+
+            shift_y, shift_x = torch.meshgrid(shift_x, shift_y)  # [width, height]
+            shifts = torch.vstack((torch.flatten(shift_x), torch.flatten(shift_y),
+                                   torch.flatten(shift_x), torch.flatten(shift_y))).permute(1, 0)
+            K = shifts.shape[0]
+            A = _anchors.shape[0]
+            anchor_box = torch.reshape(_anchors, (1, A, 4)) + torch.reshape(shifts, (1, K, 4)).permute((1, 0, 2))
+            anchor_box = torch.reshape(anchor_box, (K * A, 4))
+
+            wa = (anchor_box[:, 2] - anchor_box[:, 0] + 1.0)
+            ha = (anchor_box[:, 3] - anchor_box[:, 1] + 1.0)
+            xcenter_a = (anchor_box[:, 0] + 0.5 * wa)
+            ycenter_a = (anchor_box[:, 1] + 0.5 * ha)
+            new_weights = torch.stack([wa, ha, xcenter_a, ycenter_a], axis=-1)
+            self.constants["weights"].betensor = new_weights
+        else:
+            wa = _anchors[:, 0]
+            ha = _anchors[:, 1]
+            xcenter_a = _anchors[:, 2]
+            ycenter_a = _anchors[:, 3]
+
         for batch in range(batch_num):
-            tx, ty, tw, th = box_encoding[batch, :, 0], box_encoding[batch,
-                                                                     :, 1], box_encoding[batch, :, 2], box_encoding[batch, :, 3]
+            tx, ty, tw, th = box_encoding[batch, :, 0].float(), box_encoding[batch,
+                                                                             :, 1].float(), box_encoding[batch, :, 2].float(), box_encoding[batch, :, 3].float()
 
             w = torch.exp(tw) * wa[0:tw.shape[0]]
             h = torch.exp(th) * ha[0:th.shape[0]]
@@ -331,7 +318,7 @@ def generateproposals(self, *args):
 
         iou_threshold = self.get_param('iou_threshold')
         if not self.quantized:
-            keep = NMS_F(bboxes, proposal_scores, iou_threshold)
+            keep = NMS_F(bboxes.float(), proposal_scores.float(), iou_threshold)
         else:
             keep = NMS_Q(bboxes, proposal_scores, int(iou_threshold))
 
@@ -381,10 +368,11 @@ def generateproposals_quantize(self, *args):
     anchor_dtype = Dtype.INT16
     anchor_rmin, anchor_rmax = dtype2range(anchor_dtype)
 
-    wa = torch.tensor(generateproposals_context.wa, device=inp0.betensor.device)
-    ha = torch.tensor(generateproposals_context.ha, device=inp0.betensor.device)
-    ycenter_a = torch.tensor(generateproposals_context.ycenter_a, device=inp0.betensor.device)
-    xcenter_a = torch.tensor(generateproposals_context.xcenter_a, device=inp0.betensor.device)
+    _anchors = self.constants["weights"].betensor
+    wa = _anchors[:, 0]
+    ha = _anchors[:, 1]
+    xcenter_a = _anchors[:, 2]
+    ycenter_a = _anchors[:, 3]
     ycenter_a_q = linear_quantize_clip(ycenter_a, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax)
     xcenter_a_q = linear_quantize_clip(xcenter_a, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax)
     ha_q = linear_quantize_clip(ha, stat_coords_scale, stat_coords_zp, anchor_rmin, anchor_rmax)

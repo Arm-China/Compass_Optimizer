@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -41,7 +41,7 @@ def pow(self, *args):
         self.placeholders[1].betensor = power_outputs
         self.placeholders[2].betensor = exp_outputs
 
-        outputs = torch.pow(base, power)
+        outputs = torch.pow(base.float(), power.float())
     else:
         power += int(self.inputs[1].zerop)
         lut_log = self.constants['lut_log']

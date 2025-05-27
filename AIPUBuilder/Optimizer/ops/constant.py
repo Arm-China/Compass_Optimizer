@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -28,9 +28,14 @@ def constant(self, *args):
 
 @quant_register(OpType.Constant)
 def constant_quantize(self, *args):
-    inp_quantize(self, *args)
     w = self.constants["weights"]
+    if 'layer_top_type_original' not in self.attrs:
+        self.attrs['layer_top_type_original'] = [self.outputs[0].ir_dtype, ]
     out = self.outputs[0]
+    if not torch.isnan(w.betensor).any() and not torch.isinf(w.betensor).any() and (w.betensor.ceil() - w.betensor.floor()).max() == 0:
+        self.attrs['layer_top_type_original'][0] = dtype2str(range2dtype(
+            w.extrema_min, w.extrema_max, force_int=w.extrema_max > 65535)[1])
+    inp_quantize(self, *args)
     if not torch.equal(w.betensor, w.betensor.new_zeros(w.betensor.shape)):
         out.set_qinvariant()
     w.scale = out.scale

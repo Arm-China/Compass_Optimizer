@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyNode, PyTensor  # noqa
 from AIPUBuilder.Optimizer.logger import OPT_INFO
@@ -203,6 +203,7 @@ class InsertCastOp(BaseInsertOp):
                      f"(may cause model accuracy loss due to corresponding spec's restriction): "
                      f"{str(self.op_need_cast_dtypes_for_lib)}")
             self.op_need_cast_dtypes_for_lib.discard(OpType.Cast)
+        graph.op_need_cast_dtypes_for_lib = self.op_need_cast_dtypes_for_lib
 
     def whether_an_inserted_op(self, node, target_type=OpType.Cast):
         return super().whether_an_inserted_op(node, target_type)

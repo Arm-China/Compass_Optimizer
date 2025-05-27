@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -17,7 +17,11 @@ def check_kvc_concat(self):
     input_op = set()
     for inp in self.parents:
         input_op.add(inp.type)
-    if len(input_op) == 2 and OpType.Input in input_op:
+    if len(input_op) == 2 and (OpType.Input in input_op or OpType.Constant in input_op):
+        for pnode in self.parents:
+            if pnode.type == OpType.Constant:
+                if pnode.constants['weights'].betensor.abs().max() != 0:
+                    return False
         return True
     return False
 
@@ -27,13 +31,16 @@ def concat_quantize(self, *args):
     if check_kvc_concat(self):
         real_inp = None
         for inp in self.inputs:
-            if inp.pnode.type != OpType.Input:
+            if inp.pnode.type not in [OpType.Input, OpType.Constant]:
                 real_inp = inp
                 break
         for inp in self.inputs:
-            if inp.pnode.type != OpType.Input:
+            if inp.pnode.type not in [OpType.Input, OpType.Constant]:
                 continue
             inp.clone_qinfo(real_inp)
+            if inp.pnode.type == OpType.Constant:
+                inp.pnode.constants['weights'].betensor -= real_inp.zerop
+                inp.pnode.constants['weights'].dtype = real_inp.dtype
         self.outputs[0].clone_qinfo(real_inp)
         return
 

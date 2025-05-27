@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -86,9 +86,7 @@ def topk(self, *args):
     else:  # last mode
         transp_inp = torch.transpose(inp_betensors, axis, -1)
         out_order = torch.sort(transp_inp, dim=-1, descending=largest, stable=True)
-        # select_index param is for quantIR, this makes the indexes of float and quant inconsistent
-        if self.quantized:
-            out_order = reorder_index(out_order)
+        out_order = reorder_index(out_order)
         transp_out = out_order[0][..., 0:k], out_order[1][..., 0:k]
 
         recover_out0 = torch.transpose(transp_out[0], axis, -1)

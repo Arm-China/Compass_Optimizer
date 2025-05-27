@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -37,7 +37,7 @@ def rgbToyuv(self, *args):
 
     # convert into conv style:
     bb2 = torch.matmul(-coe_in_offset, coe_calc) + coe_out_offset * 2 ** coes_shift + 512
-    yuvv = torch.floor(torch.nn.functional.conv2d(img2, torch.reshape(
+    yuvv = torch.floor(torch.nn.functional.conv2d(img2.float(), torch.reshape(
         coe_calc, [3, 3, 1, 1])) + bb2.reshape(3, 1, 1)) * 1 * 0.5 ** coes_shift
 
     # 444->420

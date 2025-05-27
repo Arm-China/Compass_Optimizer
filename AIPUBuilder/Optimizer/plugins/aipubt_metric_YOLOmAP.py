@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 
 from AIPUBuilder.Optimizer.framework import *
@@ -745,3 +745,70 @@ class YOLOV3TfmAPMetric(YOLOVOCmAPMetric):
         box_class_probs = special.expit(conv_output[..., 5:])
 
         return box_xy, box_wh, box_confidence, box_class_probs
+
+
+@register_plugin(PluginType.Metric, '1.0')
+class YOLOV8onnxmAPMetric(YOLOV5onnxmAPMetric):
+    """
+    This YOLOV8cocomAPMetric is used for the metric of yolov8_onnx model in Optimizer.
+
+    The input image size of model is 640x640.
+    score_threshold=0.25, iou_threshold=0.45
+    """
+
+    def __init__(self, num_class=80, input_size=640, score_threshold=0.25, iou_threshold=0.45):
+        super().__init__(num_class)
+        self.input_size = input_size
+        self.conf_thres = score_threshold
+        self.iou_thres = iou_threshold
+
+    def __call__(self, pred, target):
+        # pred shape is similar to [b, c, cells], such as [1,84,8400] represents 80 classes and 4 coordinate point
+        batch = pred[0].shape[0]
+        self.num_class = pred[0].shape[1] - 4
+
+        def xywh2yxyx(x):
+            # Convert boxes from [x, y, w, h] to [xmin, ymin, xmax, ymax]
+            y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+            y[..., 1] = x[..., 0] - x[..., 2] / 2
+            y[..., 0] = x[..., 1] - x[..., 3] / 2
+            y[..., 3] = x[..., 0] + x[..., 2] / 2
+            y[..., 2] = x[..., 1] + x[..., 3] / 2
+            return y
+
+        for i in range(batch):
+            label_id_list, boxes_list, score_list = self.decode_output(
+                pred[0][i:i+1], self.conf_thres, self.iou_thres, coordinate_convert_func=xywh2yxyx)
+            self.combine_predict_label_and_extract_obj_all_class(i, label_id_list, boxes_list, score_list, target)
+
+    def decode_output(self, prediction, conf_thres=0.25, iou_thres=0.45, coordinate_convert_func=None):
+        cells = prediction.shape[2]
+        prediction = prediction.permute(0, 2, 1)  # convert to [b, cells, c]
+        pred_class = prediction[..., 4:]
+        pred_conf = torch.max(pred_class, dim=-1, keepdim=True)[0]
+        new_prediction = torch.zeros([1, cells, self.num_class + 1 + 4], device=prediction.device)
+        new_prediction[..., :4] = prediction[..., :4]
+        new_prediction[..., 4:5] = pred_conf
+        new_prediction[..., 5:] = prediction[..., 4:]
+        prediction = new_prediction
+        prediction = prediction[prediction[..., 4] > conf_thres]
+
+        # Checks
+        assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
+        assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+
+        if prediction.shape[0] == 0:
+            return [], [], []
+
+        if coordinate_convert_func is None:
+            OPT_FATAL('please define the coordinate_convert_func funtion in %s plugin' % (self.__class__.__name__))
+        box = coordinate_convert_func(prediction[..., :4])
+        conf, j = prediction[..., 5:].max(1, keepdim=True)
+        pred = torch.cat((box, conf, j.float()), 1)[
+            conf.view(-1) > conf_thres]
+
+        boxes, scores = pred[..., :4], pred[..., 4]
+        i = torchvision.ops.nms(boxes, scores, iou_thres)
+
+        output = pred[i].cpu().numpy()
+        return (output[..., 5], output[..., :4] / self.input_size, output[..., 4])

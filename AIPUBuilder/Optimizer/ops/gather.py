@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
@@ -96,9 +96,13 @@ def gather(self, *args):
         inp0_betensors = self.inputs[0].betensor.clone()
         inp1_betensors = self.inputs[1].betensor.clone()
         index = inp1_betensors.long()
-        if inp1_betensors.numel() == 1 and len(self.inputs[0].ir_shape) - len(self.outputs[0].ir_shape) == 1:
-            index = inp1_betensors.item()
-        self.outputs[0].betensor = inp0_betensors[index]
+        axis = self.get_param('axis')
+        if axis != 0:
+            self.outputs[0].betensor = torch.index_select(inp0_betensors, axis, index)
+        else:
+            if inp1_betensors.numel() == 1 and len(self.inputs[0].ir_shape) - len(self.outputs[0].ir_shape) == 1:
+                index = inp1_betensors.item()
+            self.outputs[0].betensor = inp0_betensors[index]
 
     return self.outputs[0].betensor
 

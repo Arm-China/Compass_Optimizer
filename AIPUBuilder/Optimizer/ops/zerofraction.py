@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -29,7 +29,8 @@ def zerofraction(self, *args):
         enlarge_scale = self.get_param('output_scale')
         zero_fraction = torch.div((total_zero_num * enlarge_scale + batch_total_num//2),
                                   batch_total_num, rounding_mode='floor').int()
-        zero_fraction -= self.outputs[0].zerop
+        zero_fraction, out_zp = broadcasting_transform(zero_fraction, self.outputs[0].broadcast_zerop)
+        zero_fraction -= out_zp
     else:
         zero_fraction = total_zero_num / batch_total_num
 

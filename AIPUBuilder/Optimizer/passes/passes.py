@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 from AIPUBuilder.Optimizer.utils import *
 from .shrink_pow_exponent_s1 import shrink_pow_exponent
-from .merge_matmul_mul_s1 import merge_matmul_mul
+from .merge_matmul_mul_s1 import merge_matmul_mul, merge_constant_mul_to_bn
 from .convert_resize_to_convolution import convert_resize_to_convolution
 from .decompose_nonmonotonic_activations_s1 import decompose_nonmonotonic_activations
 from .tune_op_extra_params_s1 import *
@@ -30,14 +30,10 @@ def optimization_stage1(graph, config):
     shrink_pow_exponent(graph, config)
     if config.enable_pass_decompose_nonmonotonic_activations:
         decompose_nonmonotonic_activations(graph, config)
-    if config.enable_pass_tune_op_complicated_activations:
-        tune_op_complicated_activations(graph, config)
-        tune_op_trigonometric_activations(graph, config)
-    if config.enable_pass_tune_op_softmax:
-        tune_op_softmax(graph, config)
+    tune_op_passes(graph, config)
     if config.enable_pass_merge_matmul_mul:
+        merge_constant_mul_to_bn(graph, config)
         merge_matmul_mul(graph, config)
-
     check_quantization_info(graph, config)
     for node in graph.nodes:
         for ot in node.outputs:
@@ -114,8 +110,10 @@ def optimization_stage3(graph, config):
                 c = n.outputs[0].ir_shape[-1]
                 fw = PyTensor(graph.get_valid_tensor_name(
                     n.inputs[0].name + "_scale"), torch.zeros([c]).to(n.inputs[0].betensor.device) + fused_multiplier)
+                fw.dtype = n.inputs[0].dtype
                 fb = PyTensor(graph.get_valid_tensor_name(
                     n.inputs[0].name + "_bias"), torch.zeros([c]).to(n.inputs[0].betensor.device))
+                fb.dtype = Dtype.FP32
                 n.constants['weights'] = fw
                 n.constants['biases'] = fb
                 n.params['axis'] = len(n.inputs[0].ir_shape) - 1

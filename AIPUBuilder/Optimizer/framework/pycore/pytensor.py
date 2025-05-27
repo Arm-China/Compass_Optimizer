@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -221,7 +221,7 @@ class PyTensor:
             return super().__setattr__(key, value.to(device_cluster[device]))
 
     def fit_dtype(self, dtype: Union[Dtype, None] = None):
-        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type, dtype2bits, torch_type2dtype
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type, dtype2bits, dtype2bytes, torch_type2dtype
         from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
         from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
         if dtype is not None:
@@ -232,7 +232,16 @@ class PyTensor:
             pass
         elif is_float(self.dtype):
             if self.dtype in [Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
-                self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
+                if dtype2bytes(self.dtype) > self.betensor.itemsize:
+                    self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
+                else:
+                    inf_mask = torch.isinf(self.betensor)
+                    if inf_mask.any():
+                        OPT_WARN(
+                            f'tensor "{self.name}" contains inf values in fit_dtype() function.')
+                    fmin, fmax = dtype2range(self.dtype)
+                    self.betensor = torch.where(inf_mask, self.betensor.to(dtype2torch_type(self.dtype)),
+                                                torch.clamp(self.betensor, fmin, fmax).to(dtype2torch_type(self.dtype)))
             else:
                 #self.betensor = to_fp24(self.betensor) if self.dtype == Dtype.FP24 else self.betensor
                 OPT_ERROR(f'unsupported dtype "{self.dtype}" when calling fit_dtype function on tensor "{self.name}".')
@@ -273,7 +282,7 @@ class PyTensor:
         scale = _scale_zp(self.scale)
         zerop = _scale_zp(self.zerop)
         return (f"'tensor info: name={self.name}, ir_shape={self.ir_shape}, dtype={self.dtype}, "
-                f"scale={scale}, zerop={zerop}'")
+                f"scale={scale}, zerop={zerop}, qinvariant={self.qinvariant}'")
 
     def clone(self, name=None):
         import copy

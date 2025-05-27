@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import OpType, Dtype
 from AIPUBuilder.Optimizer.utils import dtype2torch_type, dtype2range, is_float
@@ -10,8 +10,8 @@ def criteria(n):
     if n.type != OpType.Activation or n.params['method'].lower() != 'clip':
         return False
 
-    if n.outputs[0].dtype != Dtype.INT32:
-        return False
+    # if n.outputs[0].dtype != Dtype.INT32:
+    #     return False
 
     if not n.get_param('unquantifiable', optional=True, default_value=False):
         return False

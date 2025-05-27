@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import torch
 
@@ -196,21 +196,27 @@ def resize_bilinear_antialias(self, input_data, params):
         weight_coefficients_y, bound_y_min, bound_y_max = compute_weight_coefficients(
             input_height, output_height, ratio_y, mode, exclude_outside, dev)
         self.constants["weight_coefficients_x"] = PyTensor(
-            self.name + "/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            self.name + "/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(Dtype.FP32)), Dtype.FP32)
+        self.constants["weight_coefficients_x"].ir_dtype = Dtype.FP32
         self.constants["weight_coefficients_y"] = PyTensor(
-            self.name + "/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            self.name + "/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(Dtype.FP32)), Dtype.FP32)
+        self.constants["weight_coefficients_y"].ir_dtype = Dtype.FP32
         # currently set to uint16
         bound_x_dtype = bound_y_dtype = bits2dtype(16, False)
         # _, bound_x_dtype = range2dtype(0, input_width)
         # _, bound_y_dtype = range2dtype(0, input_height)
         self.constants["bound_x_min"] = PyTensor(
-            self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+            self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)), Dtype.UINT16)
+        self.constants["bound_x_min"].ir_dtype = Dtype.UINT16
         self.constants["bound_x_max"] = PyTensor(
-            self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
+            self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)), Dtype.UINT16)
+        self.constants["bound_x_max"].ir_dtype = Dtype.UINT16
         self.constants["bound_y_min"] = PyTensor(
-            self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+            self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)), Dtype.UINT16)
+        self.constants["bound_y_min"].ir_dtype = Dtype.UINT16
         self.constants["bound_y_max"] = PyTensor(
-            self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+            self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)), Dtype.UINT16)
+        self.constants["bound_y_max"].ir_dtype = Dtype.UINT16
     else:
         weight_coefficients_x = self.constants['weight_coefficients_x'].betensor
         weight_coefficients_y = self.constants['weight_coefficients_y'].betensor
@@ -442,39 +448,31 @@ def interp_quantize(self, *args):
             else:
                 interp_shift = extra_params[1]
             multiplier = (2 ** interp_shift) - 1
-            _, input_height, input_width, _ = self.inputs[0].ir_shape
-            _, output_height, output_width, _ = self.outputs[0].ir_shape
-            ratio_y = output_height / input_height
-            ratio_x = output_width / input_width
-            mode = self.get_param('mode').lower()
-            exclude_outside = self.get_param('exclude_outside', optional=True, default_value=False)
-            dev = self.inputs[0].betensor.device
-            weight_coefficients_x, bound_x_min, bound_x_max = compute_weight_coefficients(
-                input_width, output_width, ratio_x, mode, exclude_outside, dev)
-            weight_coefficients_y, bound_y_min, bound_y_max = compute_weight_coefficients(
-                input_height, output_height, ratio_y, mode, exclude_outside, dev)
             # currently set to uint16
-            bound_x_dtype = bound_y_dtype = bits2dtype(16, False)
-            # _, bound_x_dtype = range2dtype(0, input_width)
-            # _, bound_y_dtype = range2dtype(0, input_height)
-            self.constants["bound_x_min"] = PyTensor(
-                self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
-            self.constants["bound_x_max"] = PyTensor(
-                self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)))
-            self.constants["bound_y_min"] = PyTensor(
-                self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
-            self.constants["bound_y_max"] = PyTensor(
-                self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)))
+            bound_dtype = bits2dtype(16, False)
+            for name in ["bound_x_min", "bound_x_max", "bound_y_min", "bound_y_max"]:
+                t = self.constants[name]
+                t.dtype = bound_dtype
+                t.scale = 1.0
+                t.zerop = 0
+                t.qbits = dtype2bits(bound_dtype)
+                t.qmin, t.qmax = dtype2range(bound_dtype)
+                t.qinvariant = True
 
-            weight_coefficients_x = (weight_coefficients_x * multiplier).int()
-            weight_coefficients_y = (weight_coefficients_y * multiplier).int()
+            weight_coefficients_x_t = self.constants["weight_coefficients_x"]
+            weight_coefficients_y_t = self.constants["weight_coefficients_y"]
+            weight_coefficients_x = (weight_coefficients_x_t.betensor * multiplier).int()
+            weight_coefficients_y = (weight_coefficients_y_t.betensor * multiplier).int()
             weight_dtype = bits2dtype(interp_shift, False)
-            self.constants["weight_coefficients_x"] = PyTensor(
-                self.name + "/weight_coefficients_x",
-                weight_coefficients_x.cpu().numpy().astype(dtype2nptype(weight_dtype)))
-            self.constants["weight_coefficients_y"] = PyTensor(
-                self.name + "/weight_coefficients_y",
-                weight_coefficients_y.cpu().numpy().astype(dtype2nptype(weight_dtype)))
+            weight_coefficients_x_t.betensor = weight_coefficients_x
+            weight_coefficients_y_t.betensor = weight_coefficients_y
+            for t in [weight_coefficients_x_t, weight_coefficients_y_t]:
+                t.dtype = weight_dtype
+                t.scale = multiplier
+                t.zerop = 0
+                t.qbits = dtype2bits(weight_dtype)
+                t.qmin, t.qmax = dtype2range(weight_dtype)
+                t.qinvariant = False
         else:
             # interp_shift = 13
             interp_shift = extra_params[1]

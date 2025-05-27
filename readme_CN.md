@@ -27,7 +27,7 @@ OPT的主要功能特性如下：
   - Adaquant: 参见[Improving Post Training Neural Quantization: Layer-wise Calibration and Integer Programming](https://arxiv.org/abs/2006.10518)
 
 - 适配周易全系列硬件平台，针对性改进各算子量化实现及优化调整计算图结构
-
+- 支持通过模拟Compass量化调优训练QAT模型，使模型在Zhouyi NPU部署的时候达到更高的精度和更快的性能，详见[Compass_QAT](./AIPUBuilder/Optimizer/qat/readme_CN.md)
 
 ### 快速入门
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils.dtype_utils import *
 from AIPUBuilder.Optimizer.utils.quant_tool_utils import *
@@ -53,15 +53,18 @@ def reduce(self, *args):
             outp = linear_requantize(
                 outp, scale, shift, self.outputs[0].zerop, self.outputs[0].qmin, self.outputs[0].qmax)
         else:
-            outp = torch.sum(inp.betensor, axis, keepdims=True)
+            outp = torch.sum(inp.betensor.float(), axis, keepdims=True)
     elif method == 'MEAN':
         '''
         qx=scale*fp_x
         mean_qx = (scale*fp_x1+scale*fp_x2...+scale*fp_xn)/n = (fp_x1+fp_x2+fp_xn)/n*scale
 
         '''
-        inp_betensor = inp.betensor + (torch_tensor(0, device=inp.device)
-                                       if not self.quantized else self.inputs[0].zerop)
+        if self.quantized:
+            inp_betensor = inp.betensor.long()
+            inp_betensor += int(self.inputs[0].zerop)
+        else:
+            inp_betensor = inp.betensor.float()
         outp = torch.sum(inp_betensor, axis, keepdims=True)
         if self.quantized:
             shift = self.params["shift_value"]
@@ -119,7 +122,7 @@ def reduce(self, *args):
                 outp_iter[i] = tmp_data
             outp = outp_iter.reshape(input_shape)
         else:
-            outp = inp.betensor
+            outp = inp.betensor.float()
             for i in axis:
                 outp = torch.prod(outp, i, keepdim=True)
     elif method in ['VARIANCE', 'UNBIASED_VARIANCE']:
@@ -143,10 +146,11 @@ def reduce(self, *args):
                 num = num - 1
             outp = tmp_sum / num
     elif method == 'L1':
-        inp_betensor = inp.betensor
         if self.quantized:
+            inp_betensor = inp.betensor.long()
             inp_betensor += int(self.inputs[0].zerop)
-            inp_betensor = inp_betensor.long()
+        else:
+            inp_betensor = inp.betensor.float()
 
         abs_tensor = torch.abs(inp_betensor)
         outp = torch.sum(abs_tensor, axis, keepdim=True)
@@ -171,11 +175,11 @@ def reduce(self, *args):
                 outp, scale, shift-shift_diff, self.outputs[0].zerop, self.outputs[0].qmin, self.outputs[0].qmax)
 
     elif method == 'L2':
-        inp_betensor = inp.betensor
         if self.quantized:
+            inp_betensor = inp.betensor.long()
             inp_betensor += int(self.inputs[0].zerop)
-            inp_betensor = inp_betensor.long()
-
+        else:
+            inp_betensor = inp.betensor.float()
         power2_input = inp_betensor * inp_betensor
         sum_output = torch.sum(power2_input, axis, keepdim=True)
 

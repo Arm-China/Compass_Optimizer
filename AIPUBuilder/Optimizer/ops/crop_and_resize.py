@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -169,6 +169,8 @@ def quant_crop_and_resize(fm, boxes, box_indices, method, crop_size, qextrapolat
                 else:  # method == 'nearest':
                     # in_x = ((in_x + 2 ** (qvalue - 1)) >> qvalue).long().item()
                     in_x = ((in_x * index_scale + 2 ** (index_shift - 1)).long() >> index_shift).item()
+                    in_y = max(0, min(fm_height-1, in_y))
+                    in_x = max(0, min(fm_width-1, in_x))
                     out[b, y, x, :] = fm[box_idx, in_y, in_x, :]
     return out
 

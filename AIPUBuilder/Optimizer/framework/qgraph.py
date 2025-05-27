@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
@@ -118,7 +118,7 @@ class QuantizeGraph(PyGraph):
                     cstrategy = n.get_attrs('q_strategy_weight')
                     qmethod_wht = n.get_attrs('q_mode_weight')
                     if not n.quantized:
-                        for _, v in n.constants.items():
+                        for v in list(n.constants.values()) + n.get_attrs('subgraph_constants', optional=True, default_value=[]):
                             key_axis = v.key_axis if v.ir_shape != TensorShape([]) else None
                             if time_saving_mode:
                                 if not (QuantMode.is_per_channel(qmethod_wht) or n.get_param('group', optional=True, default_value=1) > 1):
@@ -138,7 +138,6 @@ class QuantizeGraph(PyGraph):
         self.feed_inputs_data(inputs)
         for n in self.nodes:
             n.forward()
-
             running_statistic_momentum = n.attrs["running_statistic_momentum"]
             histc_bins = n.attrs["histc_bins"]
             statistic_std_mean = True
@@ -405,7 +404,7 @@ class QuantizeGraph(PyGraph):
                 t.qmax = None
                 t.qinvariant = None
 
-    def quantize(self):
+    def quantize(self, disable_pbar=False):
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm, OPT_WARN, OPT_DEBUG
         from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyTensor
@@ -426,7 +425,7 @@ class QuantizeGraph(PyGraph):
         for qn in self.quantgraph.nodes:
             qn.attrs['map_to_original_node'] = qnmap
 
-        with tqdm(total=len(self.quantgraph.nodes), desc='quantize each layer', file=sys.stdout, leave=True) as pbar:
+        with tqdm(total=len(self.quantgraph.nodes), desc='quantize each layer', file=sys.stdout, leave=True, disable=disable_pbar) as pbar:
             for n in self.quantgraph.nodes:
                 if not n.quantized:
                     n.quantize()
@@ -472,9 +471,62 @@ class QuantizeGraph(PyGraph):
                         t.qinvariant = None
 
                 o_dtype = str2dtype(fd)
-                for ot in qn.outputs:
+                o_int_index = []
+                outputs_dtype = []
+                for idx, ot in enumerate(qn.outputs):
                     if is_float(ot.dtype):
                         ot.dtype = o_dtype
+                    else:
+                        o_int_index.append(idx)
+                    outputs_dtype.append(ot.dtype)
+
+                ############In the trigger_float_op case, convert the int output type to int type supported by lib###########
+                if self.quantgraph.op_need_cast_dtypes_for_lib is not None and qn.type in self.quantgraph.op_need_cast_dtypes_for_lib:
+                    import itertools
+
+                    def whether_matched(lib_dtype_spec, outputs_dtype):
+                        for spec in lib_dtype_spec:
+                            out_dtypes = spec.out_dtypes
+                            if outputs_dtype == out_dtypes:
+                                return True
+                        return False
+                    lib_dtype_spec = qn.get_lib_dtype_spec()
+                    matched = len(lib_dtype_spec) == 0 or whether_matched(lib_dtype_spec, outputs_dtype)
+
+                    if not matched:
+                        candidate_output_dtypes = []
+
+                        def get_lower_dtypes(dtype):
+                            from AIPUBuilder.Optimizer.utils.dtype_utils import bits2dtype, dtype2bits, is_signed
+                            lower_dtypes = []
+                            candidate_bits = []
+                            bits = dtype2bits(dtype)
+                            signed = is_signed(dtype)
+                            if not signed:
+                                candidate_bits.append(bits)
+                            while bits > 8:
+                                bits = bits // 2
+                                candidate_bits.append(bits)
+                            for b, s in itertools.product(candidate_bits, [True, False]):
+                                new_dtype = bits2dtype(b, s)
+                                lower_dtypes.append(new_dtype)
+                            return lower_dtypes
+
+                        for int_index in o_int_index:
+                            current_dtypes = outputs_dtype[int_index]
+                            # such as candidate_output_dtypes = [['int8,int16'], ['int32']]
+                            candidate_output_dtypes.append(get_lower_dtypes(current_dtypes))
+
+                        for can_output_dtypes in itertools.product(*candidate_output_dtypes):
+                            for o_idx, o_dtype in enumerate(can_output_dtypes):
+                                outputs_dtype[o_int_index[o_idx]] = o_dtype
+                            matched = whether_matched(lib_dtype_spec, outputs_dtype)
+                            if matched:
+                                for int_index in o_int_index:
+                                    qn.outputs[int_index].dtype = outputs_dtype[int_index]
+                                    matched = True
+                                break
+
                 if qn.type == OpType.Cast:
                     qn.params['to_dtype'] = qn.outputs[0].dtype
 
@@ -510,7 +562,8 @@ class QuantizeGraph(PyGraph):
                     w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax)
                     # currently lib can detect weight only quantization through IR Dtype info
                     # qn.params['approximate_method'] = 'weight_only_quantization'
-                qn.approximate()
+                if qn.get_param('is_perf_mode', optional=True, default_value=True):
+                    qn.approximate()
 
     def qforward(self, feed_data, disable_pbar=True, keep_tensors=False):
         return self.quantgraph.forward(feed_data, disable_pbar, keep_tensors)
@@ -628,5 +681,22 @@ class QuantizeGraph(PyGraph):
                         if is_float(dt):
                             node.quantized = False
                             break
+
+            if 'weight_block_size' not in node.params:
+                for k, v in node.constants.items():
+                    if k not in ['weights', 'biases']:
+                        continue
+                    scales = v.scale
+                    zps = v.zerop
+                    ir_shape_len = len(v.ir_shape)
+                    ka = v.key_axis
+                    if ir_shape_len and ir_shape_len - 1 >= v.key_axis:
+                        channel_num = v.ir_shape[v.key_axis]
+                        if scales.numel() == zps.numel() and scales.numel() > 1 and scales.numel() > channel_num:
+                            ic = node.inputs[0].ir_shape[-1]
+                            group_size = ic // (scales.numel() // channel_num)
+                            node.params['weight_block_size'] = group_size
+                            break
+
             if node.quantized:
                 _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import argparse
 import ast
@@ -112,7 +112,7 @@ def ds_prepass(g):
     avgpool_to_globalpool(g)
 
 
-def ds_postpass(g):
+def ds_middlepass(g):
     def revert_pool(graph):
         for n in graph.nodes:
             if n.type == OpType.GlobalPool and "from_pool" in n.params:
@@ -120,6 +120,18 @@ def ds_postpass(g):
                 n.params.pop("from_pool")
 
     revert_pool(g)
+
+
+def ds_postpass(g):
+    def change_reshape_shape(graph):
+        for n in graph.nodes:
+            if n.type == OpType.Reshape:
+                shape_param = list(n.params['shape'])
+                ir_out_shape = list(n.outputs[0].ir_shape)
+                if shape_param != ir_out_shape:
+                    n.params['shape'] = ir_out_shape
+
+    change_reshape_shape(g)
 
 
 def main():
@@ -188,12 +200,13 @@ def main():
 
     if options.enable_ds:
         OPT_INFO(f"begin to serialize the ds IR to the path {options.output}")
-        ds_postpass(g)
+        ds_middlepass(g)
         for n in g.nodes:
             for ot in n.outputs:
                 if "dynamic_shape" in ot.attrs:
                     dynamic_shape = ot.attrs["dynamic_shape"]
                     ot.ir_shape = dynamic_shape
+        ds_postpass(g)
 
         g.serialize_scale_zp = True
         g.serialize(options.output, options.bin)

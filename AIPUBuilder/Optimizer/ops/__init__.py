@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from . import quantize
 from . import dequantize
@@ -185,3 +185,6 @@ from . import noop
 from . import unique
 from . import isinf
 from . import isnan
+from . import cacheupdate
+from . import control_op
+from . import dummy

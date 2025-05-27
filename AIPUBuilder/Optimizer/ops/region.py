@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -350,9 +350,14 @@ def quantize_region(self, *args):
 
     # step 1: get coord scale/shift for boundingbox regression
     # little trick
+    box_signed = True
+    box_qbits = 16
+    _, box_qmax = bits2range(box_qbits, box_signed)
     coord_max = self.params['grid_width']
     coord_qmin, coord_qmax = bits2range(*(_quantize_params['anchor_dtype'][:2]))
     coord_shift = torch.floor(torch.log2(torch.tensor(coord_qmax / coord_max)))
+    while 2 ** coord_shift > box_qmax:
+        coord_shift -= 1
     coord_scale = 2 ** coord_shift
 
     self.params['col_shift'] = coord_shift.int().item()
@@ -458,8 +463,8 @@ def quantize_region(self, *args):
     # _oscale_list = [inp.scale, coord_scale.item(), inp.scale, 1.0, 1.0]
     _oscale_list = [2**inp.qbits-1, coord_scale.item(), 1.0, 1.0, 1.0]
     _ozerop_list = [inp.zerop, 0, 0, 0, 0]
-    _osigned_list = [False, True, False, True, False]
-    _act_qbits_list = [inp.qbits, 16, 16, 16, 16]
+    _osigned_list = [False, box_signed, False, True, False]
+    _act_qbits_list = [inp.qbits, box_qbits, 16, 16, 16]
     # _act_qbits_list = [max(q_bits_out, b) for b in _qbits_list]
     _dtype_list = [bits2dtype(b, s) for b, s in zip(_act_qbits_list, _osigned_list)]
 

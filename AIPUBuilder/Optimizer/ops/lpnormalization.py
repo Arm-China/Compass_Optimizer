@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -66,6 +66,7 @@ def lp_normalization_forward(self, *args):
     # The order of the normalization, only 1 or 2 are supported.
     method = self.get_param('method').lower()
     eps = self.get_param('epsilon', optional=True, default_value=1e-12)
+    eps = eps if eps != 0.0 else OPT_EPSILON
     p = 2
     if 'l1' == method:
         p = 1

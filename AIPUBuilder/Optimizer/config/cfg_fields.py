@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import os
 import re
@@ -68,7 +68,12 @@ class PerNodeFieldDict:
     def add_layer_name_field(self, key: str, value):
         self.ndict[key] = string_to_base_type(value) if isinstance(value, str) else value
 
-    def get(self, node: PyNode):
+    def __call__(self, *args):
+        return self.get(None)
+
+    def get(self, node: Union[PyNode, None] = None):
+        if node is None:
+            return self.global_value
         tkey = node.type.name.lower()
         mkey = node.params['method'].lower() if (node.type == OpType.Activation) else ''
         lid = int(node.attrs['layer_id'])
@@ -170,7 +175,7 @@ class GraphField(BaseField):
 
     @staticmethod
     def parse(g):
-        return os.path.isfile(g), g
+        return g == '' or os.path.isfile(g), g
 
     @staticmethod
     def error(g):
@@ -189,7 +194,7 @@ class BinField(BaseField):
 
     @staticmethod
     def parse(b):
-        return os.path.isfile(b), b
+        return b == '' or os.path.isfile(b), b
 
     @staticmethod
     def error(b):
@@ -1300,6 +1305,26 @@ class CastDtypesForLibField(BaseField):
         return f"Whether to cast dtypes of OPs to adapt to lib's dtypes' spec (may cause model accuracy loss due to corresponding spec's restriction). 'False' means no. 'True' means yes to all OPs. {BaseField.per_node_cfg_usage}"
 
 
+@field_register('perf_mode_for_lib', 'default')
+class PerfModeForLibField(BaseField):
+    @staticmethod
+    def default():
+        return 'True'
+
+    @staticmethod
+    def parse(cd):
+        cd_pattern = r'((false)|(true)|(False)|(True)|(TRUE)|(FALSE))'
+        return BaseField._re_parse(cd, cd_pattern)
+
+    @staticmethod
+    def error(cd):
+        return f"Require the 'perf_mode_for_lib' field be 'False' or 'True'."
+
+    @staticmethod
+    def message():
+        return f"Set the 'is_perf_mode' field in IR, when 'is_perf_mode=True' lib will use AIFF to accelerate computation when possible, when 'is_perf_mode=False' lib will only use TEC to implement, default value is 'True'. {BaseField.per_node_cfg_usage}"
+
+
 @field_register('min_compatible_zhouyi_target', 'default')
 class MinZhouyiTarget(BaseField):
     @staticmethod
@@ -2011,7 +2036,7 @@ class CompatQuantizedModelFeild(BaseField):
 @field_register('compat_quantized_model_strategy', 'hidden')
 class CompatQuantizedModelStrategyFeild(BaseField):
     _strategies = ['8bSymWeightUnchange', '8bAsymWeightTo16bSymWeight']
-    _extra_strategies = ['sym', 'asym', 'fasymp']
+    _extra_strategies = ['sym', 'asym', 'fasymp', 'fsym']
     _all_strategies = _strategies + _extra_strategies
     _strategies_lower = [_s.lower() for _s in _all_strategies]
 
@@ -2529,6 +2554,79 @@ class ExportParallelBatch(BaseField):
     @staticmethod
     def message():
         return "Default is False, if set an integer, will try to copy graph n times and connect them with Split OP after Inputs and Concat OP after outputs."
+
+
+@field_register('ds_output_shape_constant', 'default')
+class DsConstantShapeField(BaseField):
+    @staticmethod
+    def default():
+        return 'disable'
+
+    @staticmethod
+    def parse(tfo):
+        tf_pattern = r'((disable)|(all)|\[(0|1){1}(,(0|1))*\])'
+        return BaseField._re_parse(tfo, tf_pattern)
+
+    @staticmethod
+    def error(tfo):
+        return f"Parsing `ds_output_shape_constant` failed, please double check the instruction of this field"
+
+    @staticmethod
+    def message():
+        return'''
+The `ds_output_shape_constant` is used to set the constant shape layer.
+
+if you want to only set reshape op output shape to a constant shape, you can 'ds_output_shape_constant = disable & <[Reshape] : [1]>'.
+if the split op has 3 outputs and you want the first two outputs to be constant shape, you can 'ds_output_shape_constant = disable & <[Split] : [1,1,0]>'.
+If you want all three outputs to be constant shape, you can 'ds_output_shape_constant = disable & <[Split] : all >' for simplicity.{}
+        '''.format(BaseField.per_node_cfg_usage)
+
+
+@field_register('ds_parameter_constant', 'hidden')
+class DsConstantParameterField(BaseField):
+    @staticmethod
+    def default():
+        return 'disable'
+
+    @staticmethod
+    def parse(tfo):
+        tf_pattern = r'((disable)|(default))'
+        return BaseField._re_parse(tfo, tf_pattern)
+
+    @staticmethod
+    def error(tfo):
+        return f"Parsing `ds_parameter_constant` failed, please double check the instruction of this field"
+
+    @staticmethod
+    def message():
+        return'''
+If crop has a dynamic shape, then you need to derive the ds_crops parameter,
+but you know that ds_crops is a fixed value based on a priori condition, so you can use ds_parameter_constant to set the fixed value.
+
+You can 'ds_parameter_constant = disable & <[Crop] : default>', that means ds_crops is set to be consistent with crops.
+Currently, only 'disable' and 'default' are supported. User-defined values will be supported later.
+This applies to other op as well, such as ds_tile of tile op, ds_pad of pad op.{}
+        '''.format(BaseField.per_node_cfg_usage)
+
+
+@field_register('enable_ds', 'default')
+class EnableDSField(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(us):
+        return BaseField._re_parse(us, r'(true)|(TRUE)|(True)|(false)|(FALSE)|(False)')
+
+    @staticmethod
+    def error(cd):
+        return "Require the 'enable_ds' field be 'False' or 'True', default value=False."
+
+    @staticmethod
+    def message():
+        return (f"when enable_ds=true, optimizer will do dynamic shape relative operations, "
+                f"like write ds_output_shape into ir. {BaseField.per_node_cfg_usage}")
 
 
 # ALL_FIELDS = {**DEFAULT_FIELDS, **HIDDEN_FIELDS}

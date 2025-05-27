@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import os
 import sys
@@ -28,9 +28,9 @@ class RMSEMetric(OptBaseMetric):
             size=image_size,
             mode="bicubic",
             align_corners=False
-        ).squeeze().numpy()
+        ).squeeze().cpu().numpy()
 
-        target = target.numpy().reshape(image_size)
+        target = target.cpu().numpy().reshape(image_size)
         loss = np.sqrt(np.mean((prediction - target / 1000.) ** 2))
         # print(f"{self.total}: RMSE loss is {loss}")
         self.total += 1

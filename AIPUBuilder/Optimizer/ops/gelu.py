@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
@@ -75,8 +75,8 @@ def gelu_approx(self, *args):
     self.attrs.pop('set_min_max')
     self.attrs.pop('out_signed')
     self.attrs.pop('value_offset')
-
-    self.params['lut_mode'] = 'MIRROR'
+    if self.get_param('is_perf_mode', optional=True, default_value=False) and 'lut' in self.constants:
+        self.params['lut_mode'] = 'MIRROR'
 
 
 @op_register(OpType.GELU)

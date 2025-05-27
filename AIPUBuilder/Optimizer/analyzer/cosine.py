@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
+
+def align_shape_by_padding(x, y):
+    import torch
+    p_a = []
+    p_b = []
+    a = x
+    b = y
+    if len(x.shape) < len(y.shape):
+        a, b = y, x
+    for _ in range(len(a.shape) - len(b.shape)):
+        b = torch.unsqueeze(b, 0)
+    for i in range(len(a.shape)-1, -1, -1):
+        if a.shape[i] > b.shape[i]:
+            p_a.extend([0, 0])
+            p_b.extend([0, a.shape[i]-b.shape[i]])
+        else:
+            p_a.extend([0, b.shape[i]-a.shape[i]])
+            p_b.extend([0, 0])
+    return torch.nn.functional.pad(a, p_a), torch.nn.functional.pad(b, p_b)
 
 
 def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False):
@@ -43,6 +62,7 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
             de_quant_output = linear_dequantize(
                 t.betensor, t.scale, t.zerop, t.key_axis
             )
+            float_output, de_quant_output = align_shape_by_padding(float_output, de_quant_output)
             sim = cosine_distance(float_output, de_quant_output)
             mse = MSE(float_output, de_quant_output).item()
             if sim < 0.9 or mse > 0.1:

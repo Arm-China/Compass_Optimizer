@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import os
 from AIPUBuilder.Optimizer.plugins import *
@@ -75,7 +75,7 @@ class OptForward(object):
         output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in g.output_tensors]
         return input_tensors, output_tensors
 
-    def forward(self, data, transfer_to_float=False, keep_tensors=False, fit_dtype=True, dump_dir=None):
+    def forward(self, data, transfer_to_float=False, keep_tensors=False, fit_dtype=True, dump_dir=None, tensor_type="np"):
         """
         :param data: input float data uses to forward
         :param transfer_to_float: whether dequantize the output data, default=False
@@ -99,10 +99,14 @@ class OptForward(object):
             self.optimizer.g.disable_fit_dtype()
             for o in out:
                 if transfer_to_float and (o.pnode is not None and not o.pnode.get_param('unquantifiable', optional=True, default_value=False)):
-                    o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop).cpu().numpy()
+                    o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop)
+                    if tensor_type == 'np':
+                        o_data = o_data.cpu().numpy()
                 else:
                     # keep the ir_dtype
-                    o_data = o.betensor.cpu().numpy().astype(dtype2nptype(o.ir_dtype))
+                    o_data = o.betensor.to(dtype2torch_type(o.ir_dtype))
+                    if tensor_type == 'np':
+                        o_data = o_data.cpu().numpy()
                 if len(o.ir_shape) <= 1:
                     o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
@@ -196,7 +200,7 @@ class OptForward(object):
             result.append(o_data)
         return result
 
-    def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False, fit_dtype=True, dump_dir=None):
+    def forward_with_quantized_data(self, quantized_data, transfer_to_float=False, batch_size=1, keep_tensors=False, fit_dtype=True, ignore_input_scale_zp=False, dump_dir=None):
         """
         default this function is used when input data which is used to forward is quantized.
         :param quantized_data: the quantized data which is used to forward
@@ -214,8 +218,12 @@ class OptForward(object):
         self.optimizer.g.current_batch_idx = 0
         dequantized_data = []
         for data, inp_t in zip(input_data, input_tensors):
-            d = linear_dequantize(PyTensor('null', data).betensor, inp_t.broadcast_scale, inp_t.broadcast_zerop)
-            dequantized_data.append(d)
+            if ignore_input_scale_zp:
+                inp_t.pnode.quantized = False
+                dequantized_data.append(PyTensor('null', data).betensor)
+            else:
+                d = linear_dequantize(PyTensor('null', data).betensor, inp_t.broadcast_scale, inp_t.broadcast_zerop)
+                dequantized_data.append(d)
         out = self.forward(dequantized_data, transfer_to_float=transfer_to_float,
                            keep_tensors=keep_tensors, fit_dtype=fit_dtype, dump_dir=dump_dir)
         return out

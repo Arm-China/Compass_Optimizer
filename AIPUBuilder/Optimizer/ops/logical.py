@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
 
@@ -38,10 +38,11 @@ def logical(self, *args):
         if inp1_can_detile is None:
             inp1_can_detile = set_can_detile(self.inputs[1])
             self.attrs['inp1_can_detile'] = inp1_can_detile
-        if inp0_can_detile:
-            inp = self.inputs[0].detile_betensor()
-        if inp1_can_detile:
-            ref_val = self.inputs[1].detile_betensor()
+        if self.inputs[0].ir_shape != self.inputs[0].shape or self.inputs[1].ir_shape != self.inputs[1].shape:
+            if inp0_can_detile:
+                inp = self.inputs[0].detile_betensor()
+            if inp1_can_detile:
+                ref_val = self.inputs[1].detile_betensor()
 
         if method_ in ('AND', 'OR', 'XOR'):
             inp = inp.type(torch.bool)

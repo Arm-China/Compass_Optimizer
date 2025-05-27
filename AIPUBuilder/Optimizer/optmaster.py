@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright © 2022-2024 Arm Technology (China) Co. Ltd.
+# Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 import torch
 import numpy as np
@@ -230,10 +230,14 @@ class OptMaster(object):
                 init_attrs('unify_scales_for_kvc_concat', self.hparams.unify_scales_for_kvc_concat.get(node))
             init_attrs('unify_scales_for_multi_inputs_operators',
                        self.hparams.unify_scales_for_multi_inputs_operators.get(node))
+            init_attrs('ds_output_shape_constant', self.hparams.ds_output_shape_constant.get(node))
+            init_attrs('ds_parameter_constant', self.hparams.ds_parameter_constant.get(node))
+            init_attrs('enable_ds', self.hparams.enable_ds.get(node))
             node.attrs['optimization_info'] = {}
             node.attrs['batch_size_in_IR'] = self.batch_size_in_IR
             node.attrs['calculate_running_time'] = False
             node.attrs['trigger_float_op_bkup'] = node.attrs['trigger_float_op']
+            node.params['is_perf_mode'] = self.hparams.perf_mode_for_lib.get(node)
 
         if self.hparams.qconfig != '':
             OPT_INFO(f"now use qconfig to re-configure quantize method")
@@ -244,15 +248,8 @@ class OptMaster(object):
         if not (self.hparams.skip_optimization and self.hparams.eval_optimized_model) and \
                 ((hasattr(self.g, 'compat_quantized_model') and not self.g.compat_quantized_model) or not hasattr(
                     self.g, 'compat_quantized_model')):
-            inputs = []
-            for inp in self.g.input_tensors:
-                shape = list(inp.ir_shape)
-                dtype = inp.dtype
-                inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
-            OPT_INFO("init graph by forwarding one sample filled with zeros")
-            self.g.current_batch_size = self.batch_size_in_IR
-            self.g.current_batch_idx = 0
-            self.g.forward(inputs, disable_pbar=False)
+            msg = "init graph by forwarding one sample filled with zeros"
+            self._forward_with_zeros_input(self.g, msg=msg)
 
         # parse fake_quant_scopes params
         self.fake_quant_scopes = []
@@ -554,25 +551,36 @@ class OptMaster(object):
             OPT_INFO(dmsg)
         #################################################################################
 
+    def _forward_with_zeros_input(self, g, msg=""):
+        inputs = []
+        for inp in g.input_tensors:
+            shape = list(inp.ir_shape)
+            dtype = inp.dtype
+            inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
+        if msg != "":
+            OPT_INFO(msg)
+        g.current_batch_size = self.batch_size_in_IR
+        g.current_batch_idx = 0
+        for inp, d in zip(g.input_tensors, inputs):
+            inp.betensor = PyTensor('tmp', d).betensor
+        for n in g.nodes:
+            n.forward()
+            # cp-13888 when nonzero has [0] shape, the following ops like reshape may be crash.
+            if n.type == OpType.NonZero and n.outputs[0].betensor.numel() == 0:
+                n.outputs[0].betensor = torch.zeros(n.outputs[0].ir_shape, device=n.outputs[0].device)
+
     @opt_workflow_register
     def serialize(self, name="graph"):
         qg = self.g.quantgraph
         # first do a forward to check the final graph before serialize it
-        inputs = []
-        for inp in qg.input_tensors:
-            shape = list(inp.ir_shape)
-            dtype = inp.dtype
-            inputs.append(np.zeros(shape).astype(dtype2nptype(dtype)))
-        OPT_INFO("check the final graph by forwarding one sample filled with zeros")
-        qg.current_batch_size = self.batch_size_in_IR
-        qg.current_batch_idx = 0
-        qg.forward(inputs, disable_pbar=False)
+        msg = "check the final graph by forwarding one sample filled with zeros"
+        self._forward_with_zeros_input(qg, msg=msg)
         # then serialize
         if opt_use_cuda():
             torch.cuda.empty_cache()
         OPT_INFO('Begin to serialzie IR')
-        if self.hparams.write_similarity_to_ir:
-            for n in qg.nodes:
+        for n in qg.nodes:
+            if self.hparams.write_similarity_to_ir:
                 cstr = ""
                 mstr = ""
                 dynamic_top_shape = "["
@@ -584,7 +592,10 @@ class OptMaster(object):
                 n.params['D_mse'] = mstr[:-1]
                 n.params['D_dynamic_shape'] = dynamic_top_shape[:-1] + "]"
                 n.params['D_layer_id'] = n.attrs.get('layer_id', 'unknown')
-
+            set_ds_constant_shape(n)
+        for sv, sg in qg.subgraph_map.items():
+            if sg.quantgraph is not None:
+                qg.subgraph_map[sv] = sg.quantgraph
         if self.hparams.export_parallel_batch:
             graph = qg.clone()
             copy_parallel_batch(graph, self.hparams)
