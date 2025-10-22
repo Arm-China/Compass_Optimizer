@@ -256,7 +256,7 @@ def Nms(self, *args):
 
         idx_proposals = 0
         idx_keep = 0
-        tot_cls = int(total_class_num[0])
+        tot_cls = int(total_class_num[0]) if total_class_num.ndim > 0 else int(total_class_num)
         for idx_class in range(tot_cls):
             if idx_keep > max_nms_box_num:
                 break
@@ -354,9 +354,9 @@ def Nms_quantize(self, *args):
         do_scale, do_shift = generate_gussi_lut(
             in_qmin, in_qmax, soft_nms_sigma)
         self.constants['gaussian_scale_lut'] = PyTensor(
-            self.name + '/soft_nms_sigma_do_scale', do_scale.cpu().numpy().astype(dtype2nptype(Dtype.UINT16)))
+            self.name + '/soft_nms_sigma_do_scale', do_scale, dtype=Dtype.UINT16)
         self.constants['gaussian_shift_lut'] = PyTensor(
-            self.name + '/soft_nms_sigma_do_shift', do_shift.cpu().numpy().astype(dtype2nptype(Dtype.UINT8)))
+            self.name + '/soft_nms_sigma_do_shift', do_shift, dtype=Dtype.UINT8)
         self.params["soft_nms_sigma_in_shift"] = soft_nms_sigma_in_shift
 
     iou_thresh_scale = 256

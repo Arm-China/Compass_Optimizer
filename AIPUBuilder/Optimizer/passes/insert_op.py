@@ -9,6 +9,7 @@ import re
 import torch
 
 __all__ = [
+    "InsertFakeOp",
     "InsertCastOp",
     "InsertQuantizeOp",
     "InsertDeQuantizeOp",
@@ -57,35 +58,37 @@ class BaseQDQOp(BaseInsertOp):
     def __init__(self, graph, config=None):
         super().__init__(graph, config)
 
-    def _multi_branch_merge_critria(self, n, target_type):
-        flag = False
-        if n.type == target_type:
+    def _multi_branch_merge_critria(self, n, candidate_target_type):
+        candidate = []
+        if n.type in candidate_target_type:
+            target_type = n.type
             consumers = InsertQuantizeOp.in_tensor_consumers(n, n.inputs[0])
             if len(consumers) > 1:
-                flag = True
                 for consumer in consumers:
                     if consumer.type != target_type:
-                        flag = False
-                        break
+                        continue
                     if not consumer.outputs[0].is_qinfo_equal(n.outputs[0]):
-                        flag = False
-                        break
-                if flag:
-                    return flag, consumers
-        return flag, []
+                        continue
+                    candidate.append(consumer)
+                if len(candidate) > 1:
+                    return True, candidate
+        return False, []
 
     def _multi_branch_merge(self, merged_nodes, reserved_n):
         for mn in merged_nodes:
             children = mn.children
             for cn in children:
-                idx = cn.remove_input(mn.outputs[0])
-                cn.add_input(reserved_n.outputs[0], idx)
+                for t in list(cn.inputs):
+                    # an op's inputs may have reduplicate edges that come from the same tensor, e.g. LSTM.inputs[1] and LSTM.inputs[2] may come from the same constant initial value
+                    if t == mn.outputs[0]:
+                        idx = cn.remove_input(t)
+                        cn.add_input(reserved_n.outputs[0], idx)
         for mn in merged_nodes:
             self.g.remove_node(mn)
 
-    def merge_multi_branch(self, target_type):
+    def merge_multi_branch(self, candidate_target_type: list):
         for n in self.g.nodes:
-            matched, merged_node = self._multi_branch_merge_critria(n, target_type)
+            matched, merged_node = self._multi_branch_merge_critria(n, candidate_target_type)
             if matched and len(merged_node):
                 merged_node.remove(n)
                 self._multi_branch_merge(merged_node, n)
@@ -96,15 +99,28 @@ class InsertQuantizeOp(BaseQDQOp):
         super().__init__(graph, config)
 
     def __call__(self):
-        # qinvariant tensors with scale=1.0, zp=0 are safe to pass through
+        # even edge_tensor.qinvariant, also need quantize.
+        # e.g. a constant node with float dtype int values will be treated as qinvariant, if without quantize node,
+        # cast_dtype_for_lib will failed, jira CP-24327
+        # in these cases quantize will be swith to cast operator in graph.quantize() later
         _conditions = [
             lambda node, parent_node, edge_tensor:
-            (parent_node.get_param('unquantifiable', optional=True, default_value=False) and not edge_tensor.qinvariant
+            (parent_node.get_param('unquantifiable', optional=True, default_value=False)
              and node.get_param('unquantifiable', optional=True, default_value=False) == False)
         ]
 
         for cond_func in _conditions:
             self.inserted_ops += self.g.insert_dummy_node_ahead(OpType.Quantize, cond_func, )
+
+        def set_cast_dtypes_for_fp16_fp8(node, config):
+            if node.type not in OP_ONLY_CHANGE_SHAPE:
+                if node.attrs['quant_type'] != 'disable' and \
+                   QuantType.is_float(node.attrs['quant_type']) and \
+                   not config.cast_dtypes_for_lib.get(node):
+                    config.cast_dtypes_for_lib.add_layer_name_field(node.name, "true")
+                return
+            for child_node in node.children:
+                set_cast_dtypes_for_fp16_fp8(child_node, config)
 
         for n in self.inserted_ops:
             inpt = n.inputs[0]
@@ -112,9 +128,9 @@ class InsertQuantizeOp(BaseQDQOp):
                 OPT_ERROR(f"the input({inpt.name}) of {n} doesn't quantize in InsertQuantizeOp.")
             n.params['unquantifiable'] = True
             n.params['round_mode'] = "ROUND_TO_EVEN"
-
-        #  merge multi-quantize with same tensors
-        self.merge_multi_branch(OpType.Quantize)
+            # Currently, if this node and its parent node are fpx/fp16 quantization, the cast_dtypes_for_lib of the corresponding node will be automatically set to true.
+            for child_node in n.children:
+                set_cast_dtypes_for_fp16_fp8(child_node, self.config)
 
 
 class InsertDeQuantizeOp(BaseQDQOp):
@@ -122,10 +138,12 @@ class InsertDeQuantizeOp(BaseQDQOp):
         super().__init__(graph, config)
 
     def __call__(self):
+        # even edge_tensor.qinvariant, also need dequantize.
+        # e.g. a tensor with quantized dtype=int8, but consumed by a unquantifiable reshape with ir_dtype=int32
+        # in these cases dequantize will be swith to cast operator in graph.quantize() later
         _conditions = [
             lambda node, parent_node, edge_tensor: (
                 not parent_node.get_param('unquantifiable', optional=True, default_value=True) and
-                not edge_tensor.qinvariant and
                 node.get_param('unquantifiable', optional=True, default_value=False) == True)
         ]
 
@@ -136,8 +154,50 @@ class InsertDeQuantizeOp(BaseQDQOp):
             n.params['unquantifiable'] = True
             n.attrs['trigger_float_op'] = n.children[0].attrs['trigger_float_op']
 
-        #  merge multi-dequantize with same tensors
-        self.merge_multi_branch(OpType.DeQuantize)
+
+class InsertFakeOp(BaseQDQOp):
+    def __init__(self, graph, config=None):
+        super().__init__(graph, config)
+        self.inserted_ops_dict = {}
+
+    def __call__(self):
+        # When cast_dtype_for_lib is set to True, since lib currently does not support cast op for fp8<->int8;
+        # it is currently implemented by dequantize(fp8->fp16)+quantize(fp16->int8)
+        def is_fp8_int(node, parent_node):
+            if (node.attrs['quant_type'] == 'disable' or not QuantType.is_float(node.attrs['quant_type'])) and \
+                    (parent_node.attrs['quant_type'] != 'disable' and QuantType.is_float(parent_node.attrs['quant_type'])):
+                return True
+
+            if (parent_node.attrs['quant_type'] == 'disable' or not QuantType.is_float(parent_node.attrs['quant_type'])) and \
+                    (node.attrs['quant_type'] != 'disable' and QuantType.is_float(node.attrs['quant_type'])):
+                return True
+
+            return False
+
+        def set_cast_dtypes_for_fp8_int(node, config):
+            if node.type not in OP_ONLY_CHANGE_SHAPE:
+                if not config.cast_dtypes_for_lib.get(node):
+                    config.cast_dtypes_for_lib.add_layer_name_field(node.name, "true")
+                return
+            for child_node in node.children:
+                set_cast_dtypes_for_fp8_int(child_node, config)
+
+        _conditions = [
+            lambda node, parent_node, edge_tensor: (
+                not parent_node.get_param('unquantifiable', optional=True, default_value=True) and
+                not node.get_param('unquantifiable', optional=True, default_value=True) and
+                not edge_tensor.qinvariant and
+                is_fp8_int(node, parent_node))
+        ]
+
+        for idx, cond_func in enumerate(_conditions):
+            self.inserted_ops_dict[idx] = self.g.insert_dummy_node_ahead(OpType.NoOp, cond_func)
+        for n in self.inserted_ops_dict[0]:
+            n.params['unquantifiable'] = True
+            n.attrs['trigger_float_op'] = "float16"
+            # Currently, if this node and its parent node are fpx/int8 quantization, the cast_dtypes_for_lib of the corresponding node will be automatically set to true.
+            for child_node in n.children:
+                set_cast_dtypes_for_fp8_int(child_node, self.config)
 
 
 class InsertPadOp(BaseInsertOp):
@@ -191,18 +251,17 @@ class InsertCastOp(BaseInsertOp):
 
         self.op_need_cast_dtypes_for_lib = set()
         if isinstance(self.cast_dtypes_for_lib, bool):
-            self.op_need_cast_dtypes_for_lib = set([n.type for n in self.g.nodes]
+            self.op_need_cast_dtypes_for_lib = set([n for n in self.g.nodes]
                                                    ) if self.cast_dtypes_for_lib else set()
         else:
             for n in self.g.nodes:
                 if self.cast_dtypes_for_lib.get(n):
-                    self.op_need_cast_dtypes_for_lib.add(n.type)
+                    self.op_need_cast_dtypes_for_lib.add(n)
 
         if len(self.op_need_cast_dtypes_for_lib) > 0:
-            OPT_INFO(f"These OPs will automatically cast dtypes to adapt to lib's dtypes' spec "
-                     f"(may cause model accuracy loss due to corresponding spec's restriction): "
-                     f"{str(self.op_need_cast_dtypes_for_lib)}")
-            self.op_need_cast_dtypes_for_lib.discard(OpType.Cast)
+            for n in self.g.nodes:
+                if n.type == OpType.Cast:
+                    self.op_need_cast_dtypes_for_lib.discard(n)
         graph.op_need_cast_dtypes_for_lib = self.op_need_cast_dtypes_for_lib
 
     def whether_an_inserted_op(self, node, target_type=OpType.Cast):
@@ -218,7 +277,7 @@ class InsertCastOp(BaseInsertOp):
         return dummy_op
 
     def _whether_need_adapt_input_dtype(self, node):
-        if node.type not in self.op_need_cast_dtypes_for_lib:
+        if node not in self.op_need_cast_dtypes_for_lib:
             return False
         inputs_dtype = [t.dtype for t in node.inputs]
         outputs_dtype = [t.dtype for t in node.outputs]
@@ -240,11 +299,10 @@ class InsertCastOp(BaseInsertOp):
         _conditions = [
             # insert cast op for lib's dtypes spec
             lambda node, parent_node, edge_tensor:
-            (node.type in self.op_need_cast_dtypes_for_lib)
+            (node in self.op_need_cast_dtypes_for_lib)
             and (not self.whether_an_inserted_op(parent_node))
             and self._whether_need_adapt_input_dtype(node)
-            and (not node.get_param('unquantifiable', optional=True, default_value=False) or
-                 (node.get_param('unquantifiable', optional=True, default_value=False) and not is_float(edge_tensor.ir_dtype))),
+            and (not node.get_param('unquantifiable', optional=True, default_value=False)),
 
             # insert cast op for OPs like lstm, gru which ask for specific inputs be quantized with symmetric mode
             lambda node, parent_node, edge_tensor:
@@ -258,14 +316,34 @@ class InsertCastOp(BaseInsertOp):
         # acc_priority or fps_priority
 
         def mix_quantization_condition(n):
-            return n.parents[0].attrs['q_bits_activation'] != n.children[0].attrs['q_bits_activation']
+            parent_quant_type = n.parents[0].attrs.get('quant_type')
+            child_quant_type = n.children[0].attrs.get('quant_type')
+            if parent_quant_type == 'disable' and child_quant_type == 'disable':
+                return n.parents[0].attrs['q_bits_activation'] != n.children[0].attrs['q_bits_activation']
+            elif parent_quant_type != 'disable' and child_quant_type != 'disable':
+                return parent_quant_type != child_quant_type
+            elif parent_quant_type == 'disable' and child_quant_type != 'disable':
+                return QuantType.is_float(child_quant_type) or n.parents[0].attrs['q_bits_activation'] != n.children[0].attrs['q_bits_activation']
+            else:
+                return QuantType.is_float(parent_quant_type) or n.parents[0].attrs['q_bits_activation'] != n.children[0].attrs['q_bits_activation']
+
+        def get_output_dtype(n, edge_tensor):
+            if n.attrs.get('quant_type') != 'disable' and QuantType.is_float(n.attrs.get('quant_type')):
+                out_dtype = QuantType.activation_type(n.attrs.get('quant_type'))
+            else:
+                out_dtype = bits2dtype(n.attrs['q_bits_activation'], is_signed(edge_tensor.dtype))
+            return out_dtype
 
         output_dtype = []
         cast_child_node = node.children[0]
 
         for output in cast_child_node.outputs:
             if mix_quantization_condition(node) and not output.qinvariant:
-                output_dtype.append(bits2dtype(cast_child_node.attrs['q_bits_activation'], is_signed(output.dtype)))
+                output_dtype.append(get_output_dtype(cast_child_node, output))
+                # if is_float(str2dtype(cast_child_node.attrs['q_type_activation'])):
+                #     output_dtype.append(str2dtype(cast_child_node.attrs['q_type_activation']))
+                # else:
+                #     output_dtype.append(bits2dtype(cast_child_node.attrs['q_bits_activation'], is_signed(output.dtype)))
             else:
                 output_dtype.append(output.dtype)
 
@@ -277,9 +355,12 @@ class InsertCastOp(BaseInsertOp):
             if len(spec.in_dtypes) != len(cast_child_node.inputs):
                 continue
             spec_output_type = spec.out_dtypes
-            spec_has_float = any([is_float(dt) for dt in spec.out_dtypes + spec.in_dtypes])
-            cur_has_float = any([is_float(t.dtype) for t in cast_child_node.inputs + cast_child_node.outputs])
-            if spec_has_float ^ cur_has_float:
+            spec_unquantized = any([not is_quant_dtype(dt) for dt in spec.out_dtypes + spec.in_dtypes])
+            cur_unquantized = any([not is_quant_dtype(t.dtype)
+                                  for t in cast_child_node.inputs + cast_child_node.outputs])
+            # if spec_unquantized ^ cur_unquantized:
+            # when cast_type_for_lib meets unquantized node, will be delayed to qgraph.quantize() for insert cast nodes
+            if cur_unquantized or spec_unquantized:
                 continue
             if output_dtype == spec_output_type:
                 candidates.append([spec.in_dtypes, 0.0])
@@ -296,8 +377,9 @@ class InsertCastOp(BaseInsertOp):
             score = [0.0, 0.0, 0.0, 0, 0]
             for j, in_dtype in enumerate(candidate[0]):
                 if mix_quantization_condition(node) and not cast_child_node.inputs[j].qinvariant:
-                    dt = bits2dtype(cast_child_node.attrs['q_bits_activation'],
-                                    is_signed(cast_child_node.inputs[j].dtype))
+                    # dt = bits2dtype(cast_child_node.attrs['q_bits_activation'],
+                    #                 is_signed(cast_child_node.inputs[j].dtype))
+                    dt = get_output_dtype(cast_child_node, cast_child_node.inputs[j])
                 else:
                     dt = cast_child_node.inputs[j].dtype
                     for cp in cast_child_node.parents:
@@ -349,6 +431,7 @@ class InsertCastOp(BaseInsertOp):
                         inserted_op = self.insert_cast_at_edge(n, parent_node, inp, OpType.Cast)
                         inserted_ops.append(inserted_op)
                         break
+
             for cast_n in inserted_ops:
                 cast_totype_list = self.set_cast_totype(cast_n)
                 if len(cast_totype_list):
@@ -357,6 +440,8 @@ class InsertCastOp(BaseInsertOp):
                             inp_id = n.inputs.index(parent.outputs[0])
                             parent.params['to_dtype'] = cast_totype_list[inp_id]
                             parent.outputs[0].dtype = cast_totype_list[inp_id]
+                            parent.outputs[0].qbits = dtype2bits(parent.outputs[0].dtype)
+                            parent.outputs[0].qmin, parent.outputs[0].qmax = dtype2range(parent.outputs[0].dtype)
                             if parent.params['to_dtype'] != parent.inputs[0].dtype:
                                 need_update_quantization = True
                                 OPT_WARN(f"'{parent.parents[0]}', cast its output '{parent.inputs[0].name}' "
@@ -370,7 +455,7 @@ class InsertCastOp(BaseInsertOp):
             set this params in here
             """
             for cast_n in inserted_ops:
-                cast_n.params['unquantifiable'] = any([is_float(dt)
+                cast_n.params['unquantifiable'] = any([is_float(dt) and dtype2bits(dt) >= 16
                                                       for dt in [cast_n.inputs[0].dtype, cast_n.params['to_dtype']]])
                 if cast_n.params['unquantifiable']:
                     cast_n.outputs[0].ir_dtype = cast_n.params['to_dtype']
@@ -383,7 +468,9 @@ class InsertCastOp(BaseInsertOp):
                 while(q.qsize()):
                     dn = q.get()
                     qn = dn.clone()
-                    qn.params['unquantifiable'] = False
+                    if qn.type not in [OpType.If, OpType.Loop]:
+                        # control operator has subgraph, which is not suitable for quantization
+                        qn.params['unquantifiable'] = False
                     qn.quantize()
                     for k, t in dn.constants.items():
                         if k in qn.constants.keys():

@@ -71,8 +71,8 @@ class OptForward(object):
     def get_input_output_tensors(self):
         ''' this is use to get the graph input and output tensors after graph forward.'''
         g = self.optimizer.g
-        input_tensors = [i.betensor.cpu().numpy().astype(dtype2nptype(i.dtype)) for i in g.input_tensors]
-        output_tensors = [o.betensor.cpu().numpy().astype(dtype2nptype(o.dtype)) for o in g.output_tensors]
+        input_tensors = [i.to_numpy().astype(dtype2nptype(i.dtype)) for i in g.input_tensors]
+        output_tensors = [o.to_numpy().astype(dtype2nptype(o.dtype)) for o in g.output_tensors]
         return input_tensors, output_tensors
 
     def forward(self, data, transfer_to_float=False, keep_tensors=False, fit_dtype=True, dump_dir=None, tensor_type="np"):
@@ -104,9 +104,12 @@ class OptForward(object):
                         o_data = o_data.cpu().numpy()
                 else:
                     # keep the ir_dtype
-                    o_data = o.betensor.to(dtype2torch_type(o.ir_dtype))
-                    if tensor_type == 'np':
-                        o_data = o_data.cpu().numpy()
+                    o_data = o.to_numpy().astype(dtype2nptype(o.ir_dtype))
+                    if tensor_type != 'np':
+                        o_data = torch.tensor(o_data, dtype=dtype2torch_type(o.ir_dtype), device=o.betensor.device)
+                    # o_data = o.betensor.to(dtype2torch_type(o.ir_dtype))
+                    # if tensor_type == 'np':
+                    #     o_data = o_data.cpu().numpy()
                 if len(o.ir_shape) <= 1:
                     o_data = o_data.reshape(o.ir_shape)
                 output_data.append(o_data)
@@ -115,7 +118,7 @@ class OptForward(object):
                     for out in n.outputs:
                         path = (n.attrs['layer_id'] + '_[' + n.name + ']_' +
                                 out.name).replace('/', '_').replace(':', '_') + '.bin'
-                        out.betensor.cpu().numpy().astype(dtype2nptype(out.dtype)).tofile(os.path.join(dump_dir, path))
+                        out.tofile(os.path.join(dump_dir, path))
         return output_data
 
     def init_exe_debugger(self):
@@ -194,7 +197,7 @@ class OptForward(object):
                 o_data = linear_dequantize(o.betensor, o.broadcast_scale, o.broadcast_zerop).cpu().numpy()
             else:
                 # keep the ir_dtype
-                o_data = o.betensor.cpu().numpy().astype(dtype2nptype(o.ir_dtype))
+                o_data = o.to_numpy().astype(dtype2nptype(o.ir_dtype))
             if len(o.ir_shape) <= 1:
                 o_data = o_data.reshape(o.ir_shape)
             result.append(o_data)

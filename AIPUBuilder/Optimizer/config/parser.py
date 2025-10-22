@@ -257,11 +257,22 @@ def cfg_parser(cfg, metric, dataset):
     return ret
 
 
+def show_version():
+    from AIPUBuilder.Optimizer.version import __OPT_VERSION__ as opt_version
+    try:
+        from AIPUBuilder.Optimizer.qat.src import __OPT_QAT_VERSION__ as qat_version
+    except:
+        qat_version = 'unknow'
+    return f"Optimizer ptq version={opt_version}, and its qat version={qat_version}"
+
+
 @opt_workflow_register
 def arg_parser(metric_dict, dataset_dict):
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--cfg', type=str, required=False,
                         help='the config file.\n')
+    parser.add_argument('-v', '--version', action='version', version=show_version(),
+                        help='the version of Optimizer tool.')
     parser.add_argument("-p", "--plugin", action='store_true',
                         help='show the dataset, metric and op plugins in Optimizer.\n')
     parser.add_argument("-f", "--field", action='store_true',

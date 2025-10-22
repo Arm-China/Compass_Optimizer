@@ -103,10 +103,11 @@ def cumulate(self, *args):
         outp = torch.flip(outp, dims=[1])
     outp = torch.reshape(outp, pre_in_shape).permute(post_transpose_dim)
 
-    if not self.quantized:
-        outp = forward_with_clip(outp, self.outputs[0].dtype, 'TRUNCATION')
     self.outputs[0].betensor = outp
-    return outp
+    if not self.quantized:
+        self.outputs[0].betensor = forward_with_clip(self.outputs[0], self.outputs[0].dtype, 'TRUNCATION')
+
+    return self.outputs[0].betensor
 
 
 @quant_register(OpType.Cumulate)
@@ -189,10 +190,10 @@ def cumulate_quantize(self, *args):
 
         do_scale_type = Dtype.UINT16
         self.constants["scale"] = PyTensor(
-            self.name+"/scale", do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
+            self.name+"/scale", do_scale, dtype=do_scale_type)
         self.constants["scale"].dtype = do_scale_type
         self.constants["shift"] = PyTensor(
-            self.name+"/shift", do_shift.cpu().numpy().astype(dtype2nptype(Dtype.INT32)))
+            self.name+"/shift", do_shift, dtype=Dtype.INT32)
         self.constants["shift"].dtype = Dtype.INT32
 
     else:

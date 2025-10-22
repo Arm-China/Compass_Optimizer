@@ -26,7 +26,7 @@ def round_quantize(self, *args):
     lut = linear_dequantize(torch.linspace(inp.qmin, inp.qmax, steps=lsteps, device=dev), inp.scale, inp.zerop)
     lut = torch.round(lut)
     lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/round_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+    self.constants["lut"] = PyTensor(self.name+"/round_lut", lut, dtype=out.dtype)
     out.qinvariant = False
 
 

@@ -376,7 +376,7 @@ def quantize_region(self, *args):
 
     # step 3: quantize anchor to get quantized_anchor
     f_anchors = torch.tensor(self.get_param('anchors'), device=dev)
-    anchors_tensor = PyTensor(self.name+'_anchors', f_anchors.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+    anchors_tensor = PyTensor(self.name+'_anchors', f_anchors, dtype=Dtype.FP32)
     anchors_tensor.__setattr__('max', f_anchors.max().item())
     anchors_tensor.__setattr__('min', f_anchors.min().item())
     # anchor_quant_qbits = _quantize_params['default_coord_qbits']
@@ -440,23 +440,23 @@ def quantize_region(self, *args):
 
     # 4.4 update weight constant data
     _lut_nptype_dict = {
-        'anchor': dtype2nptype(_quantize_params['anchor_dtype'][2]),
-        'score': dtype2nptype(_quantize_params['score_softmax_dtype'][2]),
-        'conf': dtype2nptype(_quantize_params['conf_sigmoid_dtype'][2]),
-        'xy': dtype2nptype(_quantize_params['bbox_xy_sigmoid_dtype'][2]),
-        'wh': dtype2nptype(_quantize_params['bbox_wh_exp_dtype'][2]),
+        'anchor': _quantize_params['anchor_dtype'][2],
+        'score': _quantize_params['score_softmax_dtype'][2],
+        'conf': _quantize_params['conf_sigmoid_dtype'][2],
+        'xy': _quantize_params['bbox_xy_sigmoid_dtype'][2],
+        'wh': _quantize_params['bbox_wh_exp_dtype'][2],
     }
 
     self.constants['qanchors_lut'] = PyTensor(
-        self.name+'/anchor_lut', q_anchors.cpu().numpy().astype(_lut_nptype_dict['anchor']))
+        self.name+'/anchor_lut', q_anchors, dtype=_lut_nptype_dict['anchor'])
     self.constants['score_softmax_lut'] = PyTensor(
-        self.name+'/score_softmax_lut', score_softmax_lut.cpu().numpy().astype(_lut_nptype_dict['score']))
+        self.name+'/score_softmax_lut', score_softmax_lut, dtype=_lut_nptype_dict['score'])
     self.constants['conf_sigmoid_lut'] = PyTensor(
-        self.name+'/conf_sigmoid_lut', conf_sigmoid_lut.cpu().numpy().astype(_lut_nptype_dict['conf']))
+        self.name+'/conf_sigmoid_lut', conf_sigmoid_lut, dtype=_lut_nptype_dict['conf'])
     self.constants['xy_sigmoid_lut'] = PyTensor(
-        self.name+'/xy_sigmoid_lut', xy_sigmoid_lut.cpu().numpy().astype(_lut_nptype_dict['xy']))
+        self.name+'/xy_sigmoid_lut', xy_sigmoid_lut, dtype=_lut_nptype_dict['xy'])
     self.constants['wh_exp_lut'] = PyTensor(
-        self.name+'/wh_exp_lut', wh_exp_lut.cpu().numpy().astype(_lut_nptype_dict['wh']))
+        self.name+'/wh_exp_lut', wh_exp_lut, dtype=_lut_nptype_dict['wh'])
 
     # step5. update the outputs tensor quantize parameters
 

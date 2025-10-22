@@ -139,6 +139,82 @@ def cast_to_NodeParamValue_string(v):
             return sv + ']'
 
 
+def convert_aipu_node_to_opt_node(cn):
+    from AIPUBuilder.Optimizer.framework.qgraph import QuantizeGraph
+    from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
+    from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
+    from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype, OpTypeValue
+    from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
+    from AIPUBuilder.Optimizer.utils import dtype2range, is_torch_tensor_with_multi_data
+
+    dt_dict = {dt.name: dt for dt in Dtype}
+    pn = PyNode(cn.name, OpTypeValue(str(cn.type)))
+    pn.attrs['layer_id'] = str(cn.attrs.get("layer_id", 0))
+    is_quantized = False
+    for k, v in cn.params.items():
+        # when scale_type is a list,like scale_type=[uint16, uint16 uint16] in eltwise, and actuallly
+        # scale_type[0] is a _C.Dtype, when str(scale_type), it is
+        # '[<Dtype.UINT16: 4>, <Dtype.UINT16: 4>, <Dtype.UINT16: 4>]'
+        # and cast_from_NodeParamValue_string() cannot parse these.
+        vv = str(v) if not isinstance(v, (list, tuple)) else str([str(ve) for ve in v])
+        pn.params[k] = cast_from_NodeParamValue_string(str(vv))
+    for k, v in cn.constants.items():
+        pv = PyTensor(v.name, v.data())
+        pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
+        pv.ir_dtype = pv.dtype
+        pv.ir_shape = TensorShape(tuple(v.shape))
+        pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
+        pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
+        pn.constants[k] = pv
+        is_quantized = v.quantization.quantized or is_quantized
+        if v.quantization.quantized:
+            pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
+            pv.qbits = v.quantization.bits
+            pv.qinvariant = v.quantization.qinvariant
+        if 'range' in v._attrs:
+            pv.ir_range = v._attrs['range']
+    for v in cn.inputs:
+        pv = PyTensor(v.name, v.data())
+        pv.is_act = True
+        pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
+        pv.ir_dtype = pv.dtype
+        pv.ir_shape = tuple(v.shape)
+        pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
+        pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
+        is_quantized = v.quantization.quantized or is_quantized
+        pv.key_axis = None if not is_torch_tensor_with_multi_data(pv.scale) else -1  # qtlib not key_axis, so tmp -1
+        if is_quantized:
+            pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
+            pv.qbits = v.quantization.bits
+            pv.qinvariant = v.quantization.qinvariant
+            pv.min = v.quantization.mins
+            pv.max = v.quantization.maxs
+        if 'range' in v._attrs:
+            pv.ir_range = v._attrs['range']
+        pn.add_input(pv)
+    for v in cn.outputs:
+        pv = PyTensor(v.name, v.data())
+        pv.is_act = True
+        pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
+        pv.ir_dtype = pv.dtype
+        pv.ir_shape = tuple(v.shape)
+        pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
+        pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
+        is_quantized = v.quantization.quantized or is_quantized
+        pv.key_axis = None if not is_torch_tensor_with_multi_data(pv.scale) else -1  # qtlib not key_axis, so tmp -1
+        if is_quantized:
+            pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
+            pv.qbits = v.quantization.bits
+            pv.qinvariant = v.quantization.qinvariant
+            pv.min = v.quantization.mins
+            pv.max = v.quantization.maxs
+        if 'range' in v._attrs:
+            pv.ir_range = v._attrs['range']
+        pn.add_output(pv)
+    pn.quantized = is_quantized
+    return pn
+
+
 def convert_aipu_graph_to_opt_graph(cg):
     from AIPUBuilder.Optimizer.framework.qgraph import QuantizeGraph
     from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
@@ -244,7 +320,7 @@ def convert_opt_graph_to_aipu_graph(g):
     from AIPUBuilder._C._core import OpType as _OpType
     from AIPUBuilder._C._core import Dtype as _Dtype
     from AIPUBuilder._C._core import _py_register_optype
-    from AIPUBuilder.Optimizer.utils.dtype_utils import dtype2nptype
+    from AIPUBuilder.Optimizer.utils.dtype_utils import dtype2torch_type
 
     def _convert_scale_zp_to_list(data):
         import torch
@@ -298,7 +374,8 @@ def convert_opt_graph_to_aipu_graph(g):
             except Exception as e:
                 cn.params[k] = cast_to_NodeParamValue_string(v)
         for k, v in n.constants.items():
-            ct = _Tensor(v.name, v.betensor.cpu().contiguous().numpy().astype(dtype2nptype(v.dtype)))
+            ct = _Tensor(v.name, v.to_numpy())
+            ct.betensor = ct.betensor.to(dtype2torch_type(v.dtype))
             ct._set_dtype(dt_dict[v.dtype.name])
             ct.quantization.scales = _convert_scale_zp_to_list(v.scale)
             ct.quantization.offsets = [int(z) for z in _convert_scale_zp_to_list(v.zerop)]
@@ -332,7 +409,7 @@ def convert_opt_graph_to_aipu_graph(g):
 
 def parse_graph_from_ir(ir_txt, ir_bin):
     from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN
-    msg = 'Invalid IR, please use "aipuchecker" to diagnose it for more specific information.'
+    message = 'Invalid IR, please use "aipuchecker" to diagnose it for more specific information.'
 
     def section2str(section):
         ss = ''
@@ -341,16 +418,312 @@ def parse_graph_from_ir(ir_txt, ir_bin):
         ss += '\n'
         return ss
 
-    gstr = ''
+    g_str = ''
     with open(ir_txt, 'r') as ftxt:
-        gstr += ftxt.read()
+        g_str += ftxt.read()
 
-    g = None
+    rg = None
+    ir_bin_map = {}
+    # ir_bin_map : {ir_bin: {mmap : mmap, occupiance: 1}}
+
+    #############################################################
+    def parse_graph_from_ir_gstr(gstr, ir_bin):
+        from AIPUBuilder.Optimizer.framework.qgraph import QuantizeGraph
+        from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
+        from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import register_optype, OpType
+        from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN, OPT_DEBUG, tqdm
+        from AIPUBuilder.Optimizer.utils.dtype_utils import to_list, dtype2bits, is_float
+        import mmap
+        import os
+        import subprocess
+        import sys
+        import re
+        import numpy as np
+        import torch
+        silent_load = 'AIPUOPT_SILENTLOADING' in os.environ
+        g = QuantizeGraph()
+        if not silent_load:
+            OPT_INFO('Suggest using "aipuchecker" to validate the IR firstly if you are not sure about its validity.')
+        # get sections of key value pairs
+        msg = 'Invalid IR, please use "aipuchecker" to diagnose it for more specific information.'
+        try:
+            sections = []
+            sdict = {}
+            gstr += '\n\n'
+            for line in gstr.splitlines():
+                if len(line.strip()) > 0:
+                    k, v = line.strip().split('=')
+                    sdict[k.strip()] = v.strip()
+                else:
+                    if len(sdict.keys()) > 0:
+                        sections.append(sdict)
+                    sdict = {}
+            if len(sections) > 1:
+                abstract = sections[0]
+                g.name = abstract['model_name']
+                if 'compat_quantized_model' in abstract:
+                    g.compat_quantized_model = True if abstract['compat_quantized_model'].lower() == 'true' else False
+                inp_tensor_names = cast_from_NodeParamValue_string(
+                    abstract['input_tensors']) if 'input_tensors' in abstract.keys() else []
+                inp_tensor_names = [str(s) for s in inp_tensor_names]
+                out_tensor_names = cast_from_NodeParamValue_string(
+                    abstract['output_tensors']) if 'output_tensors' in abstract.keys() else []
+                out_tensor_names = [str(s) for s in out_tensor_names]
+                emap = {}
+                total_size = 0
+                for i in range(1, len(sections)):
+                    sec = sections[i]
+                    top_names = cast_from_NodeParamValue_string(sec['layer_top'])
+                    top_names = [str(s) for s in top_names]
+                    top_shape = cast_from_NodeParamValue_string(sec['layer_top_shape'])
+                    top_dtype = cast_from_NodeParamValue_string(sec['layer_top_type'])
+                    top_range = cast_from_NodeParamValue_string(
+                        sec['layer_top_range']) if 'layer_top_range' in sec.keys() else []
+                    top_scale = cast_from_NodeParamValue_string(
+                        sec['layer_top_scale']) if 'layer_top_scale' in sec.keys() else []
+                    top_zerop = cast_from_NodeParamValue_string(
+                        sec['layer_top_zp']) if 'layer_top_zp' in sec.keys() else []
+                    for j in range(len(top_names)):
+                        t = PyTensor(top_names[j])
+                        t.ir_shape = TensorShape(top_shape[j])
+                        total_size += np.prod(t.ir_shape)
+                        t.ir_dtype = top_dtype[j]
+                        t.dtype = t.ir_dtype
+                        if len(top_range) > j:
+                            t.ir_range = top_range[j]
+                        if len(top_scale) > j:
+                            t.scale = torch.tensor(top_scale[j], device=t.betensor.device) if isinstance(
+                                top_scale[j], list) else top_scale[j]
+                        if len(top_zerop) > j:
+                            t.zerop = torch.tensor(top_zerop[j], device=t.betensor.device) if isinstance(
+                                top_zerop[j], list) else top_zerop[j]
+                        emap[t.name] = t
+                if not silent_load:
+                    OPT_INFO(f"{g.name} IR loaded.")
+                tensor_list = []
+                need_reordering = False
+                old_offset = -1
+                pbar = tqdm(range(1, len(sections)), desc="Building graph", file=sys.stdout, disable=silent_load)
+                for i in pbar:
+                    sec = sections[i]
+                    n = PyNode(sec['layer_name'], register_optype(sec['layer_type']))
+                    n.attrs['layer_id'] = sec['layer_id']
+                    bottom_names = cast_from_NodeParamValue_string(sec['layer_bottom'])
+                    bottom_names = [str(s) for s in bottom_names]
+                    for j in range(len(bottom_names)):
+                        t = emap[bottom_names[j]]
+                        n.add_input(t)
+                    top_names = cast_from_NodeParamValue_string(sec['layer_top'])
+                    top_names = [str(s) for s in top_names]
+                    for j in range(len(top_names)):
+                        t = emap[top_names[j]]
+                        n.add_output(t)
+                    non_param_keys = ['layer_id', 'layer_name', 'layer_type', 'layer_bottom', 'layer_bottom_shape',
+                                      'layer_bottom_type', 'layer_top', 'layer_top_shape', 'layer_top_type', 'layer_top_range']
+                    #   'layer_top_scale', 'layer_top_zp']
+                    for key in sec.keys():
+                        if re.match(r'.+_offset', key):
+                            ckey = key[:-7]
+                            ckey_offset = key
+                            ckey_type = ckey + '_type'
+                            ckey_size = ckey + '_size'
+                            ckey_shape = ckey + '_shape'
+                            ckey_range = ckey + '_range'
+                            if ckey_type in sec.keys() and ckey_size in sec.keys() and ckey_shape in sec.keys():
+                                bytes_offsets = to_list(cast_from_NodeParamValue_string(sec[ckey_offset]))
+                                bytes_sizes = to_list(cast_from_NodeParamValue_string(sec[ckey_size]))
+                                ir_shapes = to_list(cast_from_NodeParamValue_string(sec[ckey_shape]))
+                                ir_dtypes = to_list(cast_from_NodeParamValue_string(sec[ckey_type]))
+                                ir_ranges = to_list(cast_from_NodeParamValue_string(
+                                    sec[ckey_range])) if ckey_range in sec.keys() else []
+                                ele_len = len(bytes_offsets)
+                                for idx, bytes_offset in enumerate(bytes_offsets):
+                                    if bytes_offset is None:
+                                        OPT_WARN(f"when parser IR, {key}'s offset is None.")
+                                        continue
+                                    bytes_size = bytes_sizes[idx]
+                                    if bytes_size == 0:
+                                        OPT_WARN(f"when parser IR, {key}'s size == 0.")
+                                        continue
+                                    if not need_reordering and bytes_offset < old_offset:
+                                        need_reordering = True
+                                    old_offset = bytes_offset
+                                    bytes_size = bytes_sizes[idx]
+                                    t = PyTensor(f'{n.name}{ckey}')
+                                    shape = ir_shapes[idx] if isinstance(ir_shapes, list) and len(
+                                        ir_shapes) and isinstance(ir_shapes[idx], list) else ir_shapes
+                                    t.ir_shape = TensorShape(shape)
+                                    total_size += np.prod(t.ir_shape)
+                                    t.ir_dtype = ir_dtypes[idx]
+                                    t.dtype = t.ir_dtype
+                                    if len(ir_ranges) > idx:
+                                        t.ir_range = ir_ranges[idx]
+                                    tensor_list.append([bytes_offset, bytes_size, t])
+                                    # if layer_top_range/layer_top_scale/layer_top_zp are constants, we will put these data
+                                    # to node.constants, and if multi outputs, use layer_top_range_0/layer_top_range_1
+                                    # as constants key.
+                                    ckey_name = f"{ckey}_{idx}" if ele_len > 1 else ckey
+                                    n.constants[ckey_name] = t
+                                    non_param_keys.extend([ckey_offset, ckey_type, ckey_size, ckey_shape, ckey_range])
+                    for key in sec.keys():
+                        if key not in non_param_keys:
+                            n.params[key] = cast_from_NodeParamValue_string(sec[key])
+                    g.nodes.append(n)
+                pbar.refresh()
+
+                # make sure graph can always be constructed even ir_bin is not existed
+                if not os.path.exists(ir_bin):
+                    OPT_WARN(f'ir_bin file "{ir_bin}" not existed when parse_graph_from_ir')
+                else:
+                    if not silent_load:
+                        OPT_INFO("Begin to load weights.")
+                    if ir_bin not in ir_bin_map:
+                        f = open(ir_bin, "rb")
+                        fsize = os.path.getsize(ir_bin)
+                        if fsize == 0 or len(tensor_list) == 0:
+                            bstr = b''
+                        else:
+                            bstr = mmap.mmap(f.fileno(), fsize, access=mmap.ACCESS_READ)
+                            page_size = mmap.PAGESIZE
+                            page_count = fsize // page_size
+                            cores = torch.multiprocessing.cpu_count()  # Use multicores to preload
+                            pages_per_core = page_count // cores
+                            jobs = [[core * pages_per_core, (core+1) * pages_per_core] for core in range(cores)]
+
+                            def load_page(ranges):
+                                for i in range(ranges[0], ranges[1]):
+                                    _ = bstr[i * 4096]
+                            ps = []
+                            for core in range(cores):
+                                p = torch.multiprocessing.Process(target=load_page, args=(jobs[core],))
+                                p.start()
+                                ps.append(p)
+                            for p in ps:
+                                p.join()
+                        ir_bin_map[ir_bin] = (f, bstr, fsize)
+                    else:
+                        f, bstr, fsize = ir_bin_map[ir_bin]
+                    if not silent_load:
+                        OPT_INFO("Weights loaded.")
+                    global_offset = 0
+                    forward_threshold = 2**29  # 512MB
+                    if need_reordering:
+                        tensor_list = sorted(tensor_list, key=lambda x: x[0])
+                    pbar = tqdm(tensor_list, desc="Deserializing bin", file=sys.stdout, disable=silent_load)
+                    for bytes_offset, bytes_size, t in pbar:
+                        bytes_offset -= global_offset
+                        tmp = PyTensor("bintmp")
+                        tmp.frombuffer(bstr[bytes_offset: bytes_offset + bytes_size], dtype=t.dtype)
+                        if bytes_offset + bytes_size > forward_threshold:
+                            OPT_DEBUG(
+                                "Due to reading large bin file, OPT will split the large file to accelerate loading process.", log_once=True)
+                            global_offset += bytes_offset + bytes_size
+                            global_offset -= global_offset % mmap.ALLOCATIONGRANULARITY
+                            f.close()
+                            f = open(ir_bin, "rb")
+                            if global_offset < fsize:
+                                bstr = mmap.mmap(f.fileno(), fsize - global_offset,
+                                                 access=mmap.ACCESS_READ, offset=int(global_offset))
+                        t.betensor = tmp.betensor.reshape(t.ir_shape)
+                        if dtype2bits(t.dtype) <= 8 and is_float(t.dtype):
+                            # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
+                            t.betensor = t.betensor.bfloat16()
+                    pbar.refresh()
+
+                inp_tensors = []
+                for tname in inp_tensor_names:
+                    inp_tensors.append(emap[tname])
+                g.input_tensors = tuple(inp_tensors)
+                out_tensors = []
+                for tname in out_tensor_names:
+                    out_tensors.append(emap[tname])
+                g.output_tensors = tuple(out_tensors)
+                g.init_networkx()
+                if len(g.input_tensors) < 1:
+                    OPT_WARN(
+                        "There is no 'input_tensors' field in IR, will guess them according to the graph structure, which may get unexpected input_tensors.")
+                    OPT_WARN("The guessed input_tensors:")
+                    inp_tensors = []
+                    for n in g.nodes:
+                        if OpType.Input == n.type:
+                            for t in n.outputs:
+                                inp_tensors.append(t)
+                                OPT_WARN(t.name)
+                    g.input_tensors = tuple(inp_tensors)
+                if len(g.output_tensors) < 1:
+                    OPT_WARN(
+                        "There is no 'output_tensors' field in IR, will guess them according to the graph structure, which may get unexpected output_tensors.")
+                    OPT_WARN("The guessed output_tensors:")
+                    out_tensors = []
+                    for n in g.nodes:
+                        if len(n.children) < 1:
+                            for t in n.outputs:
+                                out_tensors.append(t)
+                                OPT_WARN(t.name)
+                    g.output_tensors = tuple(out_tensors)
+
+                # compatiable the constant scale zp in constant data
+                opt_mini_keys = {'scale': 'scale', 'zp': 'zerop'}
+                mini_keys = ['scale', 'zp', 'range']
+                for n in g.nodes:
+                    need_pop_key = []
+                    o_len = len(n.outputs)
+                    for oi, ot in enumerate(n.outputs):
+                        for mini_key in mini_keys:
+                            c_full_key = f"layer_top_{mini_key}_{oi}" if o_len > 1 else f"layer_top_{mini_key}"
+                            p_full_key = f"layer_top_{mini_key}"
+                            if c_full_key in n.constants:
+                                if mini_key != 'range':  # layer_top_scale/layer_top_zp in constants
+                                    ot.__setattr__(opt_mini_keys[mini_key], n.constants[c_full_key].betensor)
+                                    ot.key_axis = n.params['activation_quantization_axis'][oi]
+                                else:
+                                    ot.ir_range = n.constants[c_full_key].betensor.cpu().tolist()
+                                need_pop_key.append(c_full_key)
+                            elif p_full_key in n.params:
+                                if mini_key != 'range':
+                                    ot.__setattr__(opt_mini_keys[mini_key], n.params[p_full_key][oi])
+                                    need_pop_key.append(p_full_key)
+                    for k, t in n.constants.items():
+                        for mini_key in mini_keys:
+                            if k.endswith(f"_{mini_key}") and k not in need_pop_key:
+                                main_key = k[0:-len(f"_{mini_key}")]
+                                if main_key not in n.constants or mini_key == 'range':
+                                    if mini_key != 'range':
+                                        n.params[k] = t.to_numpy().flatten().tolist()
+                                    elif mini_key not in n.params:
+                                        n.params[k] = t.betensor.cpu().tolist()
+                                else:
+                                    if n.constants[k].betensor.numel() > 0:
+                                        n.constants[main_key].__setattr__(
+                                            opt_mini_keys[mini_key], n.constants[k].betensor)
+                                need_pop_key.append(k)
+                            elif f"{k}_{mini_key}" in n.params and mini_key != 'range':
+                                n.constants[k].__setattr__(opt_mini_keys[mini_key], n.params[f"{k}_{mini_key}"])
+                                # delete the weights_scale/zerop, otherwise qat model in optforward will reread these params
+                                need_pop_key.append(f"{k}_{mini_key}")
+                    for pop_key in set(need_pop_key):
+                        if pop_key in n.constants:
+                            n.constants.pop(pop_key)
+                        elif pop_key in n.params:
+                            n.params.pop(pop_key)
+                        else:
+                            OPT_WARN(f"pop_key = {pop_key} is not in {n} constants or params.")
+                if not silent_load:
+                    OPT_INFO('Successfully parsed IR with python API.')
+        except Exception as e:
+            OPT_WARN(f'Failed to parse IR with the exception msg: {e}')
+            OPT_WARN(msg)
+            raise e
+
+        return g
+
+    #############################################################
     try:
         sections = []
         sdict = {}
-        gstr += '\n\n'
-        for line in gstr.splitlines():
+        g_str += '\n\n'
+        for line in g_str.splitlines():
             if len(line.strip()) > 0:
                 k, v = line.strip().split('=')
                 sdict[k.strip()] = v.strip()
@@ -376,308 +749,28 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                 mgstr += section2str(sec)
                 i += 1
         # assume root graph and all subgraphs are all DAG
-        g = parse_graph_from_ir_gstr(mgstr, ir_bin)
+        rg = parse_graph_from_ir_gstr(mgstr, ir_bin)
         for sg_name, sgstr in sgstr_map.items():
-            g.subgraph_map[sg_name] = parse_graph_from_ir_gstr(sgstr, ir_bin)
-            g.subgraph_map[sg_name].root_graph = g
+            rg.subgraph_map[sg_name] = parse_graph_from_ir_gstr(sgstr, ir_bin)
+            rg.subgraph_map[sg_name].root_graph = rg
+        for loaded_bin in list(ir_bin_map.keys()):
+            f, bstr, fsize = ir_bin_map[loaded_bin]
+            f.close()
+            del bstr
+            del ir_bin_map[loaded_bin]
     except Exception as e:
         OPT_WARN(f'Failed to parse IR with the exception msg: {e}')
-        OPT_WARN(msg)
+        OPT_WARN(message)
         raise e
 
-    return g
-
-
-def parse_graph_from_ir_gstr(gstr, ir_bin):
-    from AIPUBuilder.Optimizer.framework.qgraph import QuantizeGraph
-    from AIPUBuilder.Optimizer.framework.pycore.pynode import PyNode
-    from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
-    from AIPUBuilder.Optimizer.framework.pycore.pytype import register_optype, OpType
-    from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_WARN, OPT_DEBUG, tqdm
-    from AIPUBuilder.Optimizer.utils.dtype_utils import str2dtype, dtype2nptype, to_list
-    import mmap
-    import os
-    import subprocess
-    import sys
-    import re
-    import numpy as np
-    import torch
-    silent_load = 'AIPUOPT_SILENTLOADING' in os.environ
-    g = QuantizeGraph()
-    if not silent_load:
-        OPT_INFO('Suggest using "aipuchecker" to validate the IR firstly if you are not sure about its validity.')
-    # get sections of key value pairs
-    msg = 'Invalid IR, please use "aipuchecker" to diagnose it for more specific information.'
-    try:
-        sections = []
-        sdict = {}
-        gstr += '\n\n'
-        for line in gstr.splitlines():
-            if len(line.strip()) > 0:
-                k, v = line.strip().split('=')
-                sdict[k.strip()] = v.strip()
-            else:
-                if len(sdict.keys()) > 0:
-                    sections.append(sdict)
-                sdict = {}
-        if len(sections) > 1:
-            abstract = sections[0]
-            g.name = abstract['model_name']
-            if 'compat_quantized_model' in abstract:
-                g.compat_quantized_model = True if abstract['compat_quantized_model'].lower() == 'true' else False
-            inp_tensor_names = cast_from_NodeParamValue_string(
-                abstract['input_tensors']) if 'input_tensors' in abstract.keys() else []
-            inp_tensor_names = [str(s) for s in inp_tensor_names]
-            out_tensor_names = cast_from_NodeParamValue_string(
-                abstract['output_tensors']) if 'output_tensors' in abstract.keys() else []
-            out_tensor_names = [str(s) for s in out_tensor_names]
-            emap = {}
-            total_size = 0
-            for i in range(1, len(sections)):
-                sec = sections[i]
-                top_names = cast_from_NodeParamValue_string(sec['layer_top'])
-                top_names = [str(s) for s in top_names]
-                top_shape = cast_from_NodeParamValue_string(sec['layer_top_shape'])
-                top_dtype = cast_from_NodeParamValue_string(sec['layer_top_type'])
-                top_range = cast_from_NodeParamValue_string(
-                    sec['layer_top_range']) if 'layer_top_range' in sec.keys() else []
-                top_scale = cast_from_NodeParamValue_string(
-                    sec['layer_top_scale']) if 'layer_top_scale' in sec.keys() else []
-                top_zerop = cast_from_NodeParamValue_string(
-                    sec['layer_top_zp']) if 'layer_top_zp' in sec.keys() else []
-                for j in range(len(top_names)):
-                    t = PyTensor(top_names[j])
-                    t.ir_shape = TensorShape(top_shape[j])
-                    total_size += np.prod(t.ir_shape)
-                    t.ir_dtype = top_dtype[j]
-                    t.dtype = t.ir_dtype
-                    if len(top_range) > j:
-                        t.ir_range = top_range[j]
-                    if len(top_scale) > j:
-                        t.scale = torch.tensor(top_scale[j], device=t.betensor.device) if isinstance(
-                            top_scale[j], list) else top_scale[j]
-                    if len(top_zerop) > j:
-                        t.zerop = torch.tensor(top_zerop[j], device=t.betensor.device) if isinstance(
-                            top_zerop[j], list) else top_zerop[j]
-                    emap[t.name] = t
-            if not silent_load:
-                OPT_INFO("IR loaded.")
-            tensor_list = []
-            need_reordering = False
-            old_offset = -1
-            pbar = tqdm(range(1, len(sections)), desc="Building graph", file=sys.stdout, disable=silent_load)
-            for i in pbar:
-                sec = sections[i]
-                n = PyNode(sec['layer_name'], register_optype(sec['layer_type']))
-                n.attrs['layer_id'] = sec['layer_id']
-                bottom_names = cast_from_NodeParamValue_string(sec['layer_bottom'])
-                bottom_names = [str(s) for s in bottom_names]
-                for j in range(len(bottom_names)):
-                    t = emap[bottom_names[j]]
-                    n.add_input(t)
-                top_names = cast_from_NodeParamValue_string(sec['layer_top'])
-                top_names = [str(s) for s in top_names]
-                for j in range(len(top_names)):
-                    t = emap[top_names[j]]
-                    n.add_output(t)
-                non_param_keys = ['layer_id', 'layer_name', 'layer_type', 'layer_bottom', 'layer_bottom_shape',
-                                  'layer_bottom_type', 'layer_top', 'layer_top_shape', 'layer_top_type', 'layer_top_range']
-                #   'layer_top_scale', 'layer_top_zp']
-                for key in sec.keys():
-                    if re.match(r'.+_offset', key):
-                        ckey = key[:-7]
-                        ckey_offset = key
-                        ckey_type = ckey + '_type'
-                        ckey_size = ckey + '_size'
-                        ckey_shape = ckey + '_shape'
-                        ckey_range = ckey + '_range'
-                        if ckey_type in sec.keys() and ckey_size in sec.keys() and ckey_shape in sec.keys():
-                            bytes_offsets = to_list(cast_from_NodeParamValue_string(sec[ckey_offset]))
-                            bytes_sizes = to_list(cast_from_NodeParamValue_string(sec[ckey_size]))
-                            ir_shapes = to_list(cast_from_NodeParamValue_string(sec[ckey_shape]))
-                            ir_dtypes = to_list(cast_from_NodeParamValue_string(sec[ckey_type]))
-                            ir_ranges = to_list(cast_from_NodeParamValue_string(
-                                sec[ckey_range])) if ckey_range in sec.keys() else []
-                            ele_len = len(bytes_offsets)
-                            for idx, bytes_offset in enumerate(bytes_offsets):
-                                if bytes_offset is None:
-                                    OPT_WARN(f"when parser IR, {key}'s offset is None.")
-                                    continue
-                                bytes_size = bytes_sizes[idx]
-                                if bytes_size == 0:
-                                    OPT_WARN(f"when parser IR, {key}'s size == 0.")
-                                    continue
-                                if not need_reordering and bytes_offset < old_offset:
-                                    need_reordering = True
-                                old_offset = bytes_offset
-                                bytes_size = bytes_sizes[idx]
-                                t = PyTensor(f'{n.name}{ckey}')
-                                shape = ir_shapes[idx] if isinstance(ir_shapes, list) and len(
-                                    ir_shapes) and isinstance(ir_shapes[idx], list) else ir_shapes
-                                t.ir_shape = TensorShape(shape)
-                                total_size += np.prod(t.ir_shape)
-                                t.ir_dtype = ir_dtypes[idx]
-                                t.dtype = t.ir_dtype
-                                if len(ir_ranges) > idx:
-                                    t.ir_range = ir_ranges[idx]
-                                tensor_list.append([bytes_offset, bytes_size, t, dtype2nptype(t.ir_dtype)])
-                                # if layer_top_range/layer_top_scale/layer_top_zp are constants, we will put these data
-                                # to node.constants, and if multi outputs, use layer_top_range_0/layer_top_range_1
-                                # as constants key.
-                                ckey_name = f"{ckey}_{idx}" if ele_len > 1 else ckey
-                                n.constants[ckey_name] = t
-                                non_param_keys.extend([ckey_offset, ckey_type, ckey_size, ckey_shape, ckey_range])
-                for key in sec.keys():
-                    if key not in non_param_keys:
-                        n.params[key] = cast_from_NodeParamValue_string(sec[key])
-                g.nodes.append(n)
-            pbar.refresh()
-
-            # make sure graph can always be constructed even ir_bin is not existed
-            if not os.path.exists(ir_bin):
-                OPT_WARN(f'ir_bin file "{ir_bin}" not existed when parse_graph_from_ir')
-            else:
-                if not silent_load:
-                    OPT_INFO("Begin to load weights.")
-                f = open(ir_bin, "rb")
-                fsize = os.path.getsize(ir_bin)
-                if fsize == 0 or len(tensor_list) == 0:
-                    bstr = b''
-                else:
-                    bstr = mmap.mmap(f.fileno(), fsize, access=mmap.ACCESS_READ)
-                    page_size = mmap.PAGESIZE
-                    page_count = fsize // page_size
-                    cores = torch.multiprocessing.cpu_count()  # Use multicores to preload
-                    pages_per_core = page_count // cores
-                    jobs = [[core * pages_per_core, (core+1) * pages_per_core] for core in range(cores)]
-
-                    def load_page(ranges):
-                        for i in range(ranges[0], ranges[1]):
-                            _ = bstr[i * 4096]
-                    ps = []
-                    for core in range(cores):
-                        p = torch.multiprocessing.Process(target=load_page, args=(jobs[core],))
-                        p.start()
-                        ps.append(p)
-                    for p in ps:
-                        p.join()
-                if not silent_load:
-                    OPT_INFO("Weights loaded.")
-                global_offset = 0
-                forward_threshold = 2**29  # 512MB
-                if need_reordering:
-                    tensor_list = sorted(tensor_list, key=lambda x: x[0])
-                pbar = tqdm(tensor_list, desc="Deserializing bin", file=sys.stdout, disable=silent_load)
-                for bytes_offset, bytes_size, t, dtype in pbar:
-                    bytes_offset -= global_offset
-                    arr = np.frombuffer(bstr[bytes_offset: bytes_offset + bytes_size], dtype=dtype)
-                    if bytes_offset + bytes_size > forward_threshold:
-                        OPT_DEBUG(
-                            "Due to reading large bin file, OPT will split the large file to accelerate loading process.", log_once=True)
-                        global_offset += bytes_offset + bytes_size
-                        global_offset -= global_offset % mmap.ALLOCATIONGRANULARITY
-                        f.close()
-                        f = open(ir_bin, "rb")
-                        if global_offset < fsize:
-                            bstr = mmap.mmap(f.fileno(), fsize - global_offset,
-                                             access=mmap.ACCESS_READ, offset=int(global_offset))
-                    tmp = PyTensor("bintmp", arr)
-                    t.betensor = tmp.betensor.reshape(t.ir_shape)
-                pbar.refresh()
-                f.close()
-
-            inp_tensors = []
-            for tname in inp_tensor_names:
-                inp_tensors.append(emap[tname])
-            g.input_tensors = tuple(inp_tensors)
-            out_tensors = []
-            for tname in out_tensor_names:
-                out_tensors.append(emap[tname])
-            g.output_tensors = tuple(out_tensors)
-            g.init_networkx()
-            if len(g.input_tensors) < 1:
-                OPT_WARN(
-                    "There is no 'input_tensors' field in IR, will guess them according to the graph structure, which may get unexpected input_tensors.")
-                OPT_WARN("The guessed input_tensors:")
-                inp_tensors = []
-                for n in g.nodes:
-                    if OpType.Input == n.type:
-                        for t in n.outputs:
-                            inp_tensors.append(t)
-                            OPT_WARN(t.name)
-                g.input_tensors = tuple(inp_tensors)
-            if len(g.output_tensors) < 1:
-                OPT_WARN(
-                    "There is no 'output_tensors' field in IR, will guess them according to the graph structure, which may get unexpected output_tensors.")
-                OPT_WARN("The guessed output_tensors:")
-                out_tensors = []
-                for n in g.nodes:
-                    if len(n.children) < 1:
-                        for t in n.outputs:
-                            out_tensors.append(t)
-                            OPT_WARN(t.name)
-                g.output_tensors = tuple(out_tensors)
-
-            # compatiable the constant scale zp in constant data
-            opt_mini_keys = {'scale': 'scale', 'zp': 'zerop'}
-            mini_keys = ['scale', 'zp', 'range']
-            for n in g.nodes:
-                need_pop_key = []
-                o_len = len(n.outputs)
-                for oi, ot in enumerate(n.outputs):
-                    for mini_key in mini_keys:
-                        c_full_key = f"layer_top_{mini_key}_{oi}" if o_len > 1 else f"layer_top_{mini_key}"
-                        p_full_key = f"layer_top_{mini_key}"
-                        if c_full_key in n.constants:
-                            if mini_key != 'range':  # layer_top_scale/layer_top_zp in constants
-                                ot.__setattr__(opt_mini_keys[mini_key], n.constants[c_full_key].betensor)
-                                ot.key_axis = n.params['activation_quantization_axis'][oi]
-                            else:
-                                ot.ir_range = n.constants[c_full_key].betensor.cpu().tolist()
-                            need_pop_key.append(c_full_key)
-                        elif p_full_key in n.params:
-                            if mini_key != 'range':
-                                ot.__setattr__(opt_mini_keys[mini_key], n.params[p_full_key][oi])
-                                need_pop_key.append(p_full_key)
-                for k, t in n.constants.items():
-                    for mini_key in mini_keys:
-                        if k.endswith(f"_{mini_key}") and k not in need_pop_key:
-                            main_key = k[0:-len(f"_{mini_key}")]
-                            if main_key not in n.constants or mini_key == 'range':
-                                if mini_key != 'range':
-                                    n.params[k] = t.betensor.cpu().numpy().flatten().tolist()
-                                elif mini_key not in n.params:
-                                    n.params[k] = t.betensor.cpu().tolist()
-                            else:
-                                if n.constants[k].betensor.numel() > 0:
-                                    n.constants[main_key].__setattr__(opt_mini_keys[mini_key], n.constants[k].betensor)
-                            need_pop_key.append(k)
-                        elif f"{k}_{mini_key}" in n.params and mini_key != 'range':
-                            n.constants[k].__setattr__(opt_mini_keys[mini_key], n.params[f"{k}_{mini_key}"])
-                            # delete the weights_scale/zerop, otherwise qat model in optforward will reread these params
-                            need_pop_key.append(f"{k}_{mini_key}")
-                for pop_key in set(need_pop_key):
-                    if pop_key in n.constants:
-                        n.constants.pop(pop_key)
-                    elif pop_key in n.params:
-                        n.params.pop(pop_key)
-                    else:
-                        OPT_WARN(f"pop_key = {pop_key} is not in {n} constants or params.")
-            if not silent_load:
-                OPT_INFO('Successfully parsed IR with python API.')
-    except Exception as e:
-        OPT_WARN(f'Failed to parse IR with the exception msg: {e}')
-        OPT_WARN(msg)
-        raise e
-
-    return g
+    return rg
 
 
 def serialize_graph_to_ir(g, ir_txt, ir_bin):
-    from AIPUBuilder.Optimizer.utils import (dtype2str, dtype2range, dtype2bytes, dtype2nptype, make_path, torch_type2dtype,
+    from AIPUBuilder.Optimizer.utils import (dtype2str, dtype2range, dtype2bytes, make_path, torch_type2dtype,
                                              is_torch_tensor_with_multi_data, is_torch_tensor, is_float)
     from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_ERROR, OPT_WARN, tqdm
-    from AIPUBuilder.Optimizer.framework import PyTensor
+    from AIPUBuilder.Optimizer.framework import PyTensor, Dtype
     import mmap
     import threading
     import sys
@@ -780,13 +873,14 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
                 scale_offset.append(offset)
                 scale_shape.append(list(scale.shape))
                 scale_size.append(scale_mem_size)
-                tensor_list.append([offset, scale_mem_size, scale.cpu().contiguous().numpy()])
+                tensor_list.append([offset, scale_mem_size, PyTensor(
+                    'tmp_scale', scale, dtype=torch_type2dtype(scale.dtype))])
                 offset += scale_mem_size
                 zp_type.append(dtype2str(torch_type2dtype(zp.dtype)))
                 zp_offset.append(offset)
                 zp_shape.append(list(zp.shape))
                 zp_size.append(zp_mem_size)
-                tensor_list.append([offset, zp_mem_size, zp.cpu().contiguous().numpy()])
+                tensor_list.append([offset, zp_mem_size, PyTensor('temp_zp', zp, dtype=torch_type2dtype(zp.dtype))])
                 offset += zp_mem_size
             gstr += f"layer_top_scale_type=[{','.join(scale_type)}]\n"
             gstr += f"layer_top_scale_offset={scale_offset}\n"
@@ -835,11 +929,9 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
             gstr += f'{c}_offset={offset}\n'
             gstr += f'{c}_size={c_size}\n'
             gstr += f'{c}_shape={cast_to_NodeParamValue_string(list(ct.betensor.shape))}\n'
-            # bstr += ct.betensor.cpu().contiguous().numpy().astype(dtype2nptype(ct.dtype)).tobytes()
-            ct_value = ct.betensor.cpu().contiguous().numpy()
-            ct_value = ct_value.astype(dtype2nptype(ct.dtype))
+            ct_value = ct
             min_v, max_v = dtype2range(ct.dtype)
-            if not is_float(ct.dtype) and (ct_value.max() > max_v or ct_value.min() < min_v):
+            if not is_float(ct.dtype) and (ct_value.betensor.max() > max_v or ct_value.betensor.min() < min_v):
                 OPT_WARN(
                     f"Node: {n}, constant: {c} : data overflow, with min/max {ct_value.min()}/{ct_value.max()} under dtype {ct.dtype}")
             tensor_list.append([offset, c_size, ct_value])
@@ -863,7 +955,6 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
     total_size = tensor_list[-1][0] + tensor_list[-1][1]
     mem_seg = 2 ** 29 - (2**29 % mmap.ALLOCATIONGRANULARITY)  # 512MB
     for offset, size, ct in tensor_list:
-        size = ct.size * ct.itemsize
         size = size - (size % mmap.ALLOCATIONGRANULARITY)
         mem_seg = max(mem_seg, size)
 

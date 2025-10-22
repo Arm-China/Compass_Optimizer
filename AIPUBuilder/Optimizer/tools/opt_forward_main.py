@@ -220,16 +220,16 @@ def main():
                 if n.type != OpType.Input:
                     lid = n.attrs['layer_id']
                     for ot_id, ot in enumerate(n.outputs):
-                        data = ot.betensor.cpu().numpy().astype(dtype2nptype(ot.dtype))
-                        file_name = f"{lid}_opt_{ot_id}_{ot.name.replace('/', '_')}.bin"
+                        data = ot.to_numpy().astype(dtype2nptype(ot.dtype))
+                        file_name = f"{lid}_opt_{ot_id}_{n.type.name}_{ot.name.replace('/', '_')}.bin"
                         file_name = check_filename(file_name)
                         pn = os.path.join(options.dump_output_dir, file_name)
                         data.tofile(pn)
         else:
             for ot_id, ot in enumerate(g.output_tensors):
                 lid = ot.pnode.attrs['layer_id']
-                data = ot.betensor.cpu().numpy().astype(dtype2nptype(ot.dtype))
-                file_name = f"{lid}_opt_{ot_id}_{ot.name.replace('/', '_')}.bin"
+                data = ot.to_numpy().astype(dtype2nptype(ot.dtype))
+                file_name = f"{lid}_opt_{ot_id}_{ot.pnode.type.name}_{ot.name.replace('/', '_')}.bin"
                 file_name = check_filename(file_name)
                 pn = os.path.join(options.dump_output_dir, file_name)
                 data.tofile(pn)

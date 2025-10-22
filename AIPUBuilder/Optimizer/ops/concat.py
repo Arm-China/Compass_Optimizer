@@ -61,6 +61,8 @@ def concat_quantize(self, *args):
     out.qinvariant = False
     qinv_s = []
     qin_bits = []
+    dtype = self.inputs[0].dtype
+    same_dtype = True
     for i, inp in enumerate(self.inputs):
         if is_signed(inp.dtype):
             sign_branches += 1
@@ -75,11 +77,16 @@ def concat_quantize(self, *args):
         scs.append(inp.scale)
         qinv_s.append(inp.qinvariant)
         qin_bits.append(inp.qbits)
+        same_dtype = (dtype == inp.dtype) and same_dtype
+        dtype = inp.dtype
         if inp.qinvariant:
             out.qinvariant = True
+        out.qinvariant = out.qinvariant and same_dtype
     if max(qinv_s) != min(qinv_s):
         OPT_WARN(f'{self}: some inputs is quantize invariant and other inputs is not, which may cause accuracy issue.',
                  workflow_name='quantize')
+    else:
+        out.qinvariant = self.inputs[0].qinvariant
 
     sign = sign_branches > 0  # is_signed(self.inputs[min_index].dtype)
     # out.min = min(weighted_min, 0.0)

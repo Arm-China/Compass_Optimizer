@@ -255,6 +255,8 @@ class MaskRcnnTorchmAPMetric(MaskRcnnCOCOmAPMetric):
         class_id = pred[3].cpu().numpy().astype(np.int32)  # [1,90]
         bbox = pred[5].cpu().numpy().astype(np.int32)
         score = pred[7].cpu().numpy()  # [1,100]
+        if pred[10].dim() == 4:
+            pred[10] = pred[10].unsqueeze(0)
         batch_mask = pred[10].cpu().numpy().transpose(0, 1, 3, 4, 2)  # [[1,100,91,28,28]]->[1,100,28,28,91]
         for b in range(batch_num):
             box_class_id = np.zeros([box_num]).astype(np.int32)

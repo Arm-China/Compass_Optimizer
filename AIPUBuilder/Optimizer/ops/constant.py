@@ -45,4 +45,5 @@ def constant_quantize(self, *args):
     w.qmin = out.qmin
     w.qmax = out.qmax
     w.qinvariant = out.qinvariant
-    w.betensor = linear_quantize_clip(w.betensor, out.broadcast_scale, out.broadcast_zerop, w.qmin, w.qmax)
+    w.betensor = linear_quantize_clip(w.betensor, out.broadcast_scale,
+                                      out.broadcast_zerop, w.qmin, w.qmax).reshape(w.ir_shape)

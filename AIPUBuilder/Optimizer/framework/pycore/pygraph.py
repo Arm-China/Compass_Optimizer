@@ -26,7 +26,7 @@ class PyGraph:
         self.input_tensors = ()
         self.output_tensors = ()
         self.ref_count_tensors = {}
-        self.op_need_cast_dtypes_for_lib = {}
+        self.op_need_cast_dtypes_for_lib = set()
         # store dict about {subgraph_name:PyGraph_instance} that will be used in control operators like Loop/If
         # should make sure root graph and every subgraph are all DAG
         self.subgraph_map = {}
@@ -112,7 +112,10 @@ class PyGraph:
             olist.append(emap[t.name])
         g.output_tensors = tuple(olist)
         g.init_networkx()
-        g.op_need_cast_dtypes_for_lib = self.op_need_cast_dtypes_for_lib
+        # g.op_need_cast_dtypes_for_lib = self.op_need_cast_dtypes_for_lib
+        for gn, n in zip(g.nodes, self.nodes):
+            if n in self.op_need_cast_dtypes_for_lib:
+                g.op_need_cast_dtypes_for_lib.add(gn)
         g.subgraph_map = {}
         for sname, sg in self.subgraph_map.items():
             g.subgraph_map[sname] = sg.clone()
@@ -264,27 +267,31 @@ class PyGraph:
         for k, n in enumerate(self.nodes):
             pre_idx_map[n] = k
         topological_nodes = []
+        self.ref_count_tensors = {}
         for i, g in enumerate(topological_generations(net)):
             for n in sorted(g, key=lambda xn: pre_idx_map[xn]):
                 n.attrs['tgid'] = i
                 n.graph = self
                 for ot in n.outputs:
                     ot.pnode = n
+                self.reset_edge_tensors_ref_count_for_node(n)
                 topological_nodes.append(n)
         self.nodes = topological_nodes
 
         self.net_ = net
         return self.net_
 
+    def reset_edge_tensors_ref_count_for_node(self, node):
+        for it in node.inputs:
+            if it.name not in self.ref_count_tensors.keys():
+                self.ref_count_tensors[it.name] = [1, it]
+            else:
+                self.ref_count_tensors[it.name][0] += 1
+
     def reset_edge_tensors_ref_count(self):
-        ref_count_tensors = {}
+        self.ref_count_tensors = {}
         for n in self.nodes:
-            for it in n.inputs:
-                if it.name not in ref_count_tensors.keys():
-                    ref_count_tensors[it.name] = [1, it]
-                else:
-                    ref_count_tensors[it.name][0] += 1
-        self.ref_count_tensors = ref_count_tensors
+            self.reset_edge_tensors_ref_count_for_node(n)
 
     def add_node(self, node):
         if node not in self.nodes:

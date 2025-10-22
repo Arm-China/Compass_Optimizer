@@ -1,25 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
-def align_shape_by_padding(x, y):
-    import torch
-    p_a = []
-    p_b = []
-    a = x
-    b = y
-    if len(x.shape) < len(y.shape):
-        a, b = y, x
-    for _ in range(len(a.shape) - len(b.shape)):
-        b = torch.unsqueeze(b, 0)
-    for i in range(len(a.shape)-1, -1, -1):
-        if a.shape[i] > b.shape[i]:
-            p_a.extend([0, 0])
-            p_b.extend([0, a.shape[i]-b.shape[i]])
-        else:
-            p_a.extend([0, b.shape[i]-a.shape[i]])
-            p_b.extend([0, 0])
-    return torch.nn.functional.pad(a, p_a), torch.nn.functional.pad(b, p_b)
-
 
 def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False):
     """
@@ -33,6 +14,7 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
     )
     from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor
     from AIPUBuilder.Optimizer.framework.pycore import OpType
+    from AIPUBuilder.Optimizer.utils import align_shape_by_padding
     from torch.nn import MSELoss as mseloss
 
     MSE = mseloss()
@@ -51,7 +33,7 @@ def check_nodes_similarity(float_graph, quant_graph, inputs, keep_tensors=False)
     for n, qn in zip(float_graph.nodes, quant_graph.nodes):
         n.forward()
         qn.forward()
-        if (n.type != qn.type and qn.type != OpType.NoOp) or n.name != qn.name:
+        if n.name != qn.name:
             OPT_ERROR(
                 f"check_nodes_similarity: failed to match layer, one is '{n.type} {n.name}' and another is '{qn.type} {qn.name}'. ")
         for float_t, t in zip(n.outputs, qn.outputs):

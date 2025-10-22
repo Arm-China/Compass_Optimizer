@@ -70,13 +70,11 @@ def softmax_quantize(self, *args):
         self.params["adjust_q"] = adjust_q
         if adjust_q >= 8:
             self.constants["log2_lut"] = PyTensor(self.name + "/log2_lut",
-                                                  torch.tensor(table_Log2_q15).cpu().numpy().astype(
-                                                      dtype2nptype(Dtype.INT16)))
+                                                  torch.tensor(table_Log2_q15), dtype=Dtype.INT16)
             self.constants["log2_lut"].dtype = Dtype.INT16
 
             self.constants["pow2_lut"] = PyTensor(self.name + "/pow2_lut",
-                                                  torch.tensor(table_pow2_q15).cpu().numpy().astype(
-                                                      dtype2nptype(Dtype.UINT16)))
+                                                  torch.tensor(table_pow2_q15), dtype=Dtype.UINT16)
             self.constants["pow2_lut"].dtype = Dtype.UINT16
         self.params["quantize_method"] = 'FAST_EXP'
     else:
@@ -95,7 +93,7 @@ def softmax_quantize(self, *args):
         lut = linear_dequantize(quant_range_linspace - (2 ** inp.qbits - 1), inp.scale, inp.zerop) + max_inp
         lut = torch.exp(lut).round().clamp(0, max_val)
         self.constants["lut"] = PyTensor(self.name + "/explut",
-                                         lut.cpu().numpy().astype(dtype2nptype(range2dtype(0, max_val.item())[1])))
+                                         lut, dtype=range2dtype(0, max_val.item())[1])
         do_scale_bits = out.qbits
         ss = get_scale_approximation_params(out.scale, do_scale_bits, force_shift_positive=self.force_shift_positive)
         do_scale, do_scale_type, do_shift, do_shift_type = ss
@@ -112,7 +110,7 @@ def softmax_quantize(self, *args):
             flut = 2 ** torch.linspace(0.0, 1.0, steps=2**lut_items_in_bits + 1, device=dev)
             flut = to_fp24(flut)
             self.constants["float_lut"] = PyTensor(
-                self.name + "/fp24_lut", flut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                self.name + "/fp24_lut", flut, dtype=Dtype.FP32)
 
 
 @approx_register(OpType.Softmax)
@@ -126,7 +124,7 @@ def softmax_approx(self, *args):
         dev = inp.betensor.device
         lut = 2 ** torch.linspace(0.0, 1.0, steps=2**lut_items_in_bits + 1, device=dev)
         lut = to_fp24(lut)
-        self.constants["lut"] = PyTensor(self.name + "/fp24_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        self.constants["lut"] = PyTensor(self.name + "/fp24_lut", lut, dtype=Dtype.FP32)
         self.params['is_perf_mode'] = True  # use fast approximate implementation of AIFF as much as possible
         self.params['lut_mode'] = 'EXP'
     else:
@@ -152,7 +150,7 @@ def softmax(self, *args):
             f_vdata = to_fp24((max_v - vx) * tmp)
 
             pow2_f_lut = self.constants["float_lut"].betensor.float()
-            yy = x3_aiff_exp_approximation(f_vdata, pow2_f_lut)
+            yy = x3_aiff_power_of_two_approximation(f_vdata, pow2_f_lut)
             y_sum = yy.sum(axis, keepdim=True)
             y_sum = to_fp24(y_sum)
 
@@ -227,10 +225,11 @@ def softmax(self, *args):
                 out.betensor = linear_requantize(y_div_sum, 1.0, 0, 0, out.qmin, out.qmax)
 
         else:
+            lut = self.constants["lut"].betensor
             # 31->30: Adaptation the lut.max=1 case in android and these case lib would overflow using base_bits=31
-            base_bits = 30 if lut.max() == 1 else 31
+            base_bits = 30 if lut.float().max() == 1 else 31
             if shape_value_in_axis < 8 and in_size % 128 == 0 and self.inputs[0].qbits <= 8:
-                scale_bits = torch.ceil(torch.log2(lut.max())).long()
+                scale_bits = torch.ceil(torch.log2(lut.float().max())).long()
                 enlarge_bits = base_bits - scale_bits
                 numerator = (y.long() << enlarge_bits) + (y_sum >> 1)
                 denominator = torch.maximum(y_sum, torch.ones_like(y_sum))

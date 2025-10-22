@@ -234,7 +234,7 @@ class mAPMetric(BasemAPMetric):
         pred_list = []
         targets_list = []
         for pd in pred:
-            pred_list.append(pd.cpu().numpy())
+            pred_list.append(PyTensor('tmp', pd).to_numpy())
         for b in range(batch):
             targets = {}
             for k, v in target.items():

@@ -149,9 +149,15 @@ class PyTensor:
         import torch
         import numpy as np
         from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
-        from AIPUBuilder.Optimizer.utils.dtype_utils import torch_type2dtype, str2dtype, torch_type2nptype
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, torch_type2dtype, str2dtype, torch_type2nptype, nptype2dtype
         th_dict = {
+            # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
             None:                   None,
+            Dtype.FP6_E2M3FN:       torch.float32,
+            Dtype.FP6_E3M2FN:       torch.float32,
+            Dtype.FP4_E2M1FN:       torch.float32,
+            Dtype.FP8_E5M2:         torch.float32,
+            Dtype.FP8_E4M3FN:       torch.float32,
             Dtype.FP16:             torch.float16,
             Dtype.BFP16:            torch.bfloat16,
             Dtype.FP32:             torch.float32,
@@ -160,9 +166,9 @@ class PyTensor:
             Dtype.INT8:             torch.int32,  # in case of overflow in quant forward's computation
             Dtype.UINT8:            torch.int32,  # in case of overflow in quant forward's computation
             Dtype.INT16:            torch.int32,  # in case of overflow in quant forward's computation
-            Dtype.UINT16:           torch.int32,  # no torch.uint16 and in case of overflow in quant forward's computation
+            Dtype.UINT16:           torch.int32,  # in case of overflow in quant forward's computation
             Dtype.INT32:            torch.int64,  # in case of overflow in quant forward's computation
-            Dtype.UINT32:           torch.int64,  # no torch.uint32 and in case of overflow in quant forward's computation
+            Dtype.UINT32:           torch.int64,  # in case of overflow in quant forward's computation
             Dtype.INT64:            torch.int64,
             Dtype.UINT64:           torch.long,  # no torch.uint64
             Dtype.ALIGNED_INT4:     torch.int32,  # in case of overflow in quant forward's computation
@@ -184,6 +190,12 @@ class PyTensor:
             self.dtype = dtype
         elif isinstance(shape_or_arr, np.ndarray):
             arr = shape_or_arr.astype(torch_type2nptype(th_dict[str2dtype(shape_or_arr.dtype.name)]))
+            if is_float(nptype2dtype(arr.dtype)):
+                if arr.dtype not in [np.float64, np.float32, np.float16]:
+                    arr = arr.astype(np.float32)
+            else:
+                if arr.dtype not in [np.int64, np.uint64, np.int32, np.uint32, np.int16, np.uint16, np.int8, np.uint8, np.bool_]:
+                    arr = arr.astype(np.int32)
             self.betensor = torch.tensor(arr, dtype=th_dict[dtype])
             self.dtype = str2dtype(shape_or_arr.dtype.name) if dtype is None else dtype
         else:
@@ -194,6 +206,95 @@ class PyTensor:
         self.block_size = None
         self.attrs = dict()
         self.detiled_betensor = None
+
+    def to_numpy(self):
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, torch_type2dtype
+        t = self.betensor.cpu().contiguous()
+        try:
+            t = t.numpy()
+        except:
+            if is_float(torch_type2dtype(t.dtype)):
+                t = t.float().numpy()
+            else:
+                t = t.int().numpy()
+        return t
+
+    def tobytes(self):
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
+        from AIPUBuilder.Optimizer.utils import dtype2nptype
+        import numpy as np
+        # those not supported by numpy
+        from ml_dtypes import bfloat16, float8_e4m3fn, float8_e5m2, float6_e3m2fn, float6_e2m3fn, float4_e2m1fn
+        t = self.to_numpy()
+        if self.dtype is not None:
+            if Dtype.BFP16 == self.dtype:
+                t = t.astype(bfloat16).view(np.uint16)
+            elif Dtype.FP8_E4M3FN == self.dtype:
+                t = t.astype(float8_e4m3fn).view(np.uint8)
+            elif Dtype.FP8_E5M2 == self.dtype:
+                t = t.astype(float8_e5m2).view(np.uint8)
+            elif Dtype.FP6_E3M2FN == self.dtype:
+                t = t.astype(float6_e3m2fn).view(np.uint8)
+            elif Dtype.FP6_E2M3FN == self.dtype:
+                t = t.astype(float6_e2m3fn).view(np.uint8)
+            elif Dtype.FP4_E2M1FN == self.dtype:
+                t = t.astype(float4_e2m1fn).view(np.uint8)
+            else:
+                t = t.astype(dtype2nptype(self.dtype))
+        return t.tobytes()
+
+    def frombuffer(self, buff: bytes, dtype: Dtype):
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
+        from AIPUBuilder.Optimizer.utils.dtype_utils import dtype2nptype, dtype2torch_type
+        import numpy as np
+        import torch
+        # those not supported by numpy
+        from ml_dtypes import bfloat16, float8_e4m3fn, float8_e5m2, float6_e3m2fn, float6_e2m3fn, float4_e2m1fn
+        self.dtype = dtype
+        t = self.betensor
+        dev = self.betensor.device
+        if Dtype.BFP16 == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint16).view(bfloat16)
+            t = t.astype(np.float32)
+        elif Dtype.FP8_E4M3FN == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint8).view(float8_e4m3fn)
+            t = t.astype(np.float32)
+        elif Dtype.FP8_E5M2 == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint8).view(float8_e5m2)
+            t = t.astype(np.float32)
+        elif Dtype.FP6_E3M2FN == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint8).view(float6_e3m2fn)
+            t = t.astype(np.float32)
+        elif Dtype.FP6_E2M3FN == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint8).view(float6_e2m3fn)
+            t = t.astype(np.float32)
+        elif Dtype.FP4_E2M1FN == self.dtype:
+            t = np.frombuffer(buff, dtype=np.uint8).view(float4_e2m1fn)
+            t = t.astype(np.float32)
+        else:
+            t = np.frombuffer(buff, dtype=dtype2nptype(self.dtype))
+        self.betensor = torch.from_numpy(t.copy()).to(dtype2torch_type(self.dtype)).to(dev)
+
+    def tofile(self, path: str):
+        from AIPUBuilder.Optimizer.logger import OPT_WARN
+        import os
+        buff = self.tobytes()
+        try:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            w_file = open(path, 'wb')
+            w_file.write(buff)
+        except PermissionError:
+            OPT_WARN(f'without permission to write file {path}')
+        except OSError as e:
+            OPT_WARN(f'Write error {e}')
+        finally:
+            if w_file is not None:
+                try:
+                    w_file.close()
+                except Exception as e:
+                    pass
 
     def __getattribute__(self, name):
         # Multi GPU wrapper
@@ -221,7 +322,7 @@ class PyTensor:
             return super().__setattr__(key, value.to(device_cluster[device]))
 
     def fit_dtype(self, dtype: Union[Dtype, None] = None):
-        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, dtype2range, dtype2torch_type, dtype2bits, dtype2bytes, torch_type2dtype
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, has_inf, dtype2range, dtype2torch_type, dtype2bits, dtype2bytes, torch_type2dtype, round_to_fp8, uint8_to_fp8
         from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
         from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
         if dtype is not None:
@@ -231,17 +332,26 @@ class PyTensor:
             # no restricts
             pass
         elif is_float(self.dtype):
-            if self.dtype in [Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
+            if self.dtype in [Dtype.FP8_E5M2, Dtype.FP8_E4M3FN, Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
                 if dtype2bytes(self.dtype) > self.betensor.itemsize:
                     self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
                 else:
-                    inf_mask = torch.isinf(self.betensor)
+                    inf_mask = torch.isinf(self.betensor) if has_inf(
+                        self.dtype) else torch.zeros_like(self.betensor, dtype=torch.bool)
                     if inf_mask.any():
                         OPT_WARN(
                             f'tensor "{self.name}" contains inf values in fit_dtype() function.')
                     fmin, fmax = dtype2range(self.dtype)
-                    self.betensor = torch.where(inf_mask, self.betensor.to(dtype2torch_type(self.dtype)),
-                                                torch.clamp(self.betensor, fmin, fmax).to(dtype2torch_type(self.dtype)))
+                    self.betensor = torch.where(inf_mask, self.betensor, torch.clamp(self.betensor, fmin, fmax))
+                    self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
+                    if dtype2bits(self.dtype) <= 8:
+                        # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
+                        self.betensor = self.betensor.bfloat16()
+            # elif self.dtype in [Dtype.FP8_E5M2, Dtype.FP8_E4M3FN]:
+            #     if torch.is_floating_point(self.betensor):
+            #         self.betensor = round_to_fp8(self.betensor, self.dtype, round_mode='ROUND_TO_EVEN')
+            #     else:
+            #         self.betensor = uint8_to_fp8(self.betensor.to(torch.uint8), self.dtype)
             else:
                 #self.betensor = to_fp24(self.betensor) if self.dtype == Dtype.FP24 else self.betensor
                 OPT_ERROR(f'unsupported dtype "{self.dtype}" when calling fit_dtype function on tensor "{self.name}".')
@@ -299,7 +409,12 @@ class PyTensor:
             else:
                 t.__setattr__(k, copy.deepcopy(v))
         for k, v in self.attrs.items():
-            t.attrs[k] = copy.deepcopy(v)
+            if isinstance(v, dict):
+                t.attrs[k] = {}
+                for vk, vv in v.items():
+                    t.attrs[k][vk] = vv
+            else:
+                t.attrs[k] = copy.deepcopy(v)
         return t
 
     def clone_qinfo(self, other):
@@ -324,7 +439,7 @@ class PyTensor:
         from AIPUBuilder.Optimizer.utils import OPT_INT_MAX, OPT_INT_MIN, OPT_EPSILON
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         tdevice = self.device
-        fbetensor = self.betensor.float()
+        fbetensor = self.betensor.float() if self.betensor.numel() > 0 else torch.zeros(self.ir_shape, device=tdevice).float()
         OPT_INT_MIN_t = torch_tensor(OPT_INT_MIN, device=tdevice)
         OPT_INT_MAX_t = torch_tensor(OPT_INT_MAX, device=tdevice)
 
@@ -387,7 +502,7 @@ class PyTensor:
             if key_axis_g > 1:
                 gn = key_axis_g
                 # TODO: if no divide exactly, should be padded the extrema value in min or max value
-                g = int(self.betensor.shape[key_axis] / gn)
+                g = int(fbetensor.shape[key_axis] / gn)
             torch_int_min = torch.tensor(OPT_INT_MIN, device=tdevice)
             torch_int_max = torch.tensor(OPT_INT_MAX, device=tdevice)
             _min_key_axis = fbetensor.permute(perm).reshape([channels, -1]).min(dim=-1).values
@@ -699,8 +814,8 @@ class PyTensor:
 
         data = self.betensor.clone()
         is_tile = False
-        if data.unique().numel() == 1:
-            data = data.unique().reshape([1] * len(data.shape))
+        if data.float().unique().numel() == 1:
+            data = data.float().unique().reshape([1] * len(data.shape))
             is_tile = True
         else:
             shape = data.shape

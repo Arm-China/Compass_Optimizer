@@ -221,8 +221,8 @@ def decodebox_ssd(self, *args):
         decode_boxes, stats_coords, stats_boxes = float_decode_box(bbox, anchor_box, config)
 
         if len(self.placeholders) == 0:
-            sc_t = PyTensor(self.name+'_stat_coords', stats_coords.cpu().numpy().astype(np.float32))
-            sb_t = PyTensor(self.name+'_stat_boxes', stats_boxes.cpu().numpy().astype(np.float32))
+            sc_t = PyTensor(self.name+'_stat_coords', stats_coords, dtype=Dtype.FP32)
+            sb_t = PyTensor(self.name+'_stat_boxes', stats_boxes, dtype=Dtype.FP32)
             sc_t.dtype = Dtype.FP32
             sb_t.dtype = Dtype.FP32
             self.placeholders.append(sc_t)
@@ -336,7 +336,7 @@ def quantize_decodebox(self, *args):
         xcenter = self.constants['xcenter'].betensor
         ycenter = self.constants['ycenter'].betensor
         anchor_box = torch.stack([ycenter, xcenter, ha, wa], dim=1)
-        anchor_Pytensor = PyTensor(self.name+"/anchor_box", anchor_box.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        anchor_Pytensor = PyTensor(self.name+"/anchor_box", anchor_box, dtype=Dtype.FP32)
         anchor_Pytensor.max = anchor_box.max().item()
         anchor_Pytensor.min = anchor_box.min().item()
         sign = is_signed(in_bbox.dtype)
@@ -390,7 +390,7 @@ def quantize_decodebox(self, *args):
 
     lut_name = ['ty_lut', 'tx_lut', 'th_lut', 'tw_lut']
     for name in lut_name:
-        self.constants[name] = PyTensor(self.name+name, eval(name).cpu().numpy().astype(dtype2nptype(lut_out_dtype)))
+        self.constants[name] = PyTensor(self.name+name, eval(name), dtype=lut_out_dtype)
 
     self.params['box_shift'] = box_shift
 

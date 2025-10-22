@@ -215,9 +215,9 @@ def detectionoutput(self, *args):
             placeholders_output.append(tensor_all)
 
         if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/coords", placeholders_output[0].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name+"/box", placeholders_output[1].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph2 = PyTensor(self.name + "/txty", placeholders_output[2].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph0 = PyTensor(self.name+"/coords", placeholders_output[0], dtype=Dtype.FP32)
+            ph1 = PyTensor(self.name+"/box", placeholders_output[1], dtype=Dtype.FP32)
+            ph2 = PyTensor(self.name + "/txty", placeholders_output[2], dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
             self.placeholders.append(ph2)
@@ -424,7 +424,7 @@ def detectionoutput_quantize(self, *args):
 
     for lut in lut_object_name.keys():
         name = lut_object_name[lut]
-        self.constants[name] = PyTensor(self.name+name, lut.cpu().numpy().astype(dtype2nptype(lut_out_dtype)))
+        self.constants[name] = PyTensor(self.name+name, lut, dtype=lut_out_dtype)
 
     score_q_min, score_q_max = bits2range(inp0.qbits, False)
     # self.params["box_shift_value"] = int(coord_shift)

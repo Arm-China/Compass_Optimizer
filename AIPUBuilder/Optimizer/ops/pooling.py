@@ -205,7 +205,7 @@ def pooling(self, *args):
         if not self.quantized:
             if len(self.placeholders) < 1:
                 ph0 = PyTensor(self.name + "/power2_outputs",
-                               psum_placeholder.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                               psum_placeholder, dtype=Dtype.FP32)
                 self.placeholders.append(ph0)
             self.placeholders[0].betensor = psum_placeholder
     else:
@@ -265,7 +265,7 @@ def pooling_quantize(self, *args):
             lut, out.scale, out.zerop, out.qmin, out.qmax)
 
         self.constants["sqrt_lut"] = PyTensor(
-            self.name + "/sqrt_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+            self.name + "/sqrt_lut", lut, dtype=out.dtype)
 
         self.params["shift_value"] = int(do_shift)
         self.params["shift_type"] = do_shift_type

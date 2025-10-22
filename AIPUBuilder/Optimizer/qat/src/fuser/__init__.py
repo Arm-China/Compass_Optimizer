@@ -11,6 +11,7 @@ from .gelu_fuser import GeLUFusion
 from .hardswish_fuser import HardswishFusion
 from .hardsigmoid_fuser import HardsigmoidFusion
 from .layernorm_fuser import LayerNormFusion
+from .matmul_bn_fuser import MatMulBatchNormFusion
 from .multiheadattention_fuser import MultiheadAttentionFusion
 from .mha_fuser import MHAFusion
 from .pooling_fuser import AvgPool2dFusion, MaxPool2dFusion

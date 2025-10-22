@@ -118,7 +118,7 @@ def groupnorm_quantize(self, *args):
         self.params['norm_shift_value'] = int(do_shift + self.params['norm_shift_value'])
 
     self.constants["lut"] = PyTensor(
-        self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
+        self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table), dtype=Dtype.INT16)
     self.constants["lut"].dtype = Dtype.INT16
 
     if self.type == OpType.LayerNorm:
@@ -265,7 +265,7 @@ def groupnorm(self, *args):
             return out.betensor, self.outputs[1].betensor, self.outputs[2].betensor
     # if not self.quantized:
     #     if len(self.placeholders) < 1:
-    #         plh = PyTensor(self.name+"/normalized", normalized.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+    #         plh = PyTensor(self.name+"/normalized", normalized, dtype=Dtype.FP32)
     #         self.placeholders.append(plh)
     #     self.placeholders[0].betensor = normalized
 

@@ -73,7 +73,7 @@ def pad_forward(self, *args):
         out = torch.nn.functional.pad(inp, torch_paddings, mode=pad_mode, value=pad_value)
     elif pad_mode in ['symmetric', 'reflect', 'edge', 'wrap']:
         import numpy as np
-        inp_np = inp.cpu().numpy()
+        inp_np = self.inputs[0].to_numpy()
         out = np.pad(inp_np, paddings, mode=pad_mode)
         out = torch.tensor(out, device=inp.device)
     else:

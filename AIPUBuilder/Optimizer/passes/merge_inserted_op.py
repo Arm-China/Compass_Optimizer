@@ -3,15 +3,16 @@
 
 from AIPUBuilder.Optimizer.framework import OpType
 from AIPUBuilder.Optimizer.utils import OP_ONLY_CHANGE_SHAPE, dtype2bits
+from AIPUBuilder.Optimizer.passes.insert_op import *
 
 
-def _quantize_cast_criteria(n, stricted_condition=True):
+def _quantize_cast_criteria(n, stricted_condition=False):
     if n.type in [OpType.Quantize]:
         children = n.children
         """
-                   /--> cast -->
-        1. quantize --|--> cast -->   or  2. quantize --> cast -->
-                   \--> cast -->
+                   |--> cast -->
+        1. quantize  --|--> cast -->   or  2. quantize --> cast -->
+                   |--> cast -->
         now only support 2: only one consumer condition.
         """
         if len(children) == 1:
@@ -45,9 +46,9 @@ def _cast_dequantize_criteria(n):
     if n.type in [OpType.DeQuantize]:
         parents = n.parents
         """
-                   /--> dequantize -->
+                   |--> dequantize -->
         1. cast  --|--> dequantize -->
-                   \--> dequantize -->
+                   |--> dequantize -->
         2. cast --> dequantize -->
         3. cast --> reshape --> dequantize -->
         now only support 2 and 3: only one consumer condition.
@@ -86,10 +87,8 @@ def _merge_quantize_relative_op(graph, config):
         cast_n.type = OpType.NoOp
         cast_n.params.clear()
         cast_n.params['original_type'] = 'OpType.Cast'
-
         quantize_n.params["quantize_scale"] = quantize_n.outputs[0].scale
         quantize_n.params["quantize_zp"] = quantize_n.outputs[0].zerop
-
     # firstly, merge quantize + cast(out_bits >= in_bits)
     for n in graph.nodes:
         matched, visited_nodes = _quantize_cast_criteria(n)
@@ -123,3 +122,4 @@ def _merge_dequantize_relative_op(graph, config):
 def merge_inserted_op(graph, config=None):
     _merge_quantize_relative_op(graph, config)
     _merge_dequantize_relative_op(graph, config)
+    InsertQuantizeOp(graph).merge_multi_branch([OpType.DeQuantize, OpType.Quantize, OpType.NoOp])

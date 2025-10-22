@@ -301,6 +301,8 @@ class PytorchQuantizer(QATBaseQuantizer):
         while is_fused:
             self.fused_module, is_fused = self._fuse(self.fused_module)
         self.after_fuse_pass()
+        # print(self.fused_module.graph.print_tabular())
+        # print(self.fused_module.code)
 
         return self.fused_module
 
@@ -515,12 +517,27 @@ class PytorchQuantizer(QATBaseQuantizer):
 
         if len(g_output_tensors) == module_output_node_num:
             aipu_g.output_tensors = TensorList(g_output_tensors)
+
+        if ir_mode == 'qat':
+            from AIPUBuilder.core import Quantizer
+            self._pre_quantize_pass(aipu_g)
+            qer = Quantizer(aipu_g)
+            qer.quantize()
         self._gsim_graph(aipu_g)
         aipu_g.serialize_scale_zp = True if ir_mode != 'fp' else False
         irt = os.path.join(self.output_dir, f"{self.model_name}_{prefix}_opsapi_{ir_mode}.txt")
         irb = os.path.join(self.output_dir, f"{self.model_name}_{prefix}_opsapi_{ir_mode}.bin")
         aipu_g.serialize(irt, irb)
         QAT_INFO(f"serialize the {ir_mode} IR Done: {irt}")
+
+    def _pre_quantize_pass(self, g):
+        from AIPUBuilder.core import OpType
+        unify_shift_mode = self.config.get('compat_quantized_model_unify_shifts_mode')
+
+        for node in g.nodes:
+            node.attrs['unify_shift_mode'] = unify_shift_mode
+            if node.type == OpType.Softmax:
+                pass
 
     def serialize(self, model=None, prefix="", input_shapes=[]):
         if model is None:

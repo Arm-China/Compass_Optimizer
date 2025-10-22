@@ -58,15 +58,15 @@ class NumpyMultiInputWithoutBatchDimDataset(Dataset):
 
         if 1 == len(self.data):
             sample[0] = torch.tensor(self.data[0][idx].astype(
-                torch_type2nptype(nptype2torch_type(self.data[0][idx].dtype.type))))
+                dtype2nptype(nptype2dtype(self.data[0][idx].dtype.type))))
         else:
             sample[0] = []
             for d in self.data:
-                sample[0].append(torch.tensor(d[idx].astype(torch_type2nptype(nptype2torch_type(d[idx].dtype.type)))))
+                sample[0].append(torch.tensor(d[idx].astype(dtype2nptype(nptype2dtype(d[idx].dtype.type)))))
 
         if self.label is not None:
             for l in self.label:
-                sample[1].append(torch.tensor(l.astype(torch_type2nptype(nptype2torch_type(l.dtype.type)))))
+                sample[1].append(torch.tensor(l.astype(dtype2nptype(nptype2dtype(l.dtype.type)))))
 
         return sample
 

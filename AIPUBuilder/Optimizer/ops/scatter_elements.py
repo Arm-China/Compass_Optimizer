@@ -160,9 +160,7 @@ def ScatterElements_quantize(self, *args):
 
 @op_register(OpType.ScatterElements)
 def ScatterElements(self, *args):
-    data = self.inputs[0].betensor  # .reshape(list(self.inputs[0].ir_shape))  # data
-    indices = self.inputs[1].betensor.to(torch.long)  # .reshape(list(self.inputs[1].ir_shape))  # indx
-    updates = self.inputs[2].betensor  # .reshape(list(self.inputs[2].ir_shape))  # update
+    indices = self.inputs[1].betensor.to(torch.long)
     out = self.outputs[0]
     reduce_method = self.get_param('reduction', optional=False, default_value='NONE').upper()  # NONE/ADD/MUL
     if reduce_method not in ['NONE', 'ADD', 'MUL', 'MIN', 'MAX']:
@@ -178,10 +176,12 @@ def ScatterElements(self, *args):
     indices = torch.clamp(indices, 0, max_idx - 1)
 
     if len(self.placeholders) < 1:
-        ph0 = PyTensor(self.name+"/tmp_s", torch.tensor(0.).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        ph0 = PyTensor(self.name+"/tmp_s", torch.tensor(0.), dtype=Dtype.FP32)
         self.placeholders.append(ph0)
 
     if self.quantized:
+        data = self.inputs[0].betensor.long()
+        updates = self.inputs[2].betensor.long()
         if reduce_method == 'MUL':
             scale = self.params['scale_value']
             shift = self.params['shift_value']
@@ -231,7 +231,8 @@ def ScatterElements(self, *args):
             output = linear_requantize(output, scale, shift, out.zerop, out.qmin, out.qmax)
 
     else:
-        data = data.to(updates.dtype)
+        data = self.inputs[0].betensor.float()
+        updates = self.inputs[2].betensor.float()
         if reduce_method == 'ADD':
             output = data.clone().scatter_(axis, indices, updates, reduce='add')
         elif reduce_method == 'MUL':

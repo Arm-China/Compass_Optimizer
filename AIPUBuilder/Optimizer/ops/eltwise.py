@@ -117,6 +117,8 @@ def eltwise_quantizes(self, *args):
     out = self.outputs[0]
     method = self.get_param("method").upper()
     q_mode_activation = self.attrs["q_mode_activation"]
+    if QuantMode.is_per_channel(q_mode_activation) == True:
+        OPT_FATAL("Currently not support per-channel quantization of activations")
     multiplier_bits = self.attrs['multiplier_bits']
     q_bits_activation = self.attrs["q_bits_activation"]
     act_type = self.get_param('with_activation', optional=True, default_value='none').lower()
@@ -252,22 +254,15 @@ def eltwise(self, *args):
             x1 = inp1.detile_betensor()
     x0 = x0.to(torch.int64) if self.quantized else x0.float()
     x1 = x1.to(torch.int64) if self.quantized else x1.float()
-
-    if method in {"ADD", "SUB", "MAX", "MIN"}:
-        if self.quantized:
+    if self.quantized:
+        x0 = x0 + inp0.broadcast_zerop
+        x1 = x1 + inp1.broadcast_zerop
+        if method in {"ADD", "SUB", "MAX", "MIN"}:
             scales = self.get_ir_field(['scale_value', 'scale'])
             scale0, scale1 = scales[1], scales[2]
-            # deduce ensure out.key_axis is the same with inp0.key_axis or inp1.key_axis when inp0.key_axis/inp1.key_axis is not None
-            x0 = linear_requantize(x0 + inp0.broadcast_zerop, scale0, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
-            x1 = linear_requantize(x1 + inp1.broadcast_zerop, scale1, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
-    elif method in {"MUL"}:
-        if self.quantized:
-            x0 = x0 + inp0.broadcast_zerop
-            x1 = x1 + inp1.broadcast_zerop
-    x0shape = list(x0.shape)
-    x1shape = list(x1.shape)
-    x0dims = len(x0shape)
-    x1dims = len(x1shape)
+            x0 = linear_requantize(x0, scale0, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
+            x1 = linear_requantize(x1, scale1, 0, 0, -2 ** 31, 2 ** 31, key_axis=out.key_axis)
+
     # broadcasting, shape align
     x0, x1 = broadcasting_transform(x0, x1)
     x = op(x0, x1)

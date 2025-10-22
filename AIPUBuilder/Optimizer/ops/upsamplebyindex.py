@@ -7,7 +7,7 @@ from AIPUBuilder.Optimizer.framework import *
 
 @op_register(OpType.UpsampleByIndex)
 def upsamplebyindex(self, *args):
-    values = self.inputs[0].betensor
+    values = self.inputs[0].betensor.float()
     argmax = self.inputs[1].betensor.long()
 
     current_batch = values.shape[0]

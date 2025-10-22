@@ -358,8 +358,15 @@ class QuantizeGraph(PyGraph):
     def set_tensor_quantization_attrs(self):
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm
+        from AIPUBuilder.Optimizer.framework import OpType
+
+        # subgraph is not suitable for quantization
+        if self.root_graph != None:
+            return
         with tqdm(total=len(self.nodes), desc='update_tensor_quantization_attrs', file=sys.stdout, leave=False) as pbar:
             for n in self.nodes:
+                if n.type in [OpType.If, OpType.Loop]:
+                    continue
                 qn = n.clone(n.name+"_clone_")
                 qn.params['unquantifiable'] = False
                 qn.quantize()
@@ -396,8 +403,9 @@ class QuantizeGraph(PyGraph):
                 t.qmax = None
                 t.qinvariant = None
             for k, t in n.constants.items():
-                t.scale = 1.0
-                t.zerop = 0
+                if not ((k == 'weights') and all(sname in n.constants.keys() for sname in ['scale0', 'scale1'])):
+                    t.scale = 1.0
+                    t.zerop = 0
                 t.qbits = None
                 t.dtype = t.ir_dtype
                 t.qmin = None
@@ -407,14 +415,19 @@ class QuantizeGraph(PyGraph):
     def quantize(self, disable_pbar=False):
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm, OPT_WARN, OPT_DEBUG
-        from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyTensor
-        from AIPUBuilder.Optimizer.utils import (is_float, str2dtype, QuantMode,
+        from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyTensor, PyNode
+        from AIPUBuilder.Optimizer.utils import (is_float, is_signed, str2dtype, QuantMode,
                                                  get_linear_quant_params_from_tensor,
-                                                 torch_type2dtype,
+                                                 torch_type2dtype, dtype2bits,
                                                  linear_quantize_clip)
 
         if self.quantgraph is None:
             self.quantgraph = self.clone()
+
+        for _, sg in self.quantgraph.subgraph_map.items():
+            sg.quantgraph = sg
+            sg.quantize(disable_pbar=True)
+            sg.quantgraph = None
 
         self.quantgraph.set_tensor_quantization_attrs()  # pylint: disable=no-member
 
@@ -432,17 +445,33 @@ class QuantizeGraph(PyGraph):
                     # n.quantized = True
                 pbar.update(1)
             pbar.refresh()
-
-        for qn in self.quantgraph.nodes:
+        new_cast_edges_in_qg = {}
+        for gn, qn in zip(self.nodes, self.quantgraph.nodes):
             fd = qn.attrs['trigger_float_op'].name if isinstance(qn.attrs['trigger_float_op'], Dtype) \
                 else str(qn.attrs['trigger_float_op']).lower().strip()
             if fd != 'disable' and qn.params['unquantifiable']:
                 if qn.type == OpType.Quantize:
-                    qn.set_ir_field('quantize_scale', qn.outputs[0].scale, Dtype.FP32)
-                    qn.set_ir_field('quantize_zp', qn.outputs[0].zerop, Dtype.INT32)
+                    if not is_float(qn.inputs[0].ir_dtype):
+                        qn.params.clear()
+                        qn.params['to_dtype'] = qn.outputs[0].dtype
+                        qn.params['ignore_scale_zp'] = True
+                        qn.params['clip_mode'] = 'TRUNCATION'
+                        qn.params['unquantifiable'] = True
+                        qn.type = OpType.Cast
+                    else:
+                        qn.set_ir_field('quantize_scale', qn.outputs[0].scale, Dtype.FP32)
+                        qn.set_ir_field('quantize_zp', qn.outputs[0].zerop, Dtype.INT32)
                 if qn.type == OpType.DeQuantize:
-                    qn.set_ir_field('quantize_scale', qn.inputs[0].scale, Dtype.FP32)
-                    qn.set_ir_field('quantize_zp', qn.inputs[0].zerop, Dtype.INT32)
+                    if not is_float(qn.outputs[0].ir_dtype):
+                        qn.params.clear()
+                        qn.params['to_dtype'] = qn.outputs[0].ir_dtype
+                        qn.params['ignore_scale_zp'] = True
+                        qn.params['clip_mode'] = 'TRUNCATION'
+                        qn.params['unquantifiable'] = True
+                        qn.type = OpType.Cast
+                    else:
+                        qn.set_ir_field('quantize_scale', qn.inputs[0].scale, Dtype.FP32)
+                        qn.set_ir_field('quantize_zp', qn.inputs[0].zerop, Dtype.INT32)
 
                 if qn.type != OpType.Quantize:
                     for i, t in enumerate(qn.outputs):
@@ -462,36 +491,67 @@ class QuantizeGraph(PyGraph):
                         t.qmax = None
                         t.qinvariant = None
                     for k, t in qn.constants.items():
-                        t.scale = 1.0
-                        t.zerop = 0
+                        if not ((k == 'weights') and all(sname in qn.constants.keys() for sname in ['scale0', 'scale1'])):
+                            t.scale = 1.0
+                            t.zerop = 0
                         t.qbits = None
                         t.dtype = t.ir_dtype
                         t.qmin = None
                         t.qmax = None
                         t.qinvariant = None
+                    if all(sname in qn.constants.keys() for sname in ['weights', 'scale0', 'scale1']):
+                        # print("pop scale0")
+                        qn.constants.pop('scale0')
+                        qn.constants.pop('scale1')
+                        qn.constants.pop('zp0')
+                        # v = qn.constants['weights']
+                        # scales = v.scale
+                        # zps = v.zerop
+                        # ir_shape_len = len(v.ir_shape)
+                        # if ir_shape_len and ir_shape_len - 1 >= v.key_axis:
+                        #     channel_num = v.ir_shape[v.key_axis]
+                        #     if scales.numel() == zps.numel() and scales.numel() > 1 and scales.numel() > channel_num:
+                        #         ic = qn.inputs[0].ir_shape[-1]
+                        #         group_size = ic // (scales.numel() // channel_num)
+                        #         qn.params['weight_block_size'] = group_size
 
                 o_dtype = str2dtype(fd)
                 o_int_index = []
+                i_int_index = []
+                inputs_dtype = []
                 outputs_dtype = []
                 for idx, ot in enumerate(qn.outputs):
-                    if is_float(ot.dtype):
+                    if is_float(ot.dtype) and dtype2bits(ot.dtype) >= 16:
                         ot.dtype = o_dtype
                     else:
                         o_int_index.append(idx)
                     outputs_dtype.append(ot.dtype)
+                for idx, it in enumerate(qn.inputs):
+                    if not is_float(it.dtype):
+                        i_int_index.append(idx)
+                    inputs_dtype.append(it.dtype)
 
-                ############In the trigger_float_op case, convert the int output type to int type supported by lib###########
-                if self.quantgraph.op_need_cast_dtypes_for_lib is not None and qn.type in self.quantgraph.op_need_cast_dtypes_for_lib:
+                if self.quantgraph.op_need_cast_dtypes_for_lib is not None and qn in self.quantgraph.op_need_cast_dtypes_for_lib:
                     import itertools
 
-                    def whether_matched(lib_dtype_spec, outputs_dtype):
+                    if qn.type in [OpType.Quantize, OpType.DeQuantize]:
+                        continue
+                    ############In the trigger_float_op case, convert the float input type to float type supported by lib###########
+                    for gnt, qnt in zip(gn.inputs, qn.inputs):
+                        if is_float(qnt.dtype) and dtype2bits(qnt.dtype) >= 16 and qnt.dtype != o_dtype:
+                            qnkey = (qnt, qn, gnt, gn)
+                            new_cast_edges_in_qg[qnkey] = [qn.attrs, qnt.dtype, o_dtype]
+
+                    ############In the trigger_float_op case, convert the int output type to int type supported by lib###########
+
+                    def whether_matched(lib_dtype_spec, inputs_dtype, outputs_dtype):
                         for spec in lib_dtype_spec:
-                            out_dtypes = spec.out_dtypes
-                            if outputs_dtype == out_dtypes:
+                            if outputs_dtype == spec.out_dtypes and inputs_dtype == spec.in_dtypes:
                                 return True
                         return False
+
                     lib_dtype_spec = qn.get_lib_dtype_spec()
-                    matched = len(lib_dtype_spec) == 0 or whether_matched(lib_dtype_spec, outputs_dtype)
+                    matched = len(lib_dtype_spec) == 0 or whether_matched(lib_dtype_spec, inputs_dtype, outputs_dtype)
 
                     if not matched:
                         candidate_output_dtypes = []
@@ -518,21 +578,87 @@ class QuantizeGraph(PyGraph):
                             candidate_output_dtypes.append(get_lower_dtypes(current_dtypes))
 
                         for can_output_dtypes in itertools.product(*candidate_output_dtypes):
-                            for o_idx, o_dtype in enumerate(can_output_dtypes):
-                                outputs_dtype[o_int_index[o_idx]] = o_dtype
-                            matched = whether_matched(lib_dtype_spec, outputs_dtype)
+                            tmp_outputs_dtype = [xt for xt in outputs_dtype]
+                            for o_idx, otype in enumerate(can_output_dtypes):
+                                tmp_outputs_dtype[o_int_index[o_idx]] = otype
+                            matched = whether_matched(lib_dtype_spec, inputs_dtype, tmp_outputs_dtype)
                             if matched:
                                 for int_index in o_int_index:
-                                    qn.outputs[int_index].dtype = outputs_dtype[int_index]
-                                    matched = True
+                                    if qn.outputs[int_index].dtype != tmp_outputs_dtype[int_index]:
+                                        qnt = qn.outputs[int_index]
+                                        has_consumer = False
+                                        for gcld, cld in zip(gn.children, qn.children):
+                                            if qnt in cld.inputs:
+                                                has_consumer = True
+                                                qckey = (qnt, cld, gn.outputs[int_index], gcld)
+                                                if qckey not in new_cast_edges_in_qg.keys():
+                                                    new_cast_edges_in_qg[qckey] = [
+                                                        qn.attrs, tmp_outputs_dtype[int_index], qnt.dtype]
+                                                else:
+                                                    new_cast_edges_in_qg[qckey].append(qnt.dtype)
+                                        if not has_consumer:
+                                            qnt.dtype = tmp_outputs_dtype[int_index]
                                 break
+                        if not matched:
+                            best_candidate = None
+                            best_cbits = 0
+                            float_candidate = None
+                            for spec in lib_dtype_spec:
+                                sp_dt_list = spec.out_dtypes + spec.in_dtypes
+                                if any([is_float(sdt) and sdt != o_dtype for sdt in sp_dt_list]):
+                                    continue
+                                cbits = 0
+                                for int_index in o_int_index:
+                                    if int_index >= len(spec.out_dtypes):
+                                        continue
+                                    sot = spec.out_dtypes[int_index]
+                                    if not is_float(sot) and not (is_signed(outputs_dtype[int_index]) and not is_signed(sot)):
+                                        cbits += dtype2bits(sot)
+                                for int_index in i_int_index:
+                                    if int_index >= len(spec.in_dtypes):
+                                        continue
+                                    sit = spec.in_dtypes[int_index]
+                                    if not is_float(sit) and not (is_signed(inputs_dtype[int_index]) and not is_signed(sit)):
+                                        cbits += dtype2bits(sit)
+                                if cbits > best_cbits:
+                                    best_cbits = cbits
+                                    best_candidate = spec
+                            if best_candidate is not None:
+                                for int_index in o_int_index:
+                                    if int_index >= len(best_candidate.out_dtypes):
+                                        continue
+                                    if qn.outputs[int_index].dtype != best_candidate.out_dtypes[int_index]:
+                                        qnt = qn.outputs[int_index]
+                                        has_consumer = False
+                                        for gcld, cld in zip(gn.children, qn.children):
+                                            if qnt in cld.inputs:
+                                                has_consumer = True
+                                                qckey = (qnt, cld, gn.outputs[int_index], gcld)
+                                                if qckey not in new_cast_edges_in_qg.keys():
+                                                    new_cast_edges_in_qg[qckey] = [
+                                                        qn.attrs, best_candidate.out_dtypes[int_index], qnt.dtype]
+                                                else:
+                                                    new_cast_edges_in_qg[qckey].append(qnt.dtype)
+                                        if not has_consumer:
+                                            qnt.dtype = best_candidate.out_dtypes[int_index]
+                                for int_index in i_int_index:
+                                    if int_index >= len(best_candidate.in_dtypes):
+                                        continue
+                                    if qn.inputs[int_index].dtype != best_candidate.in_dtypes[int_index]:
+                                        qnt = qn.inputs[int_index]
+                                        qckey = (qnt, qn, gn.inputs[int_index], gn)
+                                        if qckey not in new_cast_edges_in_qg.keys():
+                                            new_cast_edges_in_qg[qckey] = [
+                                                qn.attrs, qnt.dtype, best_candidate.in_dtypes[int_index]]
+                                        else:
+                                            new_cast_edges_in_qg[qckey].append(best_candidate.in_dtypes[int_index])
 
                 if qn.type == OpType.Cast:
                     qn.params['to_dtype'] = qn.outputs[0].dtype
 
                 if qn.type != OpType.Quantize and qn.type != OpType.DeQuantize:  # per-channel scale/zp would be in constants
                     for key, ct in qn.constants.items():
-                        if is_float(ct.ir_dtype):
+                        if is_float(ct.ir_dtype) and (not all(sname in qn.constants.keys() for sname in ['scale0', 'scale1'])):
                             ct.dtype = Dtype.FP32 if key in ['biases', 'negative_slope'] else o_dtype
 
                 if "weights" in qn.constants.keys() and qn.get_attrs("weight_only_quantization", optional=True, default_value=False):
@@ -564,6 +690,38 @@ class QuantizeGraph(PyGraph):
                     # qn.params['approximate_method'] = 'weight_only_quantization'
                 if qn.get_param('is_perf_mode', optional=True, default_value=True):
                     qn.approximate()
+
+        for nkey, nvalue in new_cast_edges_in_qg.items():
+            edge, consumer_node, edge_s, consumer_node_s = nkey
+            nattrs = nvalue[0]
+            from_dtype = nvalue[1]
+            to_dtype = nvalue[-1]
+
+            def insert_cast_edge_to_graph(e, e_s, cn, con_node):
+                cn.add_input(e)
+                cn.add_output(e_s)
+                cn.params['to_dtype'] = e.dtype
+                cn.params['ignore_scale_zp'] = True
+                cn.params['clip_mode'] = 'TRUNCATION' if not is_float(e.dtype) else 'SATURATION'
+                e_idx = con_node.remove_input(e)
+                con_node.add_input(e_s, e_idx)
+            dummy_op = PyNode(self.get_valid_node_name(edge.pnode.name), OpType.Cast)
+            dummy_op.additional = True
+            dummy_op.attrs.update(nattrs.clone())
+            atensor_name = self.get_valid_tensor_name(edge.name)
+            atensor = edge.clone(atensor_name)
+            if self.quantgraph != self:
+                # maintain one-to-one correspondence
+                cn_s = dummy_op.clone(dummy_op.name)
+                at_s = atensor.clone(atensor.name)
+                insert_cast_edge_to_graph(edge_s, at_s, cn_s, consumer_node_s)
+                self.add_node(cn_s)
+            insert_cast_edge_to_graph(edge, atensor, dummy_op, consumer_node)
+            edge.dtype = from_dtype
+            dummy_op.params['to_dtype'] = to_dtype
+            atensor.dtype = to_dtype
+            dummy_op.params['unquantifiable'] = True
+            self.quantgraph.add_node(dummy_op)
 
     def qforward(self, feed_data, disable_pbar=True, keep_tensors=False):
         return self.quantgraph.forward(feed_data, disable_pbar, keep_tensors)
@@ -614,89 +772,17 @@ class QuantizeGraph(PyGraph):
 
     @staticmethod
     def deduce_quantization_infos(graph):
-        from AIPUBuilder.Optimizer.utils import is_float, dtype2range, dtype2bits
-        from AIPUBuilder.Optimizer.framework import OpType, get_tensor_default_property
+        from AIPUBuilder.Optimizer.framework import PyNode
         from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_WARN
         import torch
-
-        def _deduce_quantization_info_to_tensor_from_ir(node, updated_fields):
-            in_out_tensors = [*node.inputs, *node.outputs]
-            key_axes = node.get_param('activation_quantization_axis',
-                                      optional=True, default_value=[None]*len(node.outputs))
-            key_axes = [None if isinstance(ka, str) and ka.lower() == 'none' else ka for ka in key_axes]
-            for t in in_out_tensors:
-                if is_float(t.dtype):
-                    continue
-                o_dtype = t.dtype
-                if t.ir_range is None:
-                    qmin, qmax = dtype2range(o_dtype)
-                else:
-                    qmin, qmax = t.ir_range[0], t.ir_range[1]
-                qbits = dtype2bits(o_dtype)
-                key_axis = key_axes[node.outputs.index(t)] if t in node.outputs else None
-                quantization_infos = {
-                    'qmin': qmin,
-                    'qmax': qmax,
-                    'qbits': qbits,
-                }
-                for field in updated_fields:
-                    if field in quantization_infos.keys():
-                        t.__setattr__(field, quantization_infos[field])
-                    if t in node.outputs:
-                        t.key_axis = key_axis
 
         if graph is None:
             OPT_ERROR(f"please check the graph(==None) before deduce quantization information.")
             return None
 
         for node in graph.nodes:
-            node.quantized = True
-            if node.type in [OpType.Quantize]:
-                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
-                continue
+            PyNode.deduce_quantization_infos(node)
 
-            if node.get_param('unquantifiable', optional=True, default_value=False):
-                node.quantized = False
-                if node.get_param('is_perf_mode', optional=True, default_value=False):
-                    node.approximated = True
-                if 'weights' in node.constants.keys():
-                    wt = node.constants["weights"]
-                    if not is_float(wt.dtype):
-                        node.attrs['weight_only_quantization'] = True
-            else:
-                dtypes = [t.dtype for t in (list(node.outputs) + list(node.inputs))]
-                with_lut = False
-                constants_name = node.constants.keys()
-                for name in constants_name:
-                    if 'lut' in name:
-                        with_lut = True
-                        if is_float(node.constants[name].dtype):
-                            OPT_WARN(
-                                f"{node},constant[{name}] dtype is float, currently set node.quantized = True.")
-                        break
-                    else:
-                        dtypes.append(node.constants[name].dtype)
-                if not with_lut:
-                    for dt in dtypes:
-                        if is_float(dt):
-                            node.quantized = False
-                            break
-
-            if 'weight_block_size' not in node.params:
-                for k, v in node.constants.items():
-                    if k not in ['weights', 'biases']:
-                        continue
-                    scales = v.scale
-                    zps = v.zerop
-                    ir_shape_len = len(v.ir_shape)
-                    ka = v.key_axis
-                    if ir_shape_len and ir_shape_len - 1 >= v.key_axis:
-                        channel_num = v.ir_shape[v.key_axis]
-                        if scales.numel() == zps.numel() and scales.numel() > 1 and scales.numel() > channel_num:
-                            ic = node.inputs[0].ir_shape[-1]
-                            group_size = ic // (scales.numel() // channel_num)
-                            node.params['weight_block_size'] = group_size
-                            break
-
-            if node.quantized:
-                _deduce_quantization_info_to_tensor_from_ir(node, get_tensor_default_property())
+        for subgraph in graph.subgraph_map.values():
+            for node in subgraph.nodes:
+                PyNode.deduce_quantization_infos(node)

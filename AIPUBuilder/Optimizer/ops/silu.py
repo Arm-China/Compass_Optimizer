@@ -47,7 +47,8 @@ def silu_approx(self, *args):
 
     def sigmoid_func(x): return torch.nn.functional.sigmoid(x * self.get_param('alpha', optional=True, default_value=1))
 
-    self.attrs['set_min_max'] = set_min_max
+    if 'set_min_max' not in self.attrs:
+        self.attrs['set_min_max'] = set_min_max
     self.attrs['lambda_func'] = sigmoid_func
     self.attrs['out_signed'] = False
     self.attrs['value_offset'] = -0.5

@@ -20,10 +20,12 @@ def Abs_forward(self, *args):
         else:
             value = inp.betensor.long()
             value = torch.abs(value).long()
-            out.betensor = forward_with_clip(value, out.dtype, 'TRUNCATION')
+            out.betensor = value
+            out.betensor = forward_with_clip(out, out.dtype, 'TRUNCATION')
     else:
         value = torch.abs(inp.betensor)
-        out.betensor = forward_with_clip(value, out.dtype, 'TRUNCATION')
+        out.betensor = value
+        out.betensor = forward_with_clip(out, out.dtype, 'TRUNCATION')
     return out.betensor
 
 

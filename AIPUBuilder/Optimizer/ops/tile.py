@@ -11,7 +11,7 @@ from AIPUBuilder.Optimizer.logger import OPT_WARN
 def tile(self, *args):
     inp = self.inputs[0].betensor
     out = self.outputs[0]
-    _reps = [oshape // ishape for oshape, ishape in zip(out.shape, inp.shape)]
+    # _reps = [oshape // ishape for oshape, ishape in zip(out.shape, inp.shape)]
     reps = self.get_param('repeats')
     if inp.dim() != len(reps):
         OPT_WARN('please check the dim between input.dim and len(repeats) in Tile Op')

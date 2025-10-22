@@ -83,7 +83,7 @@ class CmpOpForward(object):
                 for i, n in enumerate(self.opt_forward_egine.optimizer.g.quantgraph.nodes):
                     layer_id = n.attrs['layer_id']  # str
                     for oi, o in enumerate(n.outputs):
-                        dat = o.betensor.cpu().numpy()
+                        dat = o.to_numpy()
                         dat = dat.astype(dtype2nptype(o.dtype))
                         dat.tofile(f"{layer_id}_opt_{oi}_{o.name}.bin")
                         OPT_INFO(o.name, " ", dtype2nptype(o.dtype), " ", dat.shape)

@@ -72,7 +72,7 @@ def RMSNorm_quantize(self, *args):
         self.params['shift_type'] = do_shift_type
 
     self.constants["lut"] = PyTensor(
-        self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
+        self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table), dtype=Dtype.INT16)
     self.constants["lut"].dtype = Dtype.INT16
 
 

@@ -32,7 +32,7 @@ def logsoftmax_quantize(self, *args):
                                 inp.scale, inp.zerop)
         lut = torch.exp(lut).round().clamp(0.0, max_val)
         self.constants["lut_exp"] = PyTensor(
-            self.name + "/explut", lut.cpu().numpy().astype(dtype2nptype(Dtype.UINT32)))
+            self.name + "/explut", lut, dtype=Dtype.UINT32)
         plh0 = self.placeholders[0]
         plh0.qbits = q_bits_activation
         plh0.qinvariant = False
@@ -68,7 +68,7 @@ def logsoftmax_quantize(self, *args):
         lut = torch.log(torch.linspace(0, 1, steps=lsteps, device=dev))
         lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
         lut[0] = lut[1]
-        self.constants["lut_log"] = PyTensor(self.name+"/log_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        self.constants["lut_log"] = PyTensor(self.name+"/log_lut", lut, dtype=out.dtype)
         self.constants["lut_log"].qbits = out.qbits
     else:
         lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
@@ -76,7 +76,7 @@ def logsoftmax_quantize(self, *args):
         lut = linear_dequantize(val, -inp.scale, 0)
         lut = torch.exp(lut).flip(dims=[0])
         self.constants["lut_exp"] = PyTensor(self.name + "/explut",
-                                             lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                                             lut, dtype=Dtype.FP32)
 
         out = self.outputs[0]
         out.qbits = inp.qbits
@@ -178,9 +178,9 @@ def logsoftmax(self, *args):
         placeholders1_tensor = torch.log(placeholders0_tensor)
         if len(self.placeholders) < 2:
             ph0 = PyTensor(self.name+"/softmax_outputs",
-                           placeholders0_tensor.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           placeholders0_tensor, dtype=Dtype.FP32)
             ph1 = PyTensor(self.name+"/log_outputs",
-                           placeholders1_tensor.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           placeholders1_tensor, dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
         self.placeholders[0].betensor = placeholders0_tensor

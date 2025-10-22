@@ -107,7 +107,7 @@ def lookupsparse_quantize(self, *args):
         self.params["scale_value"] = [int(params_scale), int(do_scale)]
         self.params["scale_type"] = [params_scale_type, do_scale_type]
         self.constants["lut"] = PyTensor(
-            self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
+            self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table), dtype=Dtype.INT16)
         self.constants["lut"].dtype = Dtype.INT16
     else:
         OPT_FATAL("unsupported method: %s for EmbeddingLookupSparse in node:%s" % (combiner, self.name))
@@ -177,8 +177,8 @@ def lookupsparse(self, *args):
             out.betensor = torch.where(torch.bitwise_or(torch.isinf(output), torch.isnan(output)), zeros_tensor, output)
 
         if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/params_sum", params_sum.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name+"/weights_sum", weights_sum.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph0 = PyTensor(self.name+"/params_sum", params_sum, dtype=Dtype.FP32)
+            ph1 = PyTensor(self.name+"/weights_sum", weights_sum, dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
         self.placeholders[0].betensor = params_sum

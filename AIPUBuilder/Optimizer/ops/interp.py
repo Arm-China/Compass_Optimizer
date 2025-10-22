@@ -196,26 +196,26 @@ def resize_bilinear_antialias(self, input_data, params):
         weight_coefficients_y, bound_y_min, bound_y_max = compute_weight_coefficients(
             input_height, output_height, ratio_y, mode, exclude_outside, dev)
         self.constants["weight_coefficients_x"] = PyTensor(
-            self.name + "/weight_coefficients_x", weight_coefficients_x.cpu().numpy().astype(dtype2nptype(Dtype.FP32)), Dtype.FP32)
+            self.name + "/weight_coefficients_x", weight_coefficients_x, dtype=Dtype.FP32)
         self.constants["weight_coefficients_x"].ir_dtype = Dtype.FP32
         self.constants["weight_coefficients_y"] = PyTensor(
-            self.name + "/weight_coefficients_y", weight_coefficients_y.cpu().numpy().astype(dtype2nptype(Dtype.FP32)), Dtype.FP32)
+            self.name + "/weight_coefficients_y", weight_coefficients_y, dtype=Dtype.FP32)
         self.constants["weight_coefficients_y"].ir_dtype = Dtype.FP32
         # currently set to uint16
         bound_x_dtype = bound_y_dtype = bits2dtype(16, False)
         # _, bound_x_dtype = range2dtype(0, input_width)
         # _, bound_y_dtype = range2dtype(0, input_height)
         self.constants["bound_x_min"] = PyTensor(
-            self.name + "/bound_x_min", bound_x_min.cpu().numpy().astype(dtype2nptype(bound_x_dtype)), Dtype.UINT16)
+            self.name + "/bound_x_min", bound_x_min, dtype=Dtype.UINT16)
         self.constants["bound_x_min"].ir_dtype = Dtype.UINT16
         self.constants["bound_x_max"] = PyTensor(
-            self.name + "/bound_x_max", bound_x_max.cpu().numpy().astype(dtype2nptype(bound_x_dtype)), Dtype.UINT16)
+            self.name + "/bound_x_max", bound_x_max, dtype=Dtype.UINT16)
         self.constants["bound_x_max"].ir_dtype = Dtype.UINT16
         self.constants["bound_y_min"] = PyTensor(
-            self.name + "/bound_y_min", bound_y_min.cpu().numpy().astype(dtype2nptype(bound_y_dtype)), Dtype.UINT16)
+            self.name + "/bound_y_min", bound_y_min, dtype=Dtype.UINT16)
         self.constants["bound_y_min"].ir_dtype = Dtype.UINT16
         self.constants["bound_y_max"] = PyTensor(
-            self.name + "/bound_y_max", bound_y_max.cpu().numpy().astype(dtype2nptype(bound_y_dtype)), Dtype.UINT16)
+            self.name + "/bound_y_max", bound_y_max, dtype=Dtype.UINT16)
         self.constants["bound_y_max"].ir_dtype = Dtype.UINT16
     else:
         weight_coefficients_x = self.constants['weight_coefficients_x'].betensor

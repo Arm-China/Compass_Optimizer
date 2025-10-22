@@ -19,6 +19,7 @@ from . import postnms2
 from . import interp
 from . import resize
 from . import softmax
+from . import sdp_attetnion
 from . import pad
 from . import activation
 from . import relu
@@ -188,3 +189,6 @@ from . import isnan
 from . import cacheupdate
 from . import control_op
 from . import dummy
+from . import shape_operator
+from . import constant_of_shape
+from . import rotary_embedding

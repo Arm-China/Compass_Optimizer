@@ -189,3 +189,63 @@ def merge_matmul_mul(graph, config=None):
         graph.init_networkx()
     if ncount - len(graph.nodes) + count > 0:
         OPT_INFO(f"{ncount - len(graph.nodes) + count} nodes were cut during pass merge_matmul_mul_s1")
+
+
+def unmerge_matmul_mul(graph, config=None):
+    def condition_func(node, parent_node, edge_tensor):
+        return (
+            (OpType.MatMul == parent_node.type)
+            and parent_node.get_param("unquantifiable", optional=True, default_value=True)
+            and ("fused_multiplier" in parent_node.attrs)
+        )
+
+    '''
+    In LLM like graph, we want to revert mul_scale into Constant+Mul, to adapt dynamic shape feature.
+    Otherwise, such as SD graph, we want to keep batchnorm format so that get best performance and reduce
+    layoutconvert ops.
+    To decide, currently we detect the batch dim of feature map. If it is 2, then we consider it is
+    a Cond/Uncond embeded UNet structure.
+    '''
+    inserted_nodes = graph.insert_dummy_node_ahead(OpType.Mul, condition_func)
+    for n in inserted_nodes:
+        if n.outputs[0].ir_shape[0] == 1:
+            n.params["unquantifiable"] = True
+            parent_node = n.parents[0]
+            n.attrs.update(parent_node.attrs.clone())
+            fused_multiplier = parent_node.attrs["fused_multiplier"]
+            if "fused_multiplier" in parent_node.params:
+                parent_node.params.pop("fused_multiplier")
+            ft = PyTensor(
+                graph.get_valid_tensor_name(n.inputs[0].name + "_scale"),
+                fused_multiplier,
+            )
+            ft.dtype = n.inputs[0].dtype
+            fn = PyNode(
+                graph.get_valid_node_name(parent_node.name + "_scale"), OpType.Constant
+            )
+            fn.attrs.update(n.attrs.clone())
+            fn.constants["weights"] = ft.clone(
+                graph.get_valid_tensor_name(ft.name + "_w")
+            )
+            fn.params["unquantifiable"] = True
+            fn.additional = True
+            fn.add_output(ft)
+            n.add_input(ft)
+            graph.add_node(fn)
+        else:
+            n.type = OpType.BatchNorm
+            n.params["unquantifiable"] = True
+            parent_node = n.parents[0]
+            n.attrs.update(parent_node.attrs.clone())
+            fused_multiplier = parent_node.attrs["fused_multiplier"]
+            if "fused_multiplier" in parent_node.params:
+                parent_node.params.pop("fused_multiplier")
+            c = n.outputs[0].ir_shape[-1]
+            fw = PyTensor(graph.get_valid_tensor_name(
+                n.inputs[0].name + "_scale"), torch.zeros([c]).to(n.inputs[0].betensor.device) + fused_multiplier)
+            fb = PyTensor(graph.get_valid_tensor_name(
+                n.inputs[0].name + "_bias"), torch.zeros([c]).to(n.inputs[0].betensor.device))
+            n.constants['weights'] = fw
+            n.constants['biases'] = fb
+            n.params['axis'] = len(n.inputs[0].ir_shape) - 1
+            n.params['epsilon'] = 0

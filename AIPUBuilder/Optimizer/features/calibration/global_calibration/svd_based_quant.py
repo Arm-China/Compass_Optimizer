@@ -37,32 +37,36 @@ def svd_based_quant_global_calibration(g, cdataloader, mparams, mscopes):
 def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, oplist):
     import copy
 
-    def get_qmin_qmax(outsign, qbits):
-        q_max, q_min = 2 ** qbits - 1, 0
-        if outsign:
-            if QuantMode.is_full_range(quant_mode):
-                q_max = 2 ** (qbits - 1) - 1
-                q_min = -1 * q_max - 1
-            else:
-                q_max = 2 ** (qbits - 1) - 1
-                q_min = -1 * q_max
+    def get_qmin_qmax(outsign, qbits, dtype):
+        if is_float(dtype):
+            q_min, q_max = dtype2range(dtype)
+        else:
+            q_max, q_min = 2 ** qbits - 1, 0
+            if outsign:
+                if QuantMode.is_full_range(quant_mode):
+                    q_max = 2 ** (qbits - 1) - 1
+                    q_min = -1 * q_max - 1
+                else:
+                    q_max = 2 ** (qbits - 1) - 1
+                    q_min = -1 * q_max
         return q_min, q_max
 
-    def scale2minmax(scale, zerop, is_signed, qbits, symmetric):
-        q_min, q_max = get_qmin_qmax(is_signed, qbits)
+    # def scale2minmax(scale, zerop, is_signed, qbits, symmetric):
+    #     q_min, q_max = get_qmin_qmax(is_signed, qbits)
 
-        if not symmetric:
-            fmin = (zerop+q_min)/scale
-            fmax = (q_max-q_min)/scale+fmin
-        else:
-            fmax = (q_max-q_min)/scale/2
-            fmin = -fmax
-        return fmin, fmax
+    #     if not symmetric:
+    #         fmin = (zerop+q_min)/scale
+    #         fmax = (q_max-q_min)/scale+fmin
+    #     else:
+    #         fmax = (q_max-q_min)/scale/2
+    #         fmin = -fmax
+    #     return fmin, fmax
 
     def get_denoise_max_min(out):
         # have_inf = (out.betensor.float() < -32768)
         # mvalue = have_inf*-127
         # filt_out = out.betensor.float()*(~have_inf)+mvalue
+        quant_type = out.attrs.get('quant_type')
         filt_out = torch.clamp(out.betensor.float(), min=-32767)
         U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
         percent = thresh
@@ -97,19 +101,30 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         mscopes = oplist
         return mscopes.get(layer_n)
 
-    def get_best_scale(out, bmin, bmax, quant_mode, op_list):
-
+    def get_best_scale(n, bmin, bmax, op_list):
+        out = n.outputs[0]
+        quant_mode = n.attrs["q_mode_activation"]
+        quant_type = n.attrs.get('quant_type')
+        if quant_type in ['fp8_e4m3fn', 'fp8_e5m2']:
+            q_type_activation = QuantType.activation_type(quant_type)
+        else:
+            q_type_activation = out.dtype
+        is_float_quant = is_float(q_type_activation)
         out_signed = is_signed(out.dtype)
-        q_min, q_max = get_qmin_qmax(out_signed, out.qbits)
+        q_min, q_max = get_qmin_qmax(out_signed, out.qbits, q_type_activation)
         have_inf = out.betensor.float() < -32768
         mvalue = have_inf*-127
         filt_out = out.betensor.float()*(~have_inf)+mvalue
         # U, S, Vh = torch.linalg.svd(filt_out, full_matrices=False)
         S = torch.abs(torch.fft.fft(filt_out, norm='forward'))
-        denoise_out = PyTensor('denoise_out', out.ir_shape, out.dtype)
+        denoise_out = PyTensor('denoise_out', out.ir_shape, q_type_activation)
         denoise_out.min, denoise_out.max = bmin, bmax
 
-        scale, zerop, _, _, _ = get_linear_quant_params_from_tensor(denoise_out, quant_mode, out.qbits, out_signed)
+        if is_float_quant:
+            scale, zerop, _, _ = get_fpx_quant_params_from_tensor(denoise_out, quant_mode, q_type_activation)
+        else:
+            scale, zerop, _, _, _ = get_linear_quant_params_from_tensor(
+                denoise_out, quant_mode, out.qbits, out_signed)
 
         best_s = 1
         scale = scale.item()
@@ -118,7 +133,11 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         if op_list:
 
             init_s = scale
-            qbetensor = linear_quantize_clip(filt_out, init_s, zerop, q_min, q_max)
+            # qbetensor = linear_quantize_clip(
+            #     filt_out, init_s, zerop, q_min, q_max)
+            qbetensor = linear_quantize_clip(filt_out.float(), init_s, zerop,
+                                             q_min, q_max, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', q_type_activation))
+
             deqbetenor = linear_dequantize(qbetensor, init_s, zerop)
             # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
             qS = torch.abs(torch.fft.fft(deqbetenor, norm='forward'))
@@ -130,8 +149,16 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             start, end = alpha, beta
             for f in torch.linspace(start, end, nsteps):
                 denoise_out.min, denoise_out.max = bmin*f, bmax*f
-                s, zerop, _, _, _ = get_linear_quant_params_from_tensor(denoise_out, quant_mode, out.qbits, out_signed)
-                qbetensor = linear_quantize_clip(filt_out, s, zerop, q_min, q_max)
+                if is_float_quant:
+                    s, zerop, _, _ = get_fpx_quant_params_from_tensor(denoise_out, quant_mode, q_type_activation)
+                else:
+                    s, zerop, _, _, _ = get_linear_quant_params_from_tensor(
+                        denoise_out, quant_mode, out.qbits, out_signed)
+
+                # qbetensor = linear_quantize_clip(
+                #     filt_out, s, zerop, q_min, q_max)
+                qbetensor = linear_quantize_clip(filt_out.float(), s, zerop,
+                                                 q_min, q_max, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', q_type_activation))
                 deqbetenor = linear_dequantize(qbetensor, s, zerop)
                 qS = torch.abs(torch.fft.fft(deqbetenor, norm='forward'))
                 # qU, qS, qVh = torch.linalg.svd(deqbetenor, full_matrices=False)
@@ -144,6 +171,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         return bmin*best_s, bmax*best_s
 
     def linear_op_quantize_param_search(n, alpha, beta, nsteps, thresh):
+        quant_type = n.attrs.get('quant_type')
         q_mode_bias = n.attrs["q_mode_bias"]
         q_mode_weight = n.attrs["q_mode_weight"]
         q_mode_activation = n.attrs["q_mode_activation"]
@@ -275,6 +303,13 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             w.min = w.min*best_s
             w.max = w.max*best_s
 
+        if QuantMode.is_per_channel(q_mode_weight):
+            w.min_key_axis = w.min_key_axis*best_s
+            w.max_key_axis = w.max_key_axis*best_s
+        else:
+            w.min = w.min*best_s
+            w.max = w.max*best_s
+
     def filter(input, init_state, alpha):
         yn_1 = init_state
         yn_2 = 0
@@ -345,7 +380,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
                             omin, omax = get_denoise_max_min(out)
                             if mode == 1:
                                 omin, omax = get_best_scale(
-                                    out, omin, omax, quant_mode, optimized_flag)
+                                    n, omin, omax, optimized_flag)
                                 # symmetric = QuantMode.is_symmetric(quant_mode)
 
                                 # out_signed = is_signed(n.outputs[0].dtype)
@@ -386,13 +421,13 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
                     if n.outputs[0].betensor.ndim <= 1:
                         continue
                     if check_node_if_optimization(k, g.nodes, oplist[0]):
-                        quant_mode = n.attrs["q_mode_activation"]
+                        # quant_mode = n.attrs["q_mode_activation"]
                         q_bits_activation = n.attrs["q_bits_activation"]
                         symmetric = QuantMode.is_symmetric(quant_mode)
                         fmax = n.outputs[0].max
                         fmin = n.outputs[0].min
                         omin, omax = get_best_scale(
-                            n.outputs[0], fmin, fmax, quant_mode, True)
+                            n, fmin, fmax, True)
                         # out_signed = is_signed(n.outputs[0].dtype)
                         # fmin,fmax = scale2minmax(best_s, zerop,out_signed, q_bits_activation,symmetric)
                         n.outputs[0].max = omax

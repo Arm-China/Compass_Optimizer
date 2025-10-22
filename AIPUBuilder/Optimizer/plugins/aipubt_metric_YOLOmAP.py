@@ -375,7 +375,7 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
             for idx, pd in enumerate(sorted(pred, key=lambda x: x.size(), reverse=True)):
                 if self.layout == 'nchw':
                     if pd.dim() == 4:
-                        pd = np.transpose(pd, (0, 2, 3, 1))
+                        pd = pd.permute(0, 2, 3, 1)
                 _pred.append(pd.reshape(-1, self.featuremap_size_list[idx], self.featuremap_size_list[idx], 3, 85))
             pred = _pred
         except:
@@ -388,7 +388,7 @@ class YOLOV4OnnxmAPMetric(YOLOVOCmAPMetric):
         org_img_w = 5000
         pred_bbox_list = []
         for pd in pred:
-            pred_list.append(pd.cpu().numpy())
+            pred_list.append(PyTensor('tmp', pd).to_numpy())
             org_img_h = min(org_img_h, pd.shape[1])
             org_img_w = min(org_img_w, pd.shape[2])
         org_img_shape = (org_img_h*32, org_img_w*32)

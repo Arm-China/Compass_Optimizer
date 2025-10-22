@@ -116,6 +116,39 @@ def qat_basiclstm_forward(self):
         self.outputs[1].betensor = output2
 
 
+def approximated_float_forward(self,  inp_tensor, gate_phase=''):
+    activations_list = self.get_param('activations') if 'activations' in self.params else ['SIGMOID', 'TANH', 'TANH']
+    if self.approximated:
+        gate_lut = {
+            'f_gate': 'lut_ft',
+            'i_gate': 'lut_it',
+            'o_gate': 'lut_ot',
+            'h_gate': 'lut_h',
+            'c_gate': 'lut_ct',
+        }
+        lut_name = gate_lut[gate_phase]
+        if lut_name in self.constants:
+            lut = self.constants[lut_name].betensor
+            is_mirror = self.get_param(f'{lut_name}_mode', optional=True, default_value=False)
+            index_scale_value = self.get_param(f'{lut_name}_index_scale_value', optional=True, default_value=1)
+            index_offset_value = self.get_param(f'{lut_name}_index_offset_value', optional=True, default_value=0)
+            value_offset_value = self.get_param(f'{lut_name}_value_offset_value', optional=True, default_value=0)
+            out = lookup_float_index_lut(
+                inp_tensor, lut, index_scale_value, index_offset_value, mirror_mode=is_mirror, value_offset_for_mirror_mode=value_offset_value)
+            return out
+
+    gate_activation_idx = {
+        'f_gate': 0,
+        'i_gate': 0,
+        'o_gate': 0,
+        'h_gate': 1,
+        'c_gate': 2,
+    }
+    activation_idx = gate_activation_idx[gate_phase]
+    out = g_rnn_activation_func[activations_list[activation_idx]][1](inp_tensor)
+    return out
+
+
 @op_register(OpType.BasicLSTM)
 def lstm(self, *args):
     is_for_qat = self.get_param('basiclstm_for_qat', optional=True, default_value=False)
@@ -196,10 +229,10 @@ def lstm(self, *args):
                 f_lut_in[b, ts, :] = torch.squeeze(torch.cat((i_tmp, f_tmp, o_tmp), dim=1), 0)
                 g_lut_in[b, ts, :] = torch.squeeze(g_tmp, 0)
 
-                i = g_rnn_activation_func[activations_list[0]][1](i_tmp)
-                g = g_rnn_activation_func[activations_list[1]][1](g_tmp)
-                f = g_rnn_activation_func[activations_list[0]][1](f_tmp)
-                o = g_rnn_activation_func[activations_list[0]][1](o_tmp)
+                i = approximated_float_forward(self, i_tmp, 'i_gate')
+                g = approximated_float_forward(self, g_tmp, 'h_gate')
+                f = approximated_float_forward(self, f_tmp, 'f_gate')
+                o = approximated_float_forward(self, o_tmp, 'o_gate')
 
                 f_lut_out[b, ts, :] = torch.squeeze(torch.cat((i, f, o), dim=1), 0)
                 g_lut_out[b, ts, :] = torch.squeeze(g, 0)
@@ -207,7 +240,7 @@ def lstm(self, *args):
                 c_prev = torch.multiply(f, c_prev) + torch.multiply(i, g)
                 c_prev = torch.clamp(c_prev, -cell_clip, cell_clip)
                 h_lut_in[b, ts, :] = torch.squeeze(c_prev, 0)
-                c_lut = g_rnn_activation_func[activations_list[2]][1](c_prev)
+                c_lut = approximated_float_forward(self, c_prev, 'c_gate')
                 h_lut_out[b, ts, :] = torch.squeeze(c_lut, 0)
                 h_prev = torch.multiply(o, c_lut)
 
@@ -247,11 +280,11 @@ def lstm(self, *args):
         if len(self.placeholders) < 1:
             for placeholder_name in lut_placeholder_list:
                 ph = PyTensor(self.name + '/' + placeholder_name,
-                              eval(placeholder_name).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                              eval(placeholder_name), dtype=Dtype.FP32)
                 self.placeholders.append(ph)
             for c_ts in range(c_batch.shape[1]):
                 ph = PyTensor(self.name + "/c_state_" + str(c_ts),
-                              c_batch[:, c_ts, :].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                              c_batch[:, c_ts, :], dtype=Dtype.FP32)
                 self.placeholders.append(ph)
         for idx, placeholder_name in enumerate(lut_placeholder_list):
             self.placeholders[idx].betensor = eval(placeholder_name)
@@ -631,12 +664,12 @@ def lstm_quantize(self, *args):
 
     _, do_scale_type = range2dtype(0, do_scale.max().item())
     _, do_shift_type = range2dtype(do_shift.min(), do_shift.max().item(), force_int=True)
-    self.constants["scale"] = PyTensor(self.name + "/scale", do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
+    self.constants["scale"] = PyTensor(self.name + "/scale", do_scale, dtype=do_scale_type)
     self.constants["scale"].dtype = do_scale_type
-    self.constants["shift"] = PyTensor(self.name + "/shift", do_shift.cpu().numpy().astype(dtype2nptype(do_shift_type)))
+    self.constants["shift"] = PyTensor(self.name + "/shift", do_shift, dtype=do_shift_type)
     self.constants["shift"].dtype = do_shift_type
     self.constants["diff_shifts"] = PyTensor(
-        self.name + "/diff_shifts", diff_shifts.cpu().numpy().astype(dtype2nptype(do_shift_type)))
+        self.name + "/diff_shifts", diff_shifts, dtype=do_shift_type)
     self.constants["diff_shifts"].dtype = do_shift_type
     self.params["lut_shift_value"] = int(lut_shift)
     self.params["lut_shift_type"] = SHIFT_DTYPE
@@ -663,3 +696,30 @@ def lstm_quantize(self, *args):
             out, QuantMode.to_symmetric(q_mode_activation), q_bits_activation, is_signed=True)
         out.qbits = q_bits_activation
         out.qinvariant = False
+
+
+@approx_register(OpType.BasicLSTM)
+def lstm_approx(self, *args):
+    inp = self.inputs[0]
+    time_step = self.get_param('time_steps')
+    forget_bias = self.get_param('forget_bias', optional=True, default_value=0.0)
+    activations_list = self.get_param('activations') if 'activations' in self.params else ['SIGMOID', 'TANH', 'TANH']
+    cell_size = self.get_param('cell_size')
+    dev = inp.device
+
+    bak_inp_tensor_property = get_bak_tensor_property(self.inputs[0])
+    bak_outp_tensor_property = get_bak_tensor_property(self.outputs[0])
+
+    activations_in_scale = []
+    activations_out_scale = []
+    activation_idx_lut_name = {0: ('lut_it', 'lut_ft', 'lut_ot'), 1: ('lut_ct',), 2: ('lut_h',)}
+    for activation_idx, activation in enumerate(activations_list):
+        if activation in ["SIGMOID", "TANH"]:  # , "SOFTPLUS", "SOFTSIGN", "ELU", "HARDSIGMOID", "SCALEDTANH", "AFFINE", "THRESHOLDEDRELU"
+            generate_fp_lut_with_placeholders(self, activation_idx, activation, activation_idx_lut_name, *args)
+        else:
+            OPT_FATAL("Don't support activation[%s]." % (activation))
+
+    _tensor_default_property = get_tensor_default_property()
+    for p in _tensor_default_property:
+        self.inputs[0].__setattr__(p, bak_inp_tensor_property[self.inputs[0].name][p])
+        self.outputs[0].__setattr__(p, bak_outp_tensor_property[self.outputs[0].name][p])

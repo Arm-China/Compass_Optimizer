@@ -100,13 +100,13 @@ def ScatterND_quantize(self, *args):
 @op_register(OpType.ScatterND)
 def ScatterND(self, *args):
     dev = self.inputs[0].betensor.device
-    data = self.inputs[0].betensor.cpu()
     indices = self.inputs[1].betensor.to(torch.long).cpu()
-    updates = self.inputs[2].betensor.cpu()
     out = self.outputs[0]
     reduce_method = self.get_param('reduction', optional=False, default_value='NONE').upper()  # NONE/ADD/MUL
     qbits = self.outputs[0].qbits
     if self.quantized:
+        data = self.inputs[0].betensor.long().cpu()
+        updates = self.inputs[2].betensor.long().cpu()
         scale, scale0, scale1 = self.params["scale_value"]
 
         if is_signed(self.outputs[0].dtype):
@@ -120,13 +120,16 @@ def ScatterND(self, *args):
             shift = self.params['shift_value']
         data = (data + self.inputs[0].zerop.to(data.device)) * scale0
         updates = (updates + self.inputs[2].zerop.to(updates.device)) * scale1
+    else:
+        data = self.inputs[0].betensor.float().cpu()
+        updates = self.inputs[2].betensor.float().cpu()
 
     output = torch.clone(data)
     c = [torch.arange(s) for s in indices.shape[:-1]]
     idxs = torch.cartesian_prod(*c) if len(indices.shape) > 1 else [()]
 
     if len(self.placeholders) < 1:
-        ph0 = PyTensor(self.name+"/tmp_s", torch.tensor(0.).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        ph0 = PyTensor(self.name+"/tmp_s", torch.tensor(0.), dtype=Dtype.FP32)
         self.placeholders.append(ph0)
 
     #  scatternd allow add/mul index duplicate

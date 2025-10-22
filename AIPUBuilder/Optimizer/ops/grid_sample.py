@@ -617,14 +617,14 @@ def gridsample_quantize(self, *args):
             x_terp = ((gridx_range - lutx).float() * 1024).int()
             y_terp = ((gridy_range - luty).float() * 1024).int()
             self.constants["x_terp"] = PyTensor(
-                self.name + "/x_terp", x_terp.cpu().numpy().astype(dtype2nptype(bits2dtype(16, False))))
+                self.name + "/x_terp", x_terp, dtype=bits2dtype(16, False))
             self.constants["y_terp"] = PyTensor(
-                self.name + "/y_terp", y_terp.cpu().numpy().astype(dtype2nptype(bits2dtype(16, False))))
+                self.name + "/y_terp", y_terp, dtype=bits2dtype(16, False))
 
         self.constants["lutx"] = PyTensor(
-            self.name + "/lutx", lutx.cpu().numpy().astype(dtype2nptype(bits2dtype(16, True))))
+            self.name + "/lutx", lutx, dtype=bits2dtype(16, True))
         self.constants["luty"] = PyTensor(
-            self.name + "/luty", luty.cpu().numpy().astype(dtype2nptype(bits2dtype(16, True))))
+            self.name + "/luty", luty, dtype=bits2dtype(16, True))
         self.params['scale_value'] = [int(1), int(1)]
         self.params['scale_type'] = [Dtype.UINT8, Dtype.UINT8]
         self.params['shift_value'] = [int(0), int(0)]

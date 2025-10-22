@@ -55,24 +55,18 @@ def div_mod_forward(self, *args):
     if mode not in ['floor', 'trunc']:
         OPT_FATAL("currently the op{%s} only supprot mode[floor,trunc], but now mode is {%s}." % (self.type, mode))
 
-    torch_out_dtype = dtype2torch_type(inp0.ir_dtype)
-
     input0 = inp0.betensor.long()
     input1 = inp1.betensor.long()
     input0, input1 = broadcasting_transform(input0, input1)
-    out0.betensor = torch.zeros_like(input0, device=inp0.betensor.device).to(torch_out_dtype)
-    out1.betensor = torch.zeros_like(input0, device=inp0.betensor.device).to(torch_out_dtype)
+    out0.betensor = torch.zeros_like(input0, device=inp0.betensor.device)
+    out1.betensor = torch.zeros_like(input0, device=inp0.betensor.device)
 
     nonzeros_mask = input1 != 0
     quotient = torch.div(input0[nonzeros_mask], input1[nonzeros_mask], rounding_mode=mode)
     remainder = input0[nonzeros_mask] - input1[nonzeros_mask] * quotient
 
-    quotient_np = quotient.cpu().numpy().astype(dtype2nptype(inp0.ir_dtype))
-    pytensor = PyTensor('out0', quotient_np)
-    out0.betensor[nonzeros_mask] = pytensor.betensor.to(inp0.betensor.device).to(torch_out_dtype)
+    out0.betensor[nonzeros_mask] = quotient
 
-    remainder_np = remainder.cpu().numpy().astype(dtype2nptype(inp0.ir_dtype))
-    pytensor = PyTensor('out1', remainder_np)
-    out1.betensor[nonzeros_mask] = pytensor.betensor.to(inp0.betensor.device).to(torch_out_dtype)
+    out1.betensor[nonzeros_mask] = remainder
 
     return out0.betensor, out1.betensor

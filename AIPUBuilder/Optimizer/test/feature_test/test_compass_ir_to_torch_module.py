@@ -78,7 +78,7 @@ def main():
             # compute ONNX Runtime output prediction
             ort_inputs = {}
             for k, t in enumerate(g.input_tensors):
-                ort_inputs[ort_session.get_inputs()[k].name] = t.betensor.cpu().numpy()
+                ort_inputs[ort_session.get_inputs()[k].name] = t.to_numpy()
             ort_out = ort_session.run(None, ort_inputs)
 
             # dequantize quantized forward's output tensors for consistently call metirc functions

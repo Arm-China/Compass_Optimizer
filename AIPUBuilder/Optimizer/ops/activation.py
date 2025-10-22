@@ -39,7 +39,7 @@ def none_activation(self, *args):
         do_scale = self.get_ir_field(['scale', 'scale_value'], default_value=1)
         key_axis = out.key_axis
         x = linear_requantize(x + inp.broadcast_zerop, do_scale, do_shift, self.outputs[0].broadcast_zerop,
-                              self.outputs[0].qmin, self.outputs[0].qmax, key_axis)
+                              self.outputs[0].qmin, self.outputs[0].qmax, key_axis, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', out.dtype))
     out.betensor = x
     return out.betensor
 
@@ -94,7 +94,7 @@ def unknown_quantize(self, *args):
         lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax) + \
             torch.round(mirror_offset * out.scale)
         self.constants["lut"] = PyTensor(f"{self.name}/{func.__name__}_lut",
-                                         lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+                                         lut, dtype=out.dtype)
         self.constants["lut"].dtype = out.dtype
     out.qinvariant = False
 
@@ -128,7 +128,7 @@ def unknown_approx(self, *args):
             OPT_WARN(
                 f"{self} Activation op method=UNKNOWN does not support float forward, and the output.tensor will directly use input.tensor")
         lut = to_fp24(lut)
-        self.constants["lut"] = PyTensor(self.name + "/plh_lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        self.constants["lut"] = PyTensor(self.name + "/plh_lut", lut, dtype=Dtype.FP32)
         self.params['is_perf_mode'] = True
         self.params['lut_mode'] = 'NORMAL'
         self.params['index_scale_value'] = index_scale

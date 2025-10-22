@@ -13,8 +13,8 @@ def mod(self, *args):
     fmod = self.get_param("fmod")
 
     '''if want to use np.fmod or np.mod:'''
-    # np_dividend = dividend.betensor.cpu().numpy()
-    # np_divisor = divisor.betensor.cpu().numpy()
+    # np_dividend = dividend.to_numpy()
+    # np_divisor = divisor.to_numpy()
     # import numpy as np
     # _func_map = {
     #         True: np.fmod,

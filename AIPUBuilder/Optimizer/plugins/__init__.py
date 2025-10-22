@@ -88,4 +88,6 @@ from . import aipubt_dataset_OpTestNumpyZipped
 from . import aipubt_metric_OpTestCosDistance
 
 # for qconfig
+from . import aipubt_qconfig_minicpm_vpm
 from . import aipubt_qconfig_bevformer
+from . import aipubt_qconfig_qwen15_w4a8

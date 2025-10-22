@@ -164,14 +164,14 @@ def affinegrid_quantize(self, *args):
     H_lut = get_grid_vec(H, align_corners, dev)
     W_lut = torch.clamp((W_lut * (2**multiplier_bits)).round(), grid_min, grid_max)
     H_lut = torch.clamp((H_lut * (2**multiplier_bits)).round(), grid_min, grid_max)
-    self.constants["w_lut"] = PyTensor("W_lut", W_lut.cpu().numpy().astype(dtype2nptype(grid_dtype)))
+    self.constants["w_lut"] = PyTensor("W_lut", W_lut, dtype=grid_dtype)
     self.constants["w_lut"].dtype = grid_dtype
-    self.constants["h_lut"] = PyTensor("H_lut", H_lut.cpu().numpy().astype(dtype2nptype(grid_dtype)))
+    self.constants["h_lut"] = PyTensor("H_lut", H_lut, dtype=grid_dtype)
     self.constants["h_lut"].dtype = grid_dtype
     if is_5dims:
         D_lut = get_grid_vec(D, align_corners, dev)
         D_lut = torch.clamp((D_lut * (2**multiplier_bits)).round(), grid_min, grid_max)
-        self.constants["d_lut"] = PyTensor("D_lut", D_lut.cpu().numpy().astype(dtype2nptype(grid_dtype)))
+        self.constants["d_lut"] = PyTensor("D_lut", D_lut, dtype=grid_dtype)
         self.constants["d_lut"].dtype = grid_dtype
 
     ts = out.scale / (inp0.scale * (2**(multiplier_bits)))

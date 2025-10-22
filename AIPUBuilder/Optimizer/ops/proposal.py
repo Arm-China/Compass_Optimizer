@@ -115,8 +115,8 @@ def apply_box_deltas(self, config, score, deltas):
             placeholders_output.append(tensor_all)
 
         if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/coords", placeholders_output[0].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name+"/box", placeholders_output[1].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph0 = PyTensor(self.name+"/coords", placeholders_output[0], dtype=Dtype.FP32)
+            ph1 = PyTensor(self.name+"/box", placeholders_output[1], dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
         self.placeholders[0].betensor = placeholders_output[0]
@@ -234,7 +234,7 @@ def Proposal_quantize(self, *args):
     constants_name = ['ycenter', 'xcenter', 'ha', 'wa']
     for idx, name in enumerate(constants_name):
         self.constants[name] = PyTensor(self.name+name, torch.squeeze(eval(name)
-                                                                      ).cpu().numpy().astype(dtype2nptype(bits2dtype(16, is_signed=True))))
+                                                                      ), dtype=bits2dtype(16, is_signed=True))
 
     box.qbits = max(16, q_bits_activation)
     box.scale, box.zerop, box.qmin, box.qmax, box.dtype = get_linear_quant_params_from_tensor(
@@ -282,7 +282,7 @@ def Proposal_quantize(self, *args):
     for lut in lut_object_name.keys():
         name = lut_object_name[lut]
         self.constants[name] = PyTensor(
-            self.name+name, lut.cpu().numpy().astype(dtype2nptype(bits2dtype(16, is_signed=True))))
+            self.name+name, lut, dtype=bits2dtype(16, is_signed=True))
 
     score_q_min, score_q_max = bits2range(inp[0].qbits, False)
     self.params["box_shift_value"] = int(coord_shift)

@@ -15,17 +15,33 @@ def control_if_forward(self, *args):
     else_branch_g = self.get_sub_graph('else_branch')
     then_branch_inputs_num = self.params['then_branch_inputs_num']
     else_branch_inputs_num = self.params['else_branch_inputs_num']
+
+    # # copy quantize related configurations
+    # if not self.quantized:
+    #     if 'subgraph_constants' not in self.attrs:
+    #         for sn in then_branch_g.nodes + else_branch_g.nodes:
+    #             for qk, qv in self.attrs.items():
+    #                 sn.attrs[qk] = qv
+
     cond = self.inputs[0].betensor
     cg = None
+    eg = None
     feed_data = []
+    efeed_data = []
     if cond:
         cg = then_branch_g
+        eg = else_branch_g
         for t in self.inputs[1:(1+then_branch_inputs_num)]:
             feed_data.append(t.betensor.clone())
+        for t in self.inputs[(1+then_branch_inputs_num):]:
+            efeed_data.append(t.betensor.clone())
     else:
         cg = else_branch_g
+        eg = then_branch_g
         for t in self.inputs[(1+then_branch_inputs_num):]:
             feed_data.append(t.betensor.clone())
+        for t in self.inputs[1:(1+then_branch_inputs_num)]:
+            efeed_data.append(t.betensor.clone())
     if self.quantized:
         cg = cg.quantgraph
     cg.forward(feed_data, disable_pbar=True, keep_tensors=True)
@@ -35,10 +51,12 @@ def control_if_forward(self, *args):
 
     if not self.quantized:
         if 'subgraph_constants' not in self.attrs:
+            # initial forward to check graph
+            eg.forward(efeed_data, disable_pbar=True, keep_tensors=True)
             self.attrs['subgraph_constants'] = []
             for sn in then_branch_g.nodes + else_branch_g.nodes:
-                # push sub_graph's activation tensors into self.placeholders for statistic
-                self.placeholders.extend(list(sn.outputs) + list(sn.placeholders))
+                # # push sub_graph's activation tensors into self.placeholders for statistic
+                # self.placeholders.extend(list(sn.outputs) + list(sn.placeholders))
                 # push sub_graph's constant tensors into self.attrs for statistic
                 self.attrs['subgraph_constants'].extend(
                     list(sn.constants.values()) + sn.get_attrs('subgraph_constants', optional=True, default_value=[]))
@@ -60,77 +78,96 @@ def subg_inp_quantize(self, *args):
     out.qmax = qinfo['qmax']
     out.qinvariant = qinfo['qinvariant']
 
+# control operator has subgraph, which is not suitable for quantization, disable for potential bugs
+# all subgraphs are pre-quantized in optmaser.py to prevent reduplicate quantization
+
 
 @quant_register(OpType.If)
 def control_if_quantize(self, *args):
     OPT_WARN(f'{self} : quantize control flow operator may cause unpredictable accuracy issues')
     then_branch_g = self.get_sub_graph('then_branch')
     else_branch_g = self.get_sub_graph('else_branch')
-    then_branch_inputs_num = self.params['then_branch_inputs_num']
-    else_branch_inputs_num = self.params['else_branch_inputs_num']
-    for sn in then_branch_g.nodes + else_branch_g.nodes:
-        sn.params['unquantifiable'] = self.params['unquantifiable']
-        for qv in g_q_attrs_list:
-            sn.attrs[qv] = self.attrs[qv]
+    # then_branch_inputs_num = self.params['then_branch_inputs_num']
+    # else_branch_inputs_num = self.params['else_branch_inputs_num']
+    # for sn in then_branch_g.nodes + else_branch_g.nodes:
+    #     sn.params['unquantifiable'] = self.params['unquantifiable']
+    #     for qv in g_q_attrs_list:
+    #         sn.attrs[qv] = self.attrs[qv]
 
-    for i, t in enumerate(then_branch_g.input_tensors):
-        rt = self.inputs[1+i]
-        t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
-                                           'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
-    for i, t in enumerate(else_branch_g.input_tensors):
-        rt = self.inputs[1+then_branch_inputs_num+i]
-        t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
-                                           'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
-    # disable auto quantization of subgraph input tensors in case of overwriting
-    bak_inp_quantize = QUANT_OP_DICT[OpType.Input]
-    QUANT_OP_DICT[OpType.Input] = subg_inp_quantize
-    then_branch_g.quantgraph = None
-    then_branch_g.quantize(disable_pbar=True)
-    else_branch_g.quantgraph = None
-    else_branch_g.quantize(disable_pbar=True)
-    QUANT_OP_DICT[OpType.Input] = bak_inp_quantize
+    # for i, t in enumerate(then_branch_g.input_tensors):
+    #     rt = self.inputs[1+i]
+    #     t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
+    #                                        'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
+    # for i, t in enumerate(else_branch_g.input_tensors):
+    #     rt = self.inputs[1+then_branch_inputs_num+i]
+    #     t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
+    #                                        'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
+    # # disable auto quantization of subgraph input tensors in case of overwriting
+    # bak_inp_quantize = QUANT_OP_DICT[OpType.Input]
+    # QUANT_OP_DICT[OpType.Input] = subg_inp_quantize
+    # then_branch_g.quantgraph = None
+    # then_branch_g.quantize(disable_pbar=True)
+    # else_branch_g.quantgraph = None
+    # else_branch_g.quantize(disable_pbar=True)
+    # QUANT_OP_DICT[OpType.Input] = bak_inp_quantize
     cond = self.inputs[0].betensor
     cg = then_branch_g if cond else else_branch_g
     for ot, st in zip(self.outputs, cg.quantgraph.output_tensors):
         ot.clone_qinfo(st)
 
+# control operator has subgraph, which is not suitable for quantization, disable for potential bugs
+# all subgraphs are pre-quantized in optmaser.py to prevent reduplicate quantization
+
 
 @op_register(OpType.Loop)
 def control_loop_forward(self, *args):
     cg = self.get_sub_graph('body')
+
+    # # copy quantize related configurations
+    # if not self.quantized:
+    #     if 'subgraph_constants' not in self.attrs:
+    #         for sn in cg.nodes:
+    #             for qk, qv in self.attrs.items():
+    #                 sn.attrs[qk] = qv
+
     if self.quantized:
         cg = cg.quantgraph
     M = self.inputs[0].betensor
     cond_in = self.inputs[1].betensor
 
-    N = len(self.inputs) - 2
+    N = self.get_param('dependency_inputs_num')
     i = 0
     feed_data = []
     for t in self.inputs:
         feed_data.append(t.betensor.clone())
-    K = len(self.outputs) - N
+    K = self.get_param('scan_outputs_num')
     scan_outputs = []
     for _ in range(K):
         scan_outputs.append([])
     while i < M and cond_in:
+        i_in = torch.zeros_like(M) + i
+        feed_data[0] = i_in
         cg.forward(feed_data, disable_pbar=True, keep_tensors=True)
         cond_in = cg.output_tensors[0].betensor
-        feed_data = [M, cond_in] + [ot.betensor for ot in cg.output_tensors[1:1+N]]
+        feed_data = [M, cond_in] + [ot.betensor for ot in cg.output_tensors[1:1+N]] + feed_data[2+N:]
         for k in range(K):
-            scan_outputs[k].append(cg.output_tensors[1+N+k].betensor.unsqueeze(0))
+            sct = cg.output_tensors[1+N+k].betensor
+            if len(sct.shape) < 1:
+                sct = sct.unsqueeze(0)
+            scan_outputs[k].append(sct)
         i += 1
 
     for k in range(N):
         self.outputs[k].betensor = cg.output_tensors[1+k].betensor.clone()
     for k in range(K):
-        self.outputs[N+k].betensor = torch.cat(scan_outputs[k])
+        self.outputs[N+k].betensor = torch.vstack(scan_outputs[k])
 
     if not self.quantized:
         if 'subgraph_constants' not in self.attrs:
             self.attrs['subgraph_constants'] = []
             for sn in cg.nodes:
-                # push sub_graph's activation tensors into self.placeholders for statistic
-                self.placeholders.extend(list(sn.outputs) + list(sn.placeholders))
+                # # push sub_graph's activation tensors into self.placeholders for statistic
+                # self.placeholders.extend(list(sn.outputs) + list(sn.placeholders))
                 # push sub_graph's constant tensors into self.attrs for statistic
                 self.attrs['subgraph_constants'].extend(
                     list(sn.constants.values()) + sn.get_attrs('subgraph_constants', optional=True, default_value=[]))
@@ -140,20 +177,20 @@ def control_loop_forward(self, *args):
 def control_loop_quantize(self, *args):
     OPT_WARN(f'{self} : quantize control flow operator may cause unpredictable accuracy issues')
     cg = self.get_sub_graph('body')
-    for sn in cg.nodes:
-        sn.params['unquantifiable'] = self.params['unquantifiable']
-        for qv in g_q_attrs_list:
-            sn.attrs[qv] = self.attrs[qv]
+    # for sn in cg.nodes:
+    #     sn.params['unquantifiable'] = self.params['unquantifiable']
+    #     for qv in g_q_attrs_list:
+    #         sn.attrs[qv] = self.attrs[qv]
 
-    for i, t in enumerate(cg.input_tensors):
-        rt = self.inputs[i]
-        t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
-                                           'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
-    # disable auto quantization of subgraph input tensors in case of overwriting
-    bak_inp_quantize = QUANT_OP_DICT[OpType.Input]
-    QUANT_OP_DICT[OpType.Input] = subg_inp_quantize
-    cg.quantgraph = None
-    cg.quantize(disable_pbar=True)
-    QUANT_OP_DICT[OpType.Input] = bak_inp_quantize
+    # for i, t in enumerate(cg.input_tensors):
+    #     rt = self.inputs[i]
+    #     t.attrs['qinfo_from_call_func'] = {'scale': rt.scale, 'zerop': rt.zerop, 'qbits': rt.qbits,
+    #                                        'dtype': rt.dtype, 'qmin': rt.qmin, 'qmax': rt.qmax, 'qinvariant': rt.qinvariant}
+    # # disable auto quantization of subgraph input tensors in case of overwriting
+    # bak_inp_quantize = QUANT_OP_DICT[OpType.Input]
+    # QUANT_OP_DICT[OpType.Input] = subg_inp_quantize
+    # cg.quantgraph = None
+    # cg.quantize(disable_pbar=True)
+    # QUANT_OP_DICT[OpType.Input] = bak_inp_quantize
     for i, t in enumerate(self.outputs):
         t.clone_qinfo(cg.quantgraph.output_tensors[1+i])

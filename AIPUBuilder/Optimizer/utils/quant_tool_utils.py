@@ -25,9 +25,10 @@ ASYM2SYM_OP_DICT = {  # (op.type)      : (tensor_idx,         QuantMode)
     OpType.GRUv3: ((1,), "per_tensor_symmetric_restricted_range"),
 }
 
-ABSORB_INPUT_SCALE_OP = [OpType.Convolution, OpType.FullyConnected, OpType.LayerNorm, OpType.BatchNorm]
+ABSORB_INPUT_SCALE_OP = [OpType.Convolution, OpType.FullyConnected, OpType.BatchNorm]
 AIFF_AHEAD_SHIFT_OP = [OpType.Convolution, OpType.Convolution3D, OpType.ConvTranspose, OpType.GRUv3,
                        OpType.ConvTranspose3D, OpType.DepthwiseConv, OpType.FullyConnected, OpType.MatMul]
+
 
 #########################################################################################################################
 # class routines
@@ -42,6 +43,8 @@ class Target:
         Support_Target("X1", 0, 8, 16),
         Support_Target("X2", 1, 8, 32),
         Support_Target("X3", 2, 9, 32),
+        Support_Target("X3P", 2, 9, 32),
+        Support_Target("X3S", 2, 9, 32),
     ]
     is_valid_ = defaultdict(lambda: False, {t.name: True for t in target})
     support_target_list_ = {t.name: t.level for t in target}
@@ -179,8 +182,95 @@ class QuantMode:
         return cls.make_mode(cls.is_per_channel(mode_name), cls.is_per_block(mode_name), cls.is_asymmetric(mode_name), False)
 
 
+class QuantType:
+    Support_quantType = namedtuple('QuantType', ['name', 'activation_bits', 'weight_bits',
+                                   'bias_bits', 'lut_items_in_bits', 'activation_type', 'weight_type', 'bias_type'])
+    quant_type = [
+        Support_quantType("int8", 8, 8, 32, 8, Dtype.INT8, Dtype.INT8, Dtype.INT32),
+        Support_quantType("int16", 16, 16, 48, 10, Dtype.INT16, Dtype.INT16, Dtype.INT64),
+        Support_quantType("fp8_e4m3fn", 8, 8, 32, 8, Dtype.FP8_E4M3FN, Dtype.FP8_E4M3FN, Dtype.FP32),
+        Support_quantType("fp8_e5m2", 8, 8, 32, 8, Dtype.FP8_E5M2, Dtype.FP8_E5M2, Dtype.FP32),
+    ]
+    name_list_ = [quant.name for quant in quant_type]
+    is_valid_ = defaultdict(lambda: False, {quant.name: True for quant in quant_type})
+    is_float_ = {quant.name: is_float(str2dtype(quant.name)) for quant in quant_type}
+    activation_bits_ = {quant.name: quant.activation_bits for quant in quant_type}
+    weight_bits_ = {quant.name: quant.weight_bits for quant in quant_type}
+    bias_bits_ = {quant.name: quant.bias_bits for quant in quant_type}
+    activation_type_ = {quant.name: quant.activation_type for quant in quant_type}
+    weight_type_ = {quant.name: quant.weight_type for quant in quant_type}
+    bias_type_ = {quant.name: quant.bias_type for quant in quant_type}
+    lut_items_in_bits_ = {quant.name: quant.lut_items_in_bits for quant in quant_type}
+    # For now, let's simply set up support
+    supprot_fp_quant_type_op_type_ = {
+        # 'int8' : all_opType,
+        # 'int16' : all_opType,
+        "fp8_e4m3fn": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+        "fp8_e5m2": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+    }
+
+    @classmethod
+    def quant_names(cls):
+        return cls.name_list_
+
+    @classmethod
+    def is_float(cls, quant_name):
+        return cls.is_float_[quant_name.lower()]
+
+    @classmethod
+    def lut_items_in_bits(cls, quant_name):
+        return cls.lut_items_in_bits_[quant_name.lower()]
+
+    @classmethod
+    def activation_bits(cls, quant_name):
+        return cls.activation_bits_[quant_name.lower()]
+
+    @classmethod
+    def weight_bits(cls, quant_name):
+        return cls.weight_bits_[quant_name.lower()]
+
+    @classmethod
+    def bias_bits(cls, quant_name):
+        return cls.bias_bits_[quant_name.lower()]
+
+    @classmethod
+    def activation_type(cls, quant_name):
+        return cls.activation_type_[quant_name.lower()]
+
+    @classmethod
+    def weight_type(cls, quant_name):
+        return cls.weight_type_[quant_name.lower()]
+
+    @classmethod
+    def bias_type(cls, quant_name):
+        return cls.bias_type_[quant_name.lower()]
+
+    @classmethod
+    def fp_quant_op_type(cls, quant_name):
+        return cls.supprot_fp_quant_type_op_type_[quant_name.lower()]
+
+
 #########################################################################################################################
 # math routines
+
+def align_shape_by_padding(x, y):
+    import torch
+    p_a = []
+    p_b = []
+    a = x
+    b = y
+    if len(x.shape) < len(y.shape):
+        a, b = y, x
+    for _ in range(len(a.shape) - len(b.shape)):
+        b = torch.unsqueeze(b, 0)
+    for i in range(len(a.shape)-1, -1, -1):
+        if a.shape[i] > b.shape[i]:
+            p_a.extend([0, 0])
+            p_b.extend([0, a.shape[i]-b.shape[i]])
+        else:
+            p_a.extend([0, b.shape[i]-a.shape[i]])
+            p_b.extend([0, 0])
+    return torch.nn.functional.pad(a, p_a), torch.nn.functional.pad(b, p_b)
 
 
 def cosine_distance(a, b):
@@ -256,13 +346,39 @@ def unify_scale(func):
     return _wrapper
 
 
+def get_fpx_quant_params_from_tensor(x, quant_mode, quant_type):
+    norm_min, norm_max = dtype2range(quant_type)
+    quant_range = max(abs(norm_min), abs(norm_max))
+    dev = x.betensor.device
+    if QuantMode.is_asymmetric(quant_mode):
+        OPT_WARN(f"{x} currently don't support asymmetric quant mode, now convert to symmetric quant mode.")
+        quant_mode = QuantMode.to_symmetric(quant_mode)
+    if x.key_axis is None:
+        quant_mode = QuantMode.to_per_tensor(quant_mode)
+    if QuantMode.is_per_channel(quant_mode):
+        f_ranges = torch.max(x.max_key_axis.abs(), x.min_key_axis.abs())
+        # f_zfactor = torch.zeros_like(x.min_key_axis)
+        # f_zoffset = torch.zeros_like(f_zfactor)
+    elif QuantMode.is_per_block(quant_mode):
+        OPT_FATAL("Currently not support per-block quantization!")
+    else:
+        f_ranges = torch_tensor(max(abs(x.max), abs(x.min)), device=dev).to(torch.float32)
+        # f_zfactor = torch.zeros_like(x.min_key_axis)
+        # f_zoffset = torch.zeros_like(f_zfactor)
+    f_ranges += 1e-5
+    scale = norm_max / f_ranges
+    zerop = torch.zeros_like(scale)
+    return scale, zerop, norm_min, norm_max
+
+
 @unify_scale
 def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
     assert QuantMode.is_valid(quant_mode), f"{quant_mode} is not one of [{QuantMode.mode_names}]"
     assert bits > 0, "quantization bits should be > 0, now is {bits}"
     QUANTIZE_ZERO_BAND = torch.finfo(torch.float32).eps
     dev = x.betensor.device
-
+    if x.key_axis is None:
+        quant_mode = QuantMode.to_per_tensor(quant_mode)
     q_max, q_min = 2 ** bits - 1, 0
     if is_signed:
         if QuantMode.is_full_range(quant_mode):
@@ -307,19 +423,6 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
     return scale, zerop, q_min, q_max, bits2dtype(bits, is_signed)
 
 
-def get_round_mode_func(round_mode):
-    round_mode = round_mode.upper()
-    if round_mode == 'CEIL':
-        def round_func(x): return torch.floor(x + 0.5)
-    elif round_mode == 'FLOOR':
-        round_func = torch.floor
-    elif round_mode == 'TRUNC':
-        round_func = torch.trunc
-    else:
-        round_func = torch.round
-    return round_func
-
-
 def linear_quantize_clip(x, scale, zero_point, clamp_min, clamp_max, key_axis=None, round_func=get_round_mode_func('ROUND_TO_EVEN')):
     dev = x.device if isinstance(x, torch.Tensor) else None
     x_t, scale_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
@@ -346,6 +449,24 @@ def linear_dequantize(x, scale, zero_point, key_axis=None):
         scale_t = scale_t.reshape(scale_shape)
         zero_point_t = zero_point_t.reshape(scale_shape)
     return (x_t + zero_point_t) * (1.0 / scale_t)
+
+
+def linear_dequantize_for_gptq_w4afp8(self_constants):
+
+    wt = self_constants["weights"].clone()
+    scale0 = self_constants["scale0"].betensor.clone()
+    scale1 = self_constants["scale1"].betensor.clone()
+
+    block_size = wt.ir_shape[1]//self_constants["scale0"].ir_shape[-1]
+    bshape = list(wt.ir_shape)
+    bshape[-1] = int(wt.ir_shape[-1] / block_size)
+    scale = scale0.flatten().reshape(bshape).repeat_interleave(block_size, dim=-1)
+    zero_point = wt.zerop.flatten().reshape(bshape).repeat_interleave(block_size, dim=-1)
+    w = wt.betensor
+    dev = w.device if isinstance(w, torch.Tensor) else None
+    w_t, scale_t, zero_point_t = batch_construct_torch_tensor([w, scale, zero_point], device=dev)
+
+    return ((w_t - zero_point_t) * scale_t.float()).to(scale_t.dtype).float(), scale1
 
 
 def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mult_bits_ceil=15, shift_bits_ceil=31,
@@ -377,7 +498,7 @@ def get_scale_approximation_params(fp32_scale_value, mult_bits, limit=False, mul
         return multiplier, multiplier_type, shift_bits, shiftbits_type
 
 
-def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max, key_axis=None):
+def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_max, key_axis=None, round_func=get_round_mode_func('ROUND_TO_EVEN')):
     dev = x.device if isinstance(x, torch.Tensor) else None
     x_t, multiplier_t, shift_bits_t, zero_point_t, clamp_min_t, clamp_max_t = batch_construct_torch_tensor(
         [x, multiplier, shift_bits, zero_point, clamp_min, clamp_max], device=dev)
@@ -387,7 +508,7 @@ def linear_requantize(x, multiplier, shift_bits, zero_point, clamp_min, clamp_ma
         shift_bits_t = shift_bits_t.reshape(broadcast_shape)
         zero_point_t = zero_point_t.reshape(broadcast_shape)
     x_type = x_t.dtype
-    y = torch.clamp(torch.round(x_t.double() * multiplier_t * (0.5 ** shift_bits_t)) - zero_point_t,
+    y = torch.clamp(round_func(x_t.double() * multiplier_t * (0.5 ** shift_bits_t)) - zero_point_t,
                     clamp_min_t, clamp_max_t).double()
     y = torch.where(torch.isnan(y), torch.zeros_like(y, device=y.device), y)
     xmin, xmax = dtype2range(torch_type2dtype(x_type))

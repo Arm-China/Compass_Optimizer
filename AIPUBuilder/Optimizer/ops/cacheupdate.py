@@ -5,8 +5,6 @@ from AIPUBuilder.Optimizer.utils import *
 from AIPUBuilder.Optimizer.framework import *
 import torch
 
-shared_mem = {}
-
 
 @op_register(OpType.CacheUpdate)
 def cacheupdate(self, *args):
@@ -30,20 +28,30 @@ def cacheupdate(self, *args):
         self.outputs[1].betensor = history.clone().reshape(origin_shape)
         return
 
-    if not self.graph in shared_mem:
-        shared_mem[self.graph] = []
-    if not "mem_idx" in self.attrs:
-        self.attrs["mem_idx"] = len(shared_mem[self.graph])
-        shared_mem[self.graph].append(torch.zeros(self.inputs[0].ir_shape))
-    if self.inputs[0].betensor.numel() > 1:
-        shared_mem[self.graph][self.attrs["mem_idx"]] = self.inputs[0].betensor
-    batch, num_head, cache_len, head_dim = self.inputs[2].betensor.shape
-    pos_idx = self.inputs[1].betensor[0, 0].item()
-    shared_mem[self.graph][self.attrs["mem_idx"]].view(
-        [batch, num_head, -1, head_dim])[:, :, pos_idx:pos_idx+cache_len, :] = self.inputs[2].betensor
-    self.outputs[0].betensor = shared_mem[self.graph][self.attrs["mem_idx"]].reshape(
-        [batch, num_head, -1, head_dim])[:, :, :pos_idx+cache_len]
-    self.outputs[1].betensor = shared_mem[self.graph][self.attrs["mem_idx"]]
+    if 'global_mem_cache' not in self.attrs:
+        self.attrs['global_mem_cache'] = {}
+    if not self.inputs[0].name in self.attrs['global_mem_cache']:
+        self.attrs['global_mem_cache'][self.inputs[0].name] = self.inputs[0].betensor.clone()
+    global_mem = self.attrs['global_mem_cache'][self.inputs[0].name]
+
+    blk_idx = self.params['block_index']
+    buf = global_mem
+    idx = self.inputs[1].betensor.long()[0]
+    inp = self.inputs[2].betensor.type_as(buf)
+
+    bsz, head_num, cache_len, head_dim = inp.shape
+    queue_in = inp.permute(0, 2, 1, 3).reshape(1, 1, cache_len, head_num * head_dim)
+    buf[blk_idx:blk_idx+1, 0:1, idx, :] = queue_in
+
+    if len(idx) == 1:
+        out_idx = torch.arange(idx.item()+1).long().to(inp.device)
+    else:
+        out_idx = idx
+    out = buf[blk_idx:blk_idx+1, 0:1, out_idx, :].reshape(bsz, len(out_idx), head_num, head_dim)
+    out = out.permute(0, 2, 1, 3)
+    self.outputs[0].betensor = out
+    self.outputs[1].betensor = global_mem
+    return (self.outputs[0].betensor, self.outputs[1].betensor)
 
 
 @quant_register(OpType.CacheUpdate)

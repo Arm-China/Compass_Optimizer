@@ -272,6 +272,8 @@ class QBaseOperator(nn.Module):
         return tensor
 
     def _linear_quantize_dequantize(self, tensor, qinfo):
+        if qinfo.qinvariant:
+            return tensor
         scale, zerop, clip_min, clip_max = qinfo.scale, qinfo.zerop, qinfo.qmin, qinfo.qmax
         tscale = torch_tensor(scale, device=tensor.device)
         tzerop = torch_tensor(zerop, device=tensor.device)
@@ -304,7 +306,8 @@ class QBaseOperator(nn.Module):
             tensor = self.linear_quantize_dequantize(tensor, qinfo)
             return tensor
         else:  # self.quant_stage == QuantStage.INFER
-            tensors = self.linear_quantize_dequantize(tensor, qinfo)
+            tensors = self._linear_quantize_dequantize(tensor, qinfo)
+            # tensors = self.linear_quantize_dequantize(tensor, qinfo)
             return tensors
 
     def unify_shift(self, total_scale, bits):

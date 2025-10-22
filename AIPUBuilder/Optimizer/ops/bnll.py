@@ -31,7 +31,7 @@ def bnll_quantize(self, *args):
     condition = (lut > 0)
     y = torch.where(condition, pos, neg)
     lut = linear_quantize_clip(y, out.scale, out.zerop, out.qmin, out.qmax)
-    self.constants["lut"] = PyTensor(self.name+"/bnll_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+    self.constants["lut"] = PyTensor(self.name+"/bnll_lut", lut, dtype=out.dtype)
     out.qinvariant = False
 #############################################################
 # algorithm describe:

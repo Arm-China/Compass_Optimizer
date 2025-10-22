@@ -192,7 +192,9 @@ class OptMaster(object):
             if node.type == OpType.BatchNorm and 'q_bits_weight' not in properties:
                 node.attrs['q_bits_weight'] = 16
             init_attrs('q_bits_bias', self.hparams.bias_bits.get(node))
+            init_attrs('quant_type', self.hparams.quant_type.get(node))
             init_attrs('weight_block_size', self.hparams.weight_block_size.get(node))
+            init_attrs('activation_block_size', self.hparams.activation_block_size.get(node))
             init_attrs('q_strategy_activation', self.hparams.calibration_strategy_for_activation.get(node))
             init_attrs('q_strategy_weight', self.hparams.calibration_strategy_for_weight.get(node))
             init_attrs('q_strategy_bias', self.hparams.calibration_strategy_for_weight.get(node))
@@ -350,6 +352,8 @@ class OptMaster(object):
         if self.graph_optimize_stage3_flag:
             return
 
+        from AIPUBuilder.Optimizer.passes.merge_inserted_op import merge_inserted_op
+        merge_inserted_op(self.g.quantgraph, self.hparams)
         ################################################################
         #  insert pad op for avgpool when count_include_pad=ceil_mode=True zp!=0
         from AIPUBuilder.Optimizer.passes.insert_op import InsertPadOp
@@ -520,14 +524,12 @@ class OptMaster(object):
             autosearch_enginer.auto_search()
 
         # this pass will insert cast/quantize/dequantize op which meets the requirement
-        insert_obj = [InsertQuantizeOp, InsertDeQuantizeOp, InsertCastOp]
+        insert_obj = [InsertFakeOp, InsertQuantizeOp, InsertDeQuantizeOp, InsertCastOp]
         insert_op_pass(self.g, self.hparams, insert_obj)
         # it's not necessary to hold the original graph when self.dataloader4debug is none (cosine similarity and metric are skipped) to save memory
         self.g.quantgraph = self.g.clone() if self.dataloader4debug is not None else self.g
         unify_scales_for_multi_inputs_op_pass(self.g.quantgraph, self.hparams)
         self.g.quantize()
-        from AIPUBuilder.Optimizer.passes.merge_inserted_op import merge_inserted_op
-        merge_inserted_op(self.g.quantgraph, self.hparams)
 
     def enable_fake_quant_scopes_for_debug(self, fake_quant_scopes):
         #################################################################################
@@ -552,6 +554,7 @@ class OptMaster(object):
         #################################################################################
 
     def _forward_with_zeros_input(self, g, msg=""):
+        g.reset_edge_tensors_ref_count()
         inputs = []
         for inp in g.input_tensors:
             shape = list(inp.ir_shape)
@@ -565,9 +568,18 @@ class OptMaster(object):
             inp.betensor = PyTensor('tmp', d).betensor
         for n in g.nodes:
             n.forward()
-            # cp-13888 when nonzero has [0] shape, the following ops like reshape may be crash.
-            if n.type == OpType.NonZero and n.outputs[0].betensor.numel() == 0:
-                n.outputs[0].betensor = torch.zeros(n.outputs[0].ir_shape, device=n.outputs[0].device)
+            # # cp-13888 when nonzero has [0] shape, the following ops like reshape may be crash.
+            # if n.type == OpType.NonZero and n.outputs[0].betensor.numel() == 0:
+            #     n.outputs[0].betensor = torch.zeros(n.outputs[0].ir_shape, device=n.outputs[0].device)
+            flag = False
+            for t in n.outputs:
+                if t.betensor.numel() < 1:
+                    flag = True
+                    break
+            if flag:
+                for t in n.outputs:
+                    t.betensor = torch.zeros(t.ir_shape, device=t.betensor.device)
+        g.reset_edge_tensors_ref_count()
 
     @opt_workflow_register
     def serialize(self, name="graph"):
@@ -593,9 +605,6 @@ class OptMaster(object):
                 n.params['D_dynamic_shape'] = dynamic_top_shape[:-1] + "]"
                 n.params['D_layer_id'] = n.attrs.get('layer_id', 'unknown')
             set_ds_constant_shape(n)
-        for sv, sg in qg.subgraph_map.items():
-            if sg.quantgraph is not None:
-                qg.subgraph_map[sv] = sg.quantgraph
         if self.hparams.export_parallel_batch:
             graph = qg.clone()
             copy_parallel_batch(graph, self.hparams)
@@ -749,7 +758,7 @@ class OptMaster(object):
             fn_max_len = statvfs.f_namemax
 
             op_type = str(node.type)[7:]
-            layer_name = '[' + node.name + ']'
+            layer_name = '_' + node.name + '_'
 
             def _get_fn(key, tensor_name=None):
                 fn = ('_'.join([md_name, op_type, layer_name, key, tensor_name])).replace('/', '_').replace(':', '_')
@@ -758,13 +767,13 @@ class OptMaster(object):
             if enable_inputs:
                 for i, inpt in enumerate(node.inputs):
                     fn = _get_fn('i' + str(i), inpt.name)
-                    np.save(os.path.join(path, fn), inpt.betensor.cpu().numpy().astype(dtype2nptype(inpt.dtype)))
-                    # inpt.betensor.cpu().numpy().astype(dtype2nptype(inpt.dtype)).tofile(os.path.join(path, fn) +  '_layer_' + n.attrs['layer_id'] + '.bin')
+                    np.save(os.path.join(path, fn), inpt.to_numpy())
+                    # inpt.tofile(os.path.join(path, fn) +  '_layer_' + node.attrs['layer_id'] + '.bin')
             if enable_outputs:
                 for i, outt in enumerate(node.outputs):
                     fn = _get_fn('o' + str(i), outt.name)
-                    np.save(os.path.join(path, fn), outt.betensor.cpu().numpy().astype(dtype2nptype(outt.dtype)))
-                    # outt.betensor.cpu().numpy().astype(dtype2nptype(outt.dtype)).tofile(os.path.join(path, fn) + '_layer_' + n.attrs['layer_id'] + '.bin')
+                    np.save(os.path.join(path, fn), outt.to_numpy())
+                    # outt.tofile(os.path.join(path, fn) + '_layer_' + node.attrs['layer_id'] + '.bin')
             if enable_constants:
                 _brev_map = {
                     "weights": 'w',
@@ -773,12 +782,12 @@ class OptMaster(object):
                 for name, consts in node.constants.items():
                     n = _brev_map.get(name, name)
                     fn = _get_fn(n, consts.name)
-                    np.save(os.path.join(path, fn), consts.betensor.cpu().numpy().astype(dtype2nptype(consts.dtype)))
-                    # consts.betensor.cpu().numpy().astype(dtype2nptype(consts.dtype)).tofile(os.path.join(path, fn) +  '_layer_' + n.attrs['layer_id'] + '.bin')
+                    np.save(os.path.join(path, fn), consts.to_numpy())
+                    # consts.tofile(os.path.join(path, fn) +  '_layer_' + node.attrs['layer_id'] + '.bin')
             if enable_placeholder:
                 for i, plt in enumerate(node.placeholders):
                     fn = _get_fn('p' + str(i), plt.name)
-                    np.save(os.path.join(path, fn), plt.betensor.cpu().numpy())
+                    np.save(os.path.join(path, fn), plt.to_numpy())
             if enable_params:
                 # TODO
                 pass

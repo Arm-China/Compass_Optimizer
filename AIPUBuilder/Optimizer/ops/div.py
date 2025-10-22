@@ -30,7 +30,7 @@ def div_quantize(self, *args):
     lut = torch.clamp(lut, 0, lut_zoom_value)
     # Dividing by 0 is an illegal operation and set it to 0 currently
     lut[0] = 0
-    self.constants['lut'] = PyTensor(self.name+"/lut", lut.cpu().numpy().astype(dtype2nptype(Dtype.UINT16)))
+    self.constants['lut'] = PyTensor(self.name+"/lut", lut, dtype=Dtype.UINT16)
 
     do_scale, do_scale_type, do_shift, do_shift_type = \
         get_scale_approximation_params((out.scale * inp1.scale) / (inp0.scale * lut_zoom_value),

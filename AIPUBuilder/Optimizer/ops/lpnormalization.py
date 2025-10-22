@@ -56,7 +56,7 @@ def lp_normalization_quantize(self, *args):
         self.params['reciprocal_shift_value'] = int(pre_shift)
         self.params['reciprocal_shift_type'] = Dtype.INT8
         self.constants["lut"] = PyTensor(
-            self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table).cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
+            self.name+"/isqrt_lut", torch.tensor(inverse_sqrt_table), dtype=Dtype.INT16)
         self.constants["lut"].dtype = Dtype.INT16
 
 

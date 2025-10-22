@@ -7,8 +7,8 @@ from AIPUBuilder.Optimizer.logger import OPT_ERROR, OPT_INFO, OPT_WARN
 from AIPUBuilder.Optimizer.framework import (QUANTIZE_METRIC_DICT,
                                              QUANTIZE_DATASET_DICT,
                                              QUANTIZE_CONFIG_DICT,
-                                             OpType, PyNode)
-from AIPUBuilder.Optimizer.utils import string_to_base_type, QuantMode, AIFF_AHEAD_SHIFT_OP
+                                             OpType, PyNode, Dtype)
+from AIPUBuilder.Optimizer.utils import string_to_base_type, QuantMode, QuantType, AIFF_AHEAD_SHIFT_OP
 
 DEFAULT_FIELDS = {}
 HIDDEN_FIELDS = {}
@@ -1089,6 +1089,27 @@ class WeightBlockSizeField(BaseField):
         return f"Block size (unsigned interger) for quantizating weight data under per-block quantization. {BaseField.per_node_cfg_usage}"
 
 
+@field_register('activation_block_size', 'hidden')
+class ActivationBlockSizeField(BaseField):
+    # quantization block size for activation under per-block quantization
+
+    @staticmethod
+    def default():
+        return '256'
+
+    @staticmethod
+    def parse(wb):
+        return BaseField._re_parse(wb, r'\d+')
+
+    @staticmethod
+    def error(wb):
+        return f"Required the unsigned integer 'activation_block_size' field, now is {wb}, default value=256."
+
+    @staticmethod
+    def message():
+        return f"Block size (unsigned interger) for quantizating activation data under per-block quantization. {BaseField.per_node_cfg_usage}"
+
+
 @field_register('weight_bits', 'default')
 class WeightBitsField(BaseField):
     # quantization precision for weights, like '8, 16', default to '8'
@@ -1149,6 +1170,37 @@ class ActivationBitsField(BaseField):
     def message():
         _abits = ActivationBitsField._activation_bits()
         return f"Activation bits for quantizating activation data. Now Optimizer supports activation bits:{_abits}. {BaseField.per_node_cfg_usage}"
+
+
+@field_register('quant_type', 'default')
+class QuantTypeField(BaseField):
+    # quantization type for activations, like 'int8, int16, float8_e5m3, float8_e4m3fn', default to 'disable'
+    @staticmethod
+    def _quant_type():
+        return list(QuantType.quant_names())
+
+    @staticmethod
+    def default():
+        return 'disable'
+
+    @staticmethod
+    def parse(ab):
+        all_type = QuantTypeField._quant_type()
+        ab_pattern = r'(disable)|'
+        for b in all_type:
+            ab_pattern += rf'({b})|'
+        ab_pattern = ab_pattern[:-1]
+        return BaseField._re_parse(ab.lower(), ab_pattern)
+
+    @staticmethod
+    def error(ab):
+        all_type = QuantTypeField._quant_type()
+        return f"Required the 'quant_type' field and must be in {all_type}, now is {ab}, default value=disable."
+
+    @staticmethod
+    def message():
+        all_type = QuantTypeField._quant_type()
+        return f"quant_type for quantizating activation data and weight/bias data. When quant_type is 'disable', parameters such as activation_bits, weight_bits, and bias_bits are mainly used for quantization. When quant_type is not set to 'disable', the corresponding configuration of quant_type will be used to override activation_bits, weight_bits, and bias_bitsNow Optimizer supports quant_type :{all_type}, default value = 'disable'. {BaseField.per_node_cfg_usage}"
 
 
 @field_register('lut_items_in_bits', 'default')
@@ -1329,7 +1381,7 @@ class PerfModeForLibField(BaseField):
 class MinZhouyiTarget(BaseField):
     @staticmethod
     def _support_target():
-        return ['Z1', 'Z2', 'Z3', 'X1', 'X2', 'X3']
+        return ['Z1', 'Z2', 'Z3', 'X1', 'X2', 'X3', 'X3P', 'X3S']
 
     @staticmethod
     def default():
@@ -2295,6 +2347,26 @@ class RegularizeActivationPerchannelScalesField(BaseField):
     @staticmethod
     def message():
         return f"Whether enable to regularize activation per-channel scales for activation tensors in case of outliers."
+
+
+@field_register('enable_pass_scaled_dot_product_attention', 'hidden')
+class PassMergeAttention(BaseField):
+    @staticmethod
+    def default():
+        return 'False'
+
+    @staticmethod
+    def parse(eap):
+        return isinstance(eap, bool), eap
+
+    @staticmethod
+    def error(eap):
+        return (f"Require the boolean field, "
+                f"now is {eap}")
+
+    @staticmethod
+    def message():
+        return (f"Whether enable pass: scaled_dot_product_attention, as the attention computing process can be fused into a specialised operator if possible.")
 
 
 @field_register('enable_pass_merge_matmul_mul', 'default')

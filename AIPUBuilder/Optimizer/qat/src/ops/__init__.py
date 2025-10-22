@@ -7,6 +7,7 @@ from .qat_batchnorm import QBatchNorm
 from .qat_concat import QConcat
 from .qat_constant import QConstant
 from .qat_convolution import QConvolution2D
+from .qat_dropout import QDropOut
 from .qat_eltwise import QElementwiseAdd, QElementwiseMul
 from .qat_expand import QExpand
 from .qat_fullyconnected import QFullyConnected

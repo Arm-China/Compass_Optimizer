@@ -45,7 +45,7 @@ def trigonometric_quantize(node, func):
                                 inp.scale, inp.zerop)
         lut = func(lut)
         lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax)
-        node.constants["lut"] = PyTensor(node.name+"/cos_lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        node.constants["lut"] = PyTensor(node.name+"/cos_lut", lut, dtype=out.dtype)
         out.qinvariant = False
     else:
         _, qmax = bits2range(q_bits_activation, True)
@@ -60,7 +60,7 @@ def trigonometric_quantize(node, func):
         lut = torch.linspace(0, 2*torch.pi, steps=lsteps)
         lut = func(lut)
         lut = linear_quantize_clip(lut, out.scale, out.zerop, out.qmin, out.qmax).long()
-        node.constants["lut"] = PyTensor(node.name+"/lut", lut.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        node.constants["lut"] = PyTensor(node.name+"/lut", lut, dtype=out.dtype)
 
         local_scale = (lsteps / 2 / torch.pi) / inp.scale
         do_scale, do_scale_type, do_shift, do_shift_type = get_scale_approximation_params(

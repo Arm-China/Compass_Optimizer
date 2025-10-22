@@ -25,11 +25,9 @@ def quantize_quant(self, *args):
 def quantize_forward(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
-    round_mode = self.get_param('round_mode', optional=True, default_value="ROUND_TO_EVEN")
-    round_func = get_round_mode_func(round_mode)
     if out.qmin is None:
         out.betensor = inp.betensor
     else:
         out.betensor = linear_quantize_clip(inp.betensor, out.broadcast_scale,
-                                            out.broadcast_zerop, out.qmin, out.qmax, round_func=round_func)
+                                            out.broadcast_zerop, out.qmin, out.qmax, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', out.dtype))
     return out.betensor

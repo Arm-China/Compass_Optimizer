@@ -64,7 +64,7 @@ def normalizedMoments_quantize(self, *args):
     lut = torch.square(lut/count)
     lut = linear_quantize_clip(lut, plh.scale, plh.zerop, plh.qmin, plh.qmax)
     self.constants['lut'] = PyTensor(
-        self.name+'/lut', lut.cpu().numpy().astype(dtype2nptype(bits2dtype(q_bits_activation, False))))
+        self.name+'/lut', lut, dtype=bits2dtype(q_bits_activation, False))
     self.constants['lut'].dtype = bits2dtype(q_bits_activation, is_signed=False)
 
     # unify var - mean*mean scale
@@ -130,7 +130,7 @@ def normalizedMoments(self, *args):
         var_out = var_t.betensor.float() / counts - mean_square
         if len(self.placeholders) < 1:
             ph0 = PyTensor(self.name+"/mean_square",
-                           mean_square.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           mean_square, dtype=Dtype.FP32)
             self.placeholders.append(ph0)
         self.placeholders[0].betensor = mean_square
 

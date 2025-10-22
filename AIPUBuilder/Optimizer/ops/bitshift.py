@@ -59,7 +59,6 @@ def bitshift(self, *args):
     out = self.outputs[0]
     direction = self.get_param('direction').upper()
 
-    input_data = inp0.betensor.clone()
     input_shift = inp1.betensor.long()
     # check valid
     if True in (input_shift < 0):
@@ -73,7 +72,7 @@ def bitshift(self, *args):
     out_sign = is_signed(out_dtype)
     _, qmax = bits2range(dtype2bits(out_dtype), False)
     np_out_dtype = dtype2nptype(out_dtype)
-    input_data = input_data.cpu().numpy().astype(np_out_dtype)
+    input_data = inp0.to_numpy().astype(np_out_dtype)
     input_shift = input_shift.cpu().numpy()
 
     if direction == "LEFT":

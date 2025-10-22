@@ -22,8 +22,7 @@ def exp(self, *args):
     def approximated_float_forward(self,  inp_tensor):
         if self.approximated and "lut" in self.constants:
             lut = self.constants["lut"].betensor
-            f_vdata = inp_tensor * 1.442695
-            out = x3_aiff_exp_approximation(f_vdata, lut)
+            out = x3_aiff_exp_approximation(inp_tensor, lut)
         else:
             out = torch.exp(inp_tensor)
         return out

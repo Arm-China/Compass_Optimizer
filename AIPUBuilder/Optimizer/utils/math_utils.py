@@ -276,7 +276,9 @@ def broadcasting_transform(x0, x1):
     # check broadcast params
     for i in range(max_len):
         local_axis = max_len - i - 1
-        if x0.shape[local_axis] == 1 and x1.shape[local_axis] % x0.shape[local_axis] == 0:
+        if x0.shape[local_axis] == x1.shape[local_axis]:
+            pass
+        elif x0.shape[local_axis] == 1 and x1.shape[local_axis] % x0.shape[local_axis] == 0:
             tile_a[local_axis] = x1.shape[local_axis]
         elif x1.shape[local_axis] == 1 and x0.shape[i] % x1.shape[local_axis] == 0:
             tile_b[local_axis] = x0.shape[local_axis]
@@ -291,7 +293,7 @@ def broadcasting_transform(x0, x1):
     return x0, x1
 
 
-def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+def x3_aiff_power_of_two_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -> torch.Tensor:
     f_vdata[f_vdata.isnan()] = 0
     f_vdata = torch.clamp(f_vdata.float(), torch.finfo(torch.float32).min, torch.finfo(torch.float32).max)
     mantisa_bit = 16
@@ -317,11 +319,17 @@ def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -
     return pow2_fp24.reshape(vshape)
 
 
+def x3_aiff_exp_approximation(f_vdata: torch.Tensor, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    # exp(x) = 2 ^ (x/ln2)
+    return x3_aiff_power_of_two_approximation(f_vdata * 1.442695, pow2_f_lut)
+
+
 def x3_aiff_softmax_approximation(vx: torch.Tensor, axis, pow2_f_lut: torch.Tensor) -> torch.Tensor:
+    input_dtype = vx.dtype
     vx[vx.isnan()] = 0
     vx = torch.clamp(vx.float(), torch.finfo(torch.float32).min, torch.finfo(torch.float32).max)
     max_v, _ = vx.max(axis, keepdim=True)
-    f_vdata = (vx-max_v)*1.442695
+    f_vdata = vx-max_v
     yy = x3_aiff_exp_approximation(f_vdata, pow2_f_lut)
     y_sum = yy.sum(axis, keepdim=True)
     # convert to fp24
@@ -329,6 +337,6 @@ def x3_aiff_softmax_approximation(vx: torch.Tensor, axis, pow2_f_lut: torch.Tens
     # convert yy to fp16
     yy16 = yy.half()
     score = yy16*score
-    # convert f32 softmax result to fp16 output
-    f16 = score.half()
-    return f16.reshape(vx.shape)
+    # convert f32 softmax result to fp16/bf16 output
+    out = score.to(input_dtype)
+    return out.reshape(vx.shape)

@@ -116,7 +116,7 @@ if hasattr(AIPUBuilder, '__release__') and AIPUBuilder.__dict__.get('__release__
         log = base_logger(msg, *args, workflow_name=workflow_name, op_name=op_name, **kwargs)
         FATAL(log)
 else:
-    bt_depth = -3
+    bt_depth = -4
 
     # def get_cur_info():
     #     """Return the frame object for the caller's stack frame."""

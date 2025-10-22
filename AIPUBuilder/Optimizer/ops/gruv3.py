@@ -73,9 +73,9 @@ def gruv3(self, *args):
             if weights_name not in self.constants:
                 split_weights = eval(weights_name)
                 self.constants[weights_name] = PyTensor(
-                    self.name+"/constants"+str(idx), split_weights.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                    self.name+"/constants"+str(idx), split_weights, dtype=Dtype.FP32)
                 self.constants[weights_name].betensor = split_weights
-                self.constants[weights_name].ir_shape = TensorShape(list(split_weights.cpu().numpy().shape))
+                self.constants[weights_name].ir_shape = TensorShape(list(split_weights.shape))
                 self.constants[weights_name].ir_dtype = self.constants[weights_name].dtype
 
         gates_bias = bias[: 2 * cell_size]
@@ -142,7 +142,7 @@ def gruv3(self, *args):
         if len(self.placeholders) < len(placeholders_list):
             for placeholder_name in placeholders_list:
                 ph = PyTensor(self.name + '/' + placeholder_name,
-                              eval(placeholder_name).cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                              eval(placeholder_name), dtype=Dtype.FP32)
                 self.placeholders.append(ph)
         for idx, placeholder_name in enumerate(placeholders_list):
             self.placeholders[idx].betensor = eval(placeholder_name)
@@ -448,10 +448,10 @@ def gruv3_quantize(self, *args):
                                            force_shift_positive=self.force_shift_positive)
         if QuantMode.is_per_channel(q_mode_weight):
             self.constants["hidden_scale"] = PyTensor(
-                self.name + "/hidden_scale", hidden_scale.cpu().numpy().astype(dtype2nptype(hidden_scale_type)))
+                self.name + "/hidden_scale", hidden_scale, dtype=hidden_scale_type)
             self.constants["hidden_scale"].dtype = hidden_scale_type
             self.constants["hidden_shift"] = PyTensor(
-                self.name + "/hidden_shift", hidden_shift.cpu().numpy().astype(dtype2nptype(hidden_shift_type)))
+                self.name + "/hidden_shift", hidden_shift, dtype=hidden_shift_type)
             self.constants["hidden_shift"].dtype = hidden_shift_type
         else:
             self.params["hidden_shift_value"] = int(hidden_shift)
@@ -512,10 +512,10 @@ def gruv3_quantize(self, *args):
         _, do_scale_type = range2dtype(0, do_scale.max().item())  # bits2dtype(q_bits_activation, is_signed=False)
         _, do_shift_type = range2dtype(do_shift.min().item(), do_shift.max().item(), force_int=True)
         self.constants["scale"] = PyTensor(
-            self.name+"/scale", do_scale.cpu().numpy().astype(dtype2nptype(do_scale_type)))
+            self.name+"/scale", do_scale, dtype=do_scale_type)
         self.constants["scale"].dtype = do_scale_type
         self.constants["shift"] = PyTensor(
-            self.name+"/shift", do_shift.cpu().numpy().astype(dtype2nptype(do_shift_type)))
+            self.name+"/shift", do_shift, dtype=do_shift_type)
         self.constants["shift"].dtype = do_shift_type
     else:
         do_scale = torch.tensor([hwg_do_scale, sum_to_sigm_do_scale, hwc_do_scale, sum_to_tanh_do_scale,

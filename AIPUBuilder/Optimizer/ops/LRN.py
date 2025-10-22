@@ -16,7 +16,6 @@ def _get_lut_bits(q_activation_bits, offset_bits):
 
 @op_register(OpType.LRN)
 def LRN(self, *args):
-    from AIPUBuilder.Optimizer.analyzer.cosine import align_shape_by_padding
     _SUPPORT_METHOD = ['ACROSS_CHANNELS', 'WITHIN_CHANNEL']
     inpt = self.inputs[0].betensor
     method = self.get_param('method').upper()
@@ -46,7 +45,7 @@ def LRN(self, *args):
             denominator = torch.pow((bias + alpha * square_sum), beta)
             outt = inputt / denominator
             if len(self.placeholders) < 1:
-                ph0 = PyTensor(self.name+"/square_sum", square_sum.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                ph0 = PyTensor(self.name+"/square_sum", square_sum, dtype=Dtype.FP32)
                 self.placeholders.append(ph0)
             self.placeholders[0].betensor = square_sum
         else:  # method == 'WITHIN_CHANNEL':
@@ -156,7 +155,7 @@ def LRN_quantize(self, *args):
     lsteps = 2 ** min(inp.qbits, int(self.get_attrs('lut_items_in_bits')))
     lut = 1. / torch.pow(bias + alpha * (torch.linspace(lut_qmin, lut_qmax,
                          steps=lsteps, device=inp.device) / placeholder_scale), beta)
-    lut = PyTensor(self.name+"/tmp", lut.cpu().numpy())
+    lut = PyTensor(self.name+"/tmp", lut)
     lut.min = lut.betensor.min().item()
     lut.max = lut.betensor.max().item()
     # lut output bits fixed to 16bits
@@ -170,7 +169,7 @@ def LRN_quantize(self, *args):
                                                                                 lut.qbits,
                                                                                 is_signed=False)
     qlut = linear_quantize_clip(lut.betensor, lut.scale, lut.zerop, lut.qmin, lut.qmax)
-    self.constants['lut'] = PyTensor(self.name+"/lrn_lut", qlut.cpu().numpy().astype(dtype2nptype(lut.dtype)))
+    self.constants['lut'] = PyTensor(self.name+"/lrn_lut", qlut, dtype=lut.dtype)
 
     # quantize the 1./ size
     total_rescale = placeholder_scale / (inp.scale * inp.scale * size)

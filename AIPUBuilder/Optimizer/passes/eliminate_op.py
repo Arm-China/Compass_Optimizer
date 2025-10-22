@@ -31,9 +31,12 @@ def _remove_one_node(g, n):
     graph_change = False
     if not n_ot_is_graph_ot_tensor:
         for cn in n.children:
-            idx = cn.remove_input(ot_t)
-            cn.add_input(in_t, idx)
-            graph_change = True
+            # an op's inputs may have reduplicate edges that come from the same tensor, e.g. LSTM.inputs[1] and LSTM.inputs[2] may come from the same constant initial value
+            for t in list(cn.inputs):
+                if t == ot_t:
+                    idx = cn.remove_input(t)
+                    cn.add_input(in_t, idx)
+                    graph_change = True
     elif not n_in_is_graph_in_tensor and not n_in_is_graph_ot_tensor and n_ot_is_graph_ot_tensor:
         pn = n.parents[0]  # single inputs has only one parent
         pnchildren = pn.children
@@ -43,9 +46,10 @@ def _remove_one_node(g, n):
         for cn in pnchildren:
             if cn == n:
                 continue
-            if in_t in cn.inputs:
-                idx = cn.remove_input(in_t)
-                cn.add_input(ot_t, idx)
+            for t in list(cn.inputs):
+                if t == in_t:
+                    idx = cn.remove_input(t)
+                    cn.add_input(ot_t, idx)
         graph_change = True
 
     if graph_change:

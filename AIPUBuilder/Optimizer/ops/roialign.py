@@ -39,6 +39,11 @@ def local_float_roi_align(fm, rois, params):
         h_roi_start = rois[r, 1] * spatial_y - half_pixel_offset
         h_roi_end = rois[r, 3] * spatial_y - half_pixel_offset
 
+        if (w_roi_end < w_roi_start) or (h_roi_end < h_roi_start):
+            continue
+        if (w_roi_end.item() > in_width) or (h_roi_end.item() > in_height):
+            continue
+
         roi_width = w_roi_end - w_roi_start
         roi_height = h_roi_end - h_roi_start
         if not is_half_pixel:
@@ -72,30 +77,39 @@ def local_float_roi_align(fm, rois, params):
 
                         x = w_start + w_bin_size / 2 + w_bin_size * x_ind
 
-                        if y < -1.0 or y > in_height or x < -1.0 or x > in_width:
-                            ws = [0., 0., 0., 0.]
-                            offset = [0, 0, 0, 0]
-                        else:
-                            y = torch.minimum(torch.maximum(y, torch.tensor(0., device=dev)),
-                                              torch.tensor(in_height - 1, dtype=torch.float32, device=dev))
-                            x = torch.minimum(torch.maximum(x, torch.tensor(0., device=dev)),
-                                              torch.tensor(in_width - 1, dtype=torch.float32, device=dev))
-                            x_low = torch.floor(x)
-                            y_low = torch.floor(y)
-                            x_high = torch.minimum((x_low + 1), torch.tensor(in_width - 1, device=dev))
-                            y_high = torch.minimum((y_low + 1), torch.tensor(in_height - 1, device=dev))
-                            dx1 = x - x_low
-                            dy1 = y - y_low
-                            dx2 = 1. - dx1
-                            dy2 = 1. - dy1
+                        # if y < -1.0 or y > in_height or x < -1.0 or x > in_width:
+                        #     ws = [0., 0., 0., 0.]
+                        #     offset = [0, 0, 0, 0]
+                        # else:
+                        #     y = torch.minimum(torch.maximum(y, torch.tensor(0., device=dev)),
+                        #                       torch.tensor(in_height - 1, dtype=torch.float32, device=dev))
+                        #     x = torch.minimum(torch.maximum(x, torch.tensor(0., device=dev)),
+                        #                       torch.tensor(in_width - 1, dtype=torch.float32, device=dev))
+                        x_low = torch.floor(x)
+                        y_low = torch.floor(y)
+                        # x_high = torch.minimum((x_low + 1), torch.tensor(in_width - 1, device=dev))
+                        # y_high = torch.minimum((y_low + 1), torch.tensor(in_height - 1, device=dev))
+                        x_high = x_low + 1
+                        y_high = y_low + 1
+                        dx1 = x - x_low
+                        dy1 = y - y_low
 
-                            ws = [dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1]
-                            offset = [y_low * in_width * in_depth + x_low * in_depth,
-                                      y_low * in_width * in_depth + x_high * in_depth,
-                                      y_high * in_width * in_depth + x_low * in_depth,
-                                      y_high * in_width * in_depth + x_high * in_depth
-                                      ]
-                            offset = [o.long() for o in offset]
+                        if x_low >= (in_width - 1):
+                            x_low = x_high = in_width - 1
+                            dx1 = 0
+                        if y_low >= (in_height - 1):
+                            y_low = y_high = in_height - 1
+                            dy1 = 0
+                        dx2 = 1. - dx1
+                        dy2 = 1. - dy1
+
+                        ws = [dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1]
+                        offset = [y_low * in_width * in_depth + x_low * in_depth,
+                                  y_low * in_width * in_depth + x_high * in_depth,
+                                  y_high * in_width * in_depth + x_low * in_depth,
+                                  y_high * in_width * in_depth + x_high * in_depth
+                                  ]
+                        offset = [o.long() for o in offset]
                         for k in range(in_depth):
                             if method == 'avg':
                                 interpolation = 0
@@ -227,35 +241,35 @@ def quant_roi_align_with_zero_sample(fm, rois, method, is_half_pixel, pooled_sha
                             y1 = y2 = fm_height - 1
                             dy1 = 0
                         dy2 = yscale1 - dy1
-                        if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
-                            ws = [0, 0, 0, 0]
-                            offsets = [0, 0, 0, 0]
-                        else:
-                            if x1 <= 0:
-                                x1, x2 = 0, 1
-                            if y1 <= 0:
-                                y1, y2 = 0, 1
+                        # if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
+                        #     ws = [0, 0, 0, 0]
+                        #     offsets = [0, 0, 0, 0]
+                        # else:
+                        #     if x1 <= 0:
+                        #         x1, x2 = 0, 1
+                        #     if y1 <= 0:
+                        #         y1, y2 = 0, 1
 
-                            # y1 = min(max(y1, 0), fm_height - 1)
-                            # x1 = min(max(x1, 0), fm_width - 1)
-                            # if x1 >= fm_width - 1:
-                            #     x1 = x2 = fm_width - 1
-                            #     dx1 = 0
-                            # dx2 = xscale1 - dx1
-                            # if y1 >= fm_height - 1:
-                            #     y1 = y2 = fm_height - 1
-                            #     dy1 = 0
-                            # dy2 = yscale1 - dy1
-                            dx1 = torch.div(dx1, 2, rounding_mode='trunc')
-                            dx2 = torch.div(dx2, 2, rounding_mode='trunc')
-                            dy1 = torch.div(dy1, 2, rounding_mode='trunc')
-                            dy2 = torch.div(dy2, 2, rounding_mode='trunc')
-                            ws = (dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1)
-                            ws = [(wss * (0.5 ** spatial_shift)).round() for wss in ws]
-                            offsets = (y1 * fm_width * fm_channel + x1 * fm_channel,
-                                       y1 * fm_width * fm_channel + x2 * fm_channel,
-                                       y2 * fm_width * fm_channel + x1 * fm_channel,
-                                       y2 * fm_width * fm_channel + x2 * fm_channel)
+                        # y1 = min(max(y1, 0), fm_height - 1)
+                        # x1 = min(max(x1, 0), fm_width - 1)
+                        # if x1 >= fm_width - 1:
+                        #     x1 = x2 = fm_width - 1
+                        #     dx1 = 0
+                        # dx2 = xscale1 - dx1
+                        # if y1 >= fm_height - 1:
+                        #     y1 = y2 = fm_height - 1
+                        #     dy1 = 0
+                        # dy2 = yscale1 - dy1
+                        dx1 = torch.div(dx1, 2, rounding_mode='trunc')
+                        dx2 = torch.div(dx2, 2, rounding_mode='trunc')
+                        dy1 = torch.div(dy1, 2, rounding_mode='trunc')
+                        dy2 = torch.div(dy2, 2, rounding_mode='trunc')
+                        ws = (dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1)
+                        ws = [(wss * (0.5 ** spatial_shift)).round() for wss in ws]
+                        offsets = (y1 * fm_width * fm_channel + x1 * fm_channel,
+                                   y1 * fm_width * fm_channel + x2 * fm_channel,
+                                   y2 * fm_width * fm_channel + x1 * fm_channel,
+                                   y2 * fm_width * fm_channel + x2 * fm_channel)
                         for kk in range(fm_channel):
                             if method == 'avg':
                                 interpolation = 0
@@ -374,29 +388,29 @@ def quant_roi_align(fm, rois, method, is_half_pixel, pooled_shape, sample, spati
                         x2 = x1 + 1
                         dx1 = x - (x1 << spatial_shift)
 
-                        if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
-                            ws = [0, 0, 0, 0]
-                            offsets = [0, 0, 0, 0]
-                        else:
-                            y1 = min(max(y1, 0), fm_height - 1)
-                            x1 = min(max(x1, 0), fm_width - 1)
+                        # if y1 < -1 or y1 > fm_height or x1 < -1 or x1 > fm_width:
+                        #     ws = [0, 0, 0, 0]
+                        #     offsets = [0, 0, 0, 0]
+                        # else:
+                        #     y1 = min(max(y1, 0), fm_height - 1)
+                        #     x1 = min(max(x1, 0), fm_width - 1)
 
-                            if x1 >= fm_width - 1:
-                                x1 = x2 = torch.tensor(fm_width - 1, device=fm.device)
-                                dx1 = torch.tensor(0, device=fm.device)
-                            dx2 = 2 ** spatial_shift - dx1
+                        if x1 >= fm_width - 1:
+                            x1 = x2 = torch.tensor(fm_width - 1, device=fm.device)
+                            dx1 = torch.tensor(0, device=fm.device)
+                        dx2 = 2 ** spatial_shift - dx1
 
-                            if y1 >= fm_height - 1:
-                                y1 = y2 = torch.tensor(fm_height - 1, device=fm.device)
-                                dy1 = torch.tensor(0, device=fm.device)
-                            dy2 = 2 ** spatial_shift - dy1
+                        if y1 >= fm_height - 1:
+                            y1 = y2 = torch.tensor(fm_height - 1, device=fm.device)
+                            dy1 = torch.tensor(0, device=fm.device)
+                        dy2 = 2 ** spatial_shift - dy1
 
-                            ws = (dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1)
-                            ws = [wss >> spatial_shift for wss in ws]
-                            offsets = (y1 * fm_width * fm_channel + x1 * fm_channel,
-                                       y1 * fm_width * fm_channel + x2 * fm_channel,
-                                       y2 * fm_width * fm_channel + x1 * fm_channel,
-                                       y2 * fm_width * fm_channel + x2 * fm_channel)
+                        ws = (dx2 * dy2, dx1 * dy2, dx2 * dy1, dx1 * dy1)
+                        ws = [wss >> spatial_shift for wss in ws]
+                        offsets = (y1 * fm_width * fm_channel + x1 * fm_channel,
+                                   y1 * fm_width * fm_channel + x2 * fm_channel,
+                                   y2 * fm_width * fm_channel + x1 * fm_channel,
+                                   y2 * fm_width * fm_channel + x2 * fm_channel)
                         for kk in range(fm_channel):
                             if method == 'avg':
                                 interpolation = 0
@@ -507,7 +521,7 @@ def roialign(self, *args):
                 split_rois = torch.split(rois, split_size_or_sections=1, dim=-1)
                 rois = torch.cat([split_rois[0], split_rois[2], split_rois[1], split_rois[4], split_rois[3]], dim=-1)
                 fm = nhwc2nchw(inp_d)
-                out = roi_align(fm.float(), rois, [pool_height, pool_width],
+                out = roi_align(fm.float(), rois.float(), [pool_height, pool_width],
                                 spatial_scale=spatial_x, sampling_ratio=sample_w)
                 out = nchw2nhwc(out)
         else:  # method=='max'

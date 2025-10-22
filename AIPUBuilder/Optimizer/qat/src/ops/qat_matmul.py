@@ -17,6 +17,7 @@ class QMatMul(QBaseOperator):
         super().__init__(dtype, name=name)
         self.trans_a = trans_a
         self.trans_b = trans_b
+        self.fused_multiplier = 1.0
         self.activation_qinfo = QATConfig.get('activation_qinfo')
 
     @check_args
@@ -34,10 +35,13 @@ class QMatMul(QBaseOperator):
                 y = y.unsqueeze(0)
             y = y.transpose(-1, -2)
         outputs = torch.matmul(x, y)
+        outputs *= self.fused_multiplier
         outputs = self.fake_quant(outputs, self.activation_qinfo)
         return outputs
 
     def serialize(self, input0, input1):
         from AIPUBuilder import ops
         out_q = self.get_quantization(self.activation_qinfo)
-        return ops.matmul(input0, input1, self.trans_a, self.trans_b, quantization=out_q)
+        mm_out = ops.matmul(input0, input1, self.trans_a, self.trans_b, quantization=out_q)
+        mm_out.op.params['fused_multiplier'] = self.fused_multiplier
+        return mm_out

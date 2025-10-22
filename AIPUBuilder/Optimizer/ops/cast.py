@@ -7,16 +7,16 @@ from AIPUBuilder.Optimizer.utils import *
 
 def forward_with_clip(inp, out_dtype, clip_mode, input_zerop=0, output_zerop=0):
     if is_float(out_dtype):
-        output = torch._cast_Float(inp)
+        output = torch._cast_Float(inp.betensor)
     else:
         # currently truncation doesn't need to consider inputzp and outputzp
         if clip_mode == 'TRUNCATION':
-            inp_tensor = inp.cpu().numpy()
+            inp_tensor = inp.to_numpy()
             out_array = inp_tensor.astype(dtype2nptype(out_dtype))
             output = PyTensor('tmp', out_array).betensor.to(inp.device)
         else:
             qmin, qmax = dtype2range(out_dtype)
-            inp_t = inp.long() + input_zerop - output_zerop
+            inp_t = inp.betensor.long() + input_zerop - output_zerop
             output = torch.clamp(inp_t, qmin, qmax)
 
     return output
@@ -31,19 +31,19 @@ def cast(self, *args):
     if self.quantized:
         if self.get_ir_field(['scale_value', 'scale']) is not None:
             do_scale = self.get_ir_field(['scale_value', 'scale'])
-            do_shift = self.get_ir_field(['shift_value', 'shift'])
+            do_shift = self.get_ir_field(['shift_value', 'shift'], 0)
             out.betensor = linear_requantize(inp.betensor + inp.broadcast_zerop, do_scale, do_shift, out.zerop,
-                                             out.qmin, out.qmax, out.key_axis)
+                                             out.qmin, out.qmax, out.key_axis, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', out.dtype))
         else:
             input_zerop = 0 if ignore_scale_zp else inp.zerop
             output_zerop = 0 if ignore_scale_zp else out.zerop
-            out.betensor = forward_with_clip(inp.betensor, self.params['to_dtype'],
+            out.betensor = forward_with_clip(inp, self.params['to_dtype'],
                                              clip_mode, input_zerop, output_zerop)
     else:
         if 'only_for_quantized' in self.params:
             out.betensor = inp.betensor
         else:
-            out.betensor = forward_with_clip(inp.betensor, self.params['to_dtype'], clip_mode)
+            out.betensor = forward_with_clip(inp, self.params['to_dtype'], clip_mode)
     return out.betensor
 
 
@@ -53,6 +53,7 @@ def cast_quantize(self, *args):
     ignore_scale_zp = self.get_param('ignore_scale_zp', optional=True, default_value=True)
     inp = self.inputs[0]
     out = self.outputs[0]
+
     if 'only_for_quantized' in self.params:
         if inp.qinvariant or inp.dtype == self.params['to_dtype']:
             out.scale = inp.scale
@@ -61,16 +62,34 @@ def cast_quantize(self, *args):
             out.qbits = dtype2bits(out.dtype)
             out.qinvariant = inp.qinvariant
             self.params['ignore_scale_zp'] = True
-        elif (is_float(self.params['to_dtype']) and is_float(inp.dtype)):
+        elif (is_float(self.params['to_dtype']) and is_float(inp.dtype) and dtype2bits(inp.dtype) > 8 and dtype2bits(self.params['to_dtype']) > 8):
             out.scale = inp.scale
             out.zerop = inp.zerop
             out.dtype = self.params['to_dtype']
             out.qbits = inp.qbits
             out.qinvariant = inp.qinvariant
             self.params['ignore_scale_zp'] = True
+        elif (is_float(self.params['to_dtype']) and dtype2bits(self.params['to_dtype']) <= 8) or \
+                (is_float(inp.dtype) and dtype2bits(inp.dtype) <= 8):
+            out.dtype = self.params['to_dtype']
+            out.qbits = dtype2bits(out.dtype)
+            if is_float(out.dtype):
+                out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
+                    out, q_mode_activation, out.dtype)
+            else:
+                out.scale, out.zerop, out.qmin, out.qmax, _ = get_linear_quant_params_from_tensor(
+                    out, q_mode_activation, out.qbits, is_signed(out.dtype))
+            out.qinvariant = False
+
+            do_scale_type = Dtype.FP32
+            do_scale = out.scale / inp.scale
+            doscale_name = 'scale' if is_torch_tensor_with_multi_data(do_scale) else 'scale_value'
+            self.set_ir_field(doscale_name, do_scale, do_scale_type)
+            if not is_torch_tensor_with_multi_data(do_scale):
+                self.params["scale_type"] = do_scale_type
         else:
-            if is_float(self.params['to_dtype']):
-                OPT_FATAL("wrong to_dtype for only_for_quantized situation.")
+            # if is_float(self.params['to_dtype']):
+            #     OPT_FATAL("wrong to_dtype for only_for_quantized situation.")
             out.dtype = self.params['to_dtype']
             out.qbits = dtype2bits(out.dtype)
 

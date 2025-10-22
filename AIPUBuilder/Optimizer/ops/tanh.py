@@ -48,7 +48,8 @@ def tanh_approx(self, *args):
             clip_max = max(abs(inp.min), abs(inp.max))
         return clip_min, clip_max
 
-    self.attrs['set_min_max'] = set_min_max
+    if 'set_min_max' not in self.attrs:
+        self.attrs['set_min_max'] = set_min_max
     self.attrs['lambda_func'] = torch.tanh
     self.attrs['out_signed'] = False
     activation_module.unknown_approx(self, *args)

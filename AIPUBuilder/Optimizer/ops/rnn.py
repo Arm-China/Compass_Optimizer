@@ -299,8 +299,7 @@ g_rnn_activation_clamp = {  # bit
                                 (OpType.GRUv1, 'SIGMOID'): (-4.564202,     4.564202),
                                 (OpType.GRUv1, 'TANH'):    (-2.629377,     2.629377),
                             },
-    16:
-    {  # clamp_min     #clamp_max
+    16: {  # clamp_min     #clamp_max
                                 (OpType.RNN, 'SIGMOID'): (-10,     10),
                                 (OpType.RNN, 'TANH'):    (-6.0,    6.0),
                                 (OpType.GRUv3, 'SIGMOID'): (-10,     10),
@@ -314,8 +313,8 @@ g_rnn_activation_clamp = {  # bit
 
 
 g_rnn_activation_func = {  # (activation) : (has_lut,  float_forward,  quantize_forward,  16bit_forward)
-    'SIGMOID':      (True,      torch.sigmoid, lookup_table,      itp_lut_no_mirror, sigmoid_quantize),
-    'TANH':         (True,       torch.tanh,   lookup_table,      itp_lut_no_mirror, tanh_quantize),
+    'SIGMOID':      (True,      torch.sigmoid, lookup_table,      itp_lut_no_mirror, sigmoid_quantize, sigmoid_approx),
+    'TANH':         (True,       torch.tanh,   lookup_table,      itp_lut_no_mirror, tanh_quantize, tanh_approx),
 }
 
 g_rnn_lut_supported = {   # (layer_type, activation) : lut
@@ -403,6 +402,50 @@ def generate_lut_with_placeholders(node, activation_idx, activation, q_mode_acti
             node.constants[lut_name] = lut
 
     return in_scale, out_scale
+
+
+def generate_fp_lut_with_placeholders(node, activation_idx, activation, activation_idx_lut_name, *args):
+    placehoder_idx = 1 + activation_idx * 2
+    ph_in = node.placeholders[placehoder_idx]
+
+    bak_approx_params = node.attrs['approx_params']
+    node.attrs['approx_params'] = bak_approx_params[activation_idx]
+    node.approximated = False
+
+    _tensor_default_property = get_tensor_default_property()
+    for p in _tensor_default_property:
+        node.inputs[0].__setattr__(p, ph_in.__getattribute__(p))
+        node.outputs[0].__setattr__(p, ph_in.__getattribute__(p))
+    g_rnn_activation_func[activation][5](node, *args)
+
+    if 'set_min_max' in node.attrs:
+        node.attrs.pop('set_min_max')
+    node.attrs['approx_params'] = bak_approx_params
+
+    def update_params_name(old_param_name, new_param_name):
+        for old_name, new_name in zip(old_param_name, new_param_name):
+            if old_name in node.params:
+                node.params[new_name] = node.params[old_name]
+
+    def remove_params_name(param_name):
+        for name in param_name:
+            if name in node.params:
+                node.params.pop(name)
+
+    param_name_list = ['index_scale_value', 'index_scale_type', 'index_offset_value',
+                       'index_offset_type', 'value_offset_value', 'value_offset_type']
+
+    if 'lut' in node.constants:
+        lut = node.constants.pop('lut')
+        lut_mode = node.params.pop('lut_mode')
+        for lut_name in activation_idx_lut_name[activation_idx]:
+            node.constants[lut_name] = lut
+            node.constants[lut_name].betensor[0] = node.constants[lut_name].betensor[1]
+            node.params[f'{lut_name}_mode'] = lut_mode
+            new_param_name_list = [f'{lut_name}_{name}' for name in param_name_list]
+            update_params_name(param_name_list, new_param_name_list)
+
+        remove_params_name(param_name_list)
 
 
 def compress_int32_to_int16(array, lmin, lmax, pre_shift=0):

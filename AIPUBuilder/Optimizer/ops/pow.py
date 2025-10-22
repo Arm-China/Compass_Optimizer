@@ -29,11 +29,11 @@ def pow(self, *args):
         exp_outputs = torch.exp(power_outputs)
         if len(self.placeholders) < 1:
             ph0 = PyTensor(self.name+"/log_outputs",
-                           log_outputs.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           log_outputs, dtype=Dtype.FP32)
             ph1 = PyTensor(self.name+"/power_outputs",
-                           power_outputs.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           power_outputs, dtype=Dtype.FP32)
             ph2 = PyTensor(self.name+"/exp_outputs",
-                           exp_outputs.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                           exp_outputs, dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
             self.placeholders.append(ph2)
@@ -145,9 +145,9 @@ def pow_quantize(self, *args):
         # lut2 = lut2.int() >> (dtype2bits(plh1_dtype) - dtype2bits(out.dtype))
         # if not is_signed(out.dtype) :
         #     lut2 += 2 ** (out.qbits - 1)
-        self.constants["lut_log"] = PyTensor(self.name+"/lut_log", lut1.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        self.constants["lut_log"] = PyTensor(self.name+"/lut_log", lut1, dtype=out.dtype)
         # self.constants["lut_exp"] = PyTensor(
-        #     self.name+"/lut_exp", lut2.cpu().numpy().astype(dtype2nptype(out.dtype)))
+        #     self.name+"/lut_exp", lut2, dtype=out.dtype)
 
         # to counteract power when calculate 'power * lut_log * do_scale >> do_shift'
         # rscale = 1.0 / linear_quantize_clip(power, self.inputs[1].scale, self.inputs[1].zerop, self.inputs[1].qmin, self.inputs[1].qmax).item()
@@ -187,8 +187,8 @@ def pow_quantize(self, *args):
         lut_signed_list = [is_signed(plh0.dtype), is_signed(plh2.dtype)]
         lut_bits_list = [plh0.qbits, plh2.qbits]
         for idx, lut_name in enumerate(lut_names):
-            self.constants[lut_name] = PyTensor(self.name+lut_name, lut_list[idx].cpu().numpy().astype(
-                dtype2nptype(bits2dtype(lut_bits_list[idx], is_signed=lut_signed_list[idx]))))
+            self.constants[lut_name] = PyTensor(self.name+lut_name, lut_list[idx],
+                                                dtype=bits2dtype(lut_bits_list[idx], is_signed=lut_signed_list[idx]))
             self.constants[lut_name].dtype = bits2dtype(
                 lut_bits_list[idx], is_signed=lut_signed_list[idx])
 

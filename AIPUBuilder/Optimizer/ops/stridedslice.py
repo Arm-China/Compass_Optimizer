@@ -11,35 +11,39 @@ def stridedslice(self, *args):
     x = self.inputs[0].betensor
 
     batch_size = x.shape[0]
-    ir_batch_size = self.inputs[0].ir_shape[0]
+    # ir_batch_size = self.inputs[0].ir_shape[0]
     start_data_idx = self.current_batch_idx * batch_size
 
     strides = self.get_param('strides')
     begin = self.get_param('begin')
     end = self.get_param('end')[:]
 
-    # batch dim, need cover all batch
+    # batch dim, need cover all batch for static slice
     batch_size_in_IR = self.get_attrs("batch_size_in_IR", optional=True, default_value=1)
-    if batch_size_in_IR != 0 and end[0] == self.inputs[0].ir_shape[0]:
+    if len(self.inputs) == 1 and batch_size_in_IR != 0 and end[0] == self.inputs[0].ir_shape[0]:
         end[0] = x.shape[0]
 
     real_shape = list(x.shape)
     for i in range(len(end)):
         end[i] = min(real_shape[i], end[i])
-    upper_bond = self.get_param('upper_bound', optional=True, default_value=False)
-    input_shape = self.inputs[0].ir_shape
+    # upper_bond = self.get_param('upper_bound', optional=True, default_value=False)
+    # input_shape = self.inputs[0].ir_shape
     for i in range(len(begin)):
-        begin[i] = begin[i] + input_shape[i] if begin[i] < 0 else begin[i]
-    for i in range(len(end)):
-        end[i] = end[i] + input_shape[i]*(strides[i] > 0) + upper_bond if end[i] < 0 else end[i]
+        if (begin[i] >= real_shape[i] and end[i] >= real_shape[i]) or (begin[i] < -real_shape[i] and end[i] < -real_shape[i]):
+            begin[i] = end[i] = real_shape[i]
+        else:
+            begin[i] = max(0, min(real_shape[i]-1, begin[i] + real_shape[i] if begin[i] < 0 else begin[i]))
+            end[i] = max(-1, min(real_shape[i], end[i] + real_shape[i] if end[i] < 0 else end[i]))
 
     for axis in range(len(strides)):
         start_index = begin[axis]
         end_index = end[axis]
         stride = strides[axis]
+        if 0 == stride:
+            stride = 1
         step = int((abs(end_index - start_index) - 1) / abs(stride))
-        actual_index = [start_index + stride * s for s in range(step+1)]
-        if axis == 0:  # process single or multiply batch
+        actual_index = [start_index + stride * s for s in range(step+1)] if start_index != end_index else []
+        if axis == 0 and len(self.inputs) == 1:  # process single or multiply batch for static slice
             batch_index = actual_index
             actual_index = []
             inorder_batch_size_idx = range(0, batch_size, 1) if end_index > start_index else range(batch_size-1, -1, -1)
@@ -47,7 +51,8 @@ def stridedslice(self, *args):
                 current_batch_idx = (start_data_idx + batch_idx) % batch_size
                 if current_batch_idx in batch_index:
                     actual_index.append(batch_idx)
-        x = x.index_select(axis, torch.tensor(actual_index, device=x.device).int())
+        filtered_actual_index = [idx for idx in actual_index if idx >= 0 and idx < self.inputs[0].betensor.shape[axis]]
+        x = x.index_select(axis, torch.tensor(filtered_actual_index, device=x.device).int())
     self.outputs[0].betensor = x
     return x
 

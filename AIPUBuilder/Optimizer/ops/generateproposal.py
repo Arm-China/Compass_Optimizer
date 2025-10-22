@@ -243,8 +243,8 @@ def generateproposals(self, *args):
             placeholders_output.append(tensor_all)
 
         if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name+"/coords", placeholders_output[0].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name+"/box", placeholders_output[1].cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph0 = PyTensor(self.name+"/coords", placeholders_output[0], dtype=Dtype.FP32)
+            ph1 = PyTensor(self.name+"/box", placeholders_output[1], dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
         self.placeholders[0].betensor = placeholders_output[0]
@@ -381,7 +381,7 @@ def generateproposals_quantize(self, *args):
     constants_name = ['ycenter_a_q', 'xcenter_a_q', 'ha_q', 'wa_q']
     constants_list = [ycenter_a_q, xcenter_a_q, ha_q, wa_q]
     for name, a_q in zip(constants_name, constants_list):
-        self.constants[name] = PyTensor(self.name+name, a_q.cpu().numpy().astype(dtype2nptype(Dtype.INT16)))
+        self.constants[name] = PyTensor(self.name+name, a_q, dtype=Dtype.INT16)
         self.constants[name].dtype = Dtype.INT16
         self.constants[name].ir_dtype = Dtype.INT16
 
@@ -421,7 +421,7 @@ def generateproposals_quantize(self, *args):
     lut_object_name = {ty_lut: 'xy_lut', th_lut: 'wh_lut'}
     for lut in lut_object_name.keys():
         name = lut_object_name[lut]
-        self.constants[name] = PyTensor(self.name+name, lut.cpu().numpy().astype(dtype2nptype(Dtype.INT32)))
+        self.constants[name] = PyTensor(self.name+name, lut, dtype=Dtype.INT32)
         self.constants[name].dtype = Dtype.INT32
         self.constants[name].ir_dtype = Dtype.INT32
 

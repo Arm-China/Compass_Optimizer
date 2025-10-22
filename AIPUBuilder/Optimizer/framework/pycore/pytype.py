@@ -38,6 +38,11 @@ class Dtype(AutoName):
     ALIGNED_UINT4 = auto()
     ALIGNED_INT12 = auto()
     ALIGNED_UINT12 = auto()
+    FP4_E2M1FN = auto()
+    FP6_E2M3FN = auto()
+    FP6_E3M2FN = auto()
+    FP8_E5M2 = auto()
+    FP8_E4M3FN = auto()
 
     def __repr__(self):
         return self.name
@@ -46,6 +51,11 @@ class Dtype(AutoName):
 def dtype_string_name(dtype):
     _dname = str(dtype)[6:]
     _to_dict = {
+        'FP4_E2M1FN': 'FLOAT4_E2M1FN',
+        'FP6_E2M3FN': 'FLOAT6_E2M3FN',
+        'FP6_E3M2FN': 'FLOAT6_E3M2FN',
+        'FP8_E5M2': 'FLOAT8_E5M2',
+        'FP8_E4M3FN': 'FLOAT8_E4M3FN',
         'BFP16': 'BFLOAT16',
         'FP16': 'FLOAT16',
         'FP32': 'FLOAT32',

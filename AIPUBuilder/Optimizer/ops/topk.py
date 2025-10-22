@@ -52,8 +52,13 @@ def reorder_index(origin_order):
 
 @op_register(OpType.TopK)
 def topk(self, *args):
-    k = self.get_param('k')
+    if len(self.inputs) > 1:
+        k = self.inputs[1].betensor.item()
+    else:
+        k = self.get_param('k')
+    k = int(k)
     axis = self.get_param('axis')
+    k = min(self.inputs[0].betensor.shape[axis], k)
     largest = self.get_param('largest', optional=True, default_value=True)
     issorted = self.get_param('sorted', optional=True, default_value=True)
     axis = axis if axis >= 0 else self.outputs[0].betensor.ndim+axis

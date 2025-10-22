@@ -2,6 +2,7 @@
 # Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
+from AIPUBuilder.Optimizer.utils import *
 import torch
 import numpy
 
@@ -19,6 +20,7 @@ class OpTestCosDistanceMetric(OptBaseMetric):
                 b = o_p.shape[0]
                 x = o_p.reshape(b, -1).float()
                 y = o_t.reshape(b, -1).float()
+                x, y = align_shape_by_padding(x, y)
                 sim = numpy.mean(self.cos(x, y).cpu().flatten().numpy())
             else:  # if output is a scalar
                 x = o_p

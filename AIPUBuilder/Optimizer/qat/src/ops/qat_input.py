@@ -78,5 +78,6 @@ class QInput(QBaseOperator):
         if self.ir_mode == 'fp':
             inpt.quantization.using_qtlib = False
         else:
+            inpt.quantization.using_qtlib = False
             self.update_tensor_quantization(inpt, self.activation_qinfo)
         return inpt

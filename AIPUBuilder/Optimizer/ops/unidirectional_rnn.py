@@ -58,7 +58,7 @@ def rnn(self, *args):
             if weights_name not in self.constants:
                 split_weights = eval(weights_name).permute(1, 0)
                 self.constants[weights_name] = PyTensor(
-                    self.name+"/constants"+str(idx), split_weights.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+                    self.name+"/constants"+str(idx), split_weights, dtype=Dtype.FP32)
                 self.constants[weights_name].betensor = split_weights
                 self.constants[weights_name].ir_dtype = self.constants["weights"].dtype
                 self.constants[weights_name].dtype = self.constants["weights"].dtype
@@ -101,8 +101,8 @@ def rnn(self, *args):
             state_batch[b, :, :] = state_all
 
         if len(self.placeholders) < 1:
-            ph0 = PyTensor(self.name + "/h_state", state_batch.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
-            ph1 = PyTensor(self.name + "/lut_in", lut_in_batch.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+            ph0 = PyTensor(self.name + "/h_state", state_batch, dtype=Dtype.FP32)
+            ph1 = PyTensor(self.name + "/lut_in", lut_in_batch, dtype=Dtype.FP32)
             self.placeholders.append(ph0)
             self.placeholders.append(ph1)
         self.placeholders[0].betensor = state_batch
@@ -295,7 +295,7 @@ def rnn_quantize(self, *args):
         placeholder.qbits = q_bits_activation
         placeholder.qinvariant = False
 
-        ph2 = PyTensor(self.name + "/f_lut_out_clamp", f_lut_out.cpu().numpy().astype(dtype2nptype(Dtype.FP32)))
+        ph2 = PyTensor(self.name + "/f_lut_out_clamp", f_lut_out, dtype=Dtype.FP32)
         ph2.max = f_lut_out.max()
         ph2.min = f_lut_out.min()
         lut = generate_activation_lut(self, activations, placeholder, ph2, *args)

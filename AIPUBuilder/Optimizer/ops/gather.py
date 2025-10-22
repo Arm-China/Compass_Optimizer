@@ -97,6 +97,8 @@ def gather(self, *args):
         inp1_betensors = self.inputs[1].betensor.clone()
         index = inp1_betensors.long()
         axis = self.get_param('axis')
+        # for exposing potential IR errors, do not clamp the index
+        # index = index.clamp(-inp0_betensors.shape[axis], inp0_betensors.shape[axis]-1)
         if axis != 0:
             self.outputs[0].betensor = torch.index_select(inp0_betensors, axis, index)
         else:
