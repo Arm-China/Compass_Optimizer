@@ -20,7 +20,8 @@ def gather(self, *args):
     try:
         inp0_betensors = self.inputs[0].betensor.clone()
         axis = self.get_param('axis')
-        axis = axis if axis >= 0 else len(inp0_betensors.shape) + axis
+        orig_axis = axis if axis >= 0 else len(inp0_betensors.shape) + axis
+        axis = orig_axis
         batch_dims = self.get_param('batch_dims')
         # if lut is in IR, one of gather's two inputs is from lut
         # if method =='idx_lut', indice from lut,or gather's object from lut
@@ -61,7 +62,10 @@ def gather(self, *args):
         indice_betensor = indice_betensor.reshape(newshape)
         padding = [0] * (inp0_betensors.dim() - axis) * 2
         # TODO: support per-channel zerop and pad the per-channel zerop
-        padding_value = -self.inputs[0].zerop[0]
+        if self.quantized:
+            padding_value = -self.inputs[0].zerop[0]
+        else:
+            padding_value = 0
         for i in range(virtual_batch):
             # axis include dim, so need axis-1
             if torch.max(indice_betensor) <= inp0_betensors.shape[axis]:
@@ -89,7 +93,14 @@ def gather(self, *args):
             tmp = temp_out[i].flatten()
             tmp[:out.flatten().shape[0]] = out.flatten()
             temp_out[i] = tmp.reshape(temp_out[i].shape)
-        self.outputs[0].betensor = temp_out.reshape(self.outputs[0].ir_shape)
+        ir_shape = list(self.outputs[0].ir_shape)
+        t_shape = list(temp_out.shape)
+        if 'ds_output_shape' in self.attrs:
+            ds_output_shape = self.attrs['ds_output_shape']
+            ir_shape = ds_output_shape
+        elif ir_shape != t_shape:
+            ir_shape[orig_axis] = -1
+        self.outputs[0].betensor = temp_out.reshape(ir_shape)
 
     except Exception as e:
         OPT_DEBUG(f"try normal impl gather failed, now try the dynamic shape impl: {e}")

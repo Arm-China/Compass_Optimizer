@@ -5,6 +5,7 @@
 import os
 from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_ERROR
 from AIPUBuilder.Optimizer.framework import (
+    QuantizeGraph,
     OpType,
     convert_aipu_graph_to_opt_graph,
     convert_opt_graph_to_aipu_graph,
@@ -95,12 +96,13 @@ class QTLibOptimize(object):
             n.attrs['force_weight_asym'] = self.hparams.compat_quantized_model_force_weight_asym
             # now qat model fixed to 13bits
             n.attrs["multiplier_bits"] = self.hparams.multiplier_bits if self.hparams.multiplier_bits != '' else 13
-            if "conv_from_resize_opt" not in n.attrs:
-                n.attrs["trigger_float_op"] = (
-                    "float16_preferred"
-                    if self.hparams.trigger_float_op.get(n) == "disable"
-                    else self.hparams.trigger_float_op.get(n)
-                )
+            if "conv_from_resize_opt" not in n.attrs and self.hparams.trigger_float_op.get(n) != "disable":
+                n.attrs["trigger_float_op"] = self.hparams.trigger_float_op.get(n)
+            if "conv_from_resize_opt" not in n.attrs and 'trigger_float_op' in n.attrs and n.attrs['trigger_float_op'] == 'disable':
+                n.attrs.pop('trigger_float_op')
+            if 'trigger_float_op' in n.attrs and '!' in n.attrs['trigger_float_op']:
+                n.attrs['trigger_float_op'] = n.attrs['trigger_float_op'].replace('!', '')
+
             if self.hparams.compat_quantized_model_int8_to_uint8:
                 n.attrs["int8_to_uint8"] = True
             if n.type == OpType.Constant:
@@ -133,5 +135,6 @@ class QTLibOptimize(object):
             # no need forward, so we return self.g.quantgraph(=None)
         else:
             self.g.quantgraph = convert_aipu_graph_to_opt_graph(cg)
+            QuantizeGraph.deduce_quantization_infos(self.g.quantgraph)
             self.g.quantgraph.serialize(f"{name}.txt", f"{name}.bin")
         return self.g.quantgraph

@@ -106,7 +106,7 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
         quant_mode = n.attrs["q_mode_activation"]
         quant_type = n.attrs.get('quant_type')
         if quant_type in ['fp8_e4m3fn', 'fp8_e5m2']:
-            q_type_activation = QuantType.activation_type(quant_type)
+            q_type_activation = QuantType._to_Dtype(QuantType.activation_type(quant_type))
         else:
             q_type_activation = out.dtype
         is_float_quant = is_float(q_type_activation)
@@ -292,16 +292,8 @@ def _svd_based_search_scale(g, cdataloader, alpha, beta, nsteps, thresh, mode, o
             # mse = MSE(qS,S).item()
             # cosim = cosine_distance(qS,S)
             if mse < best_mse*worst_cosim:
-                if mse < best_mse:
-                    best_mse = mse
+                best_mse = mse*worst_cosim + (1-worst_cosim)*best_mse
                 best_s = f
-
-        if QuantMode.is_per_channel(q_mode_weight):
-            w.min_key_axis = w.min_key_axis*best_s
-            w.max_key_axis = w.max_key_axis*best_s
-        else:
-            w.min = w.min*best_s
-            w.max = w.max*best_s
 
         if QuantMode.is_per_channel(q_mode_weight):
             w.min_key_axis = w.min_key_axis*best_s

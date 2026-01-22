@@ -36,3 +36,21 @@ def string_to_base_type(s: str):
     elif re.findall('^[-+]?[0-9]+\.?[0-9]*$', opt_v):
         opt_v = float(opt_v)
     return opt_v
+
+
+def ds_expr_eval(exprs, argvs):
+    if isinstance(exprs, (int, float)):
+        return exprs
+
+    if isinstance(exprs, (list, tuple)):
+        evaled_expr = []
+        for expr in exprs[:]:
+            evaled_expr.append(ds_expr_eval(expr, argvs))
+        return evaled_expr
+
+    if isinstance(exprs, str):
+        evaled_expr = exprs
+        for argk, argv in argvs.items():
+            evaled_expr = evaled_expr.replace(argk, str(argv))
+        evaled_expr = eval(evaled_expr)
+        return evaled_expr

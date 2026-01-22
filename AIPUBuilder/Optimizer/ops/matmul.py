@@ -64,6 +64,16 @@ def matmul_forward(self, *args):
     return out.betensor
 
 
+@approx_register(OpType.MatMul)
+def matmul_approx(self, *args):
+    # adapt for ugly cases when pure int matmul needed but coresponding layer was treated as unquantiable=true
+    if not is_float(self.inputs[0].ir_dtype) and not is_float(self.inputs[1].ir_dtype) and not is_float(self.outputs[0].ir_dtype):
+        self.params["shift_type"] = SHIFT_DTYPE
+        self.params["scale_type"] = Dtype.UINT8
+        self.params["shift_value"] = 0
+        self.params["scale_value"] = 1
+
+
 @quant_register(OpType.MatMul)
 def matmul_quantize(self, *args):
     quant_type = self.attrs.get('quant_type')
@@ -84,7 +94,7 @@ def matmul_quantize(self, *args):
     else:
         out.qbits = q_bits_activation
         if fpx_quantize:
-            out.dtype = QuantType.activation_type(quant_type)
+            out.dtype = QuantType._to_Dtype(QuantType.activation_type(quant_type))
             out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
                 out, q_mode_activation, out.dtype)
         else:

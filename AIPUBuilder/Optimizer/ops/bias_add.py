@@ -22,7 +22,7 @@ def bias_add_quantize(self, *args):
         out.qinvariant = False
         out.qbits = q_bits_activation
         if fpx_quantize:
-            out.dtype = QuantType.activation_type(quant_type)
+            out.dtype = QuantType._to_Dtype(QuantType.activation_type(quant_type))
             out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
                 out, q_mode_activation, out.dtype)
         else:

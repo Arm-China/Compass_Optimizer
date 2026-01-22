@@ -8,26 +8,11 @@ from AIPUBuilder.Optimizer.utils import (
     is_float,
     OP_ONLY_CHANGE_SHAPE,
 )
+import re
 
 
 def set_unquantifiable(graph, config=None):
     def _check_lib_impl():
-        has_float = False
-        for inp in node.inputs:
-            if is_float(inp.ir_dtype):
-                has_float = True
-                break
-        for out in node.outputs:
-            if is_float(out.ir_dtype):
-                has_float = True
-                break
-        for name, const in node.constants.items():
-            if "weight" in name or "bias" in name:
-                if is_float(const.ir_dtype):
-                    has_float = True
-                    break
-        if not has_float:
-            return False, None
         dtype_specs_from_lib = node.get_lib_dtype_spec()
         ds = set()
         for spec in dtype_specs_from_lib:
@@ -59,7 +44,7 @@ def set_unquantifiable(graph, config=None):
                 is_lib_float, dt = _check_lib_impl()
         node.params["unquantifiable"] = is_lib_float
         if is_lib_float:
-            if "int" in trigger_float_op:
+            if re.search(r'act_[a-zA-Z0-9]+_wht', trigger_float_op):
                 node.attrs["weight_only_quantization"] = True
             node.attrs["trigger_float_op"] = dt
         else:

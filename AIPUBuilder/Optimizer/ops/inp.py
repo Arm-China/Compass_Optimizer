@@ -31,7 +31,7 @@ def fpx_quantize(self, *args) -> bool:
     quant_type = self.get_attrs('quant_type', optional=True, default_value='disable')
     if quant_type != 'disable' and QuantType.is_float(quant_type):
         q_mode_activation = self.attrs["q_mode_activation"]
-        q_type_activation = QuantType.activation_type(quant_type)
+        q_type_activation = QuantType._to_Dtype(QuantType.activation_type(quant_type))
         out = self.outputs[0]
         out.dtype = q_type_activation
         out.qinvariant = False

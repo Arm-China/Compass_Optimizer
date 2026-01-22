@@ -189,6 +189,7 @@ from . import isnan
 from . import cacheupdate
 from . import control_op
 from . import dummy
+from . import switch
 from . import shape_operator
 from . import constant_of_shape
 from . import rotary_embedding

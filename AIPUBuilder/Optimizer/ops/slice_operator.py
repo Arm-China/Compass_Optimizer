@@ -2,6 +2,7 @@
 # Copyright © 2022-2025 Arm Technology (China) Co. Ltd.
 
 from AIPUBuilder.Optimizer.framework import *
+from AIPUBuilder.Optimizer.utils.string_utils import ds_expr_eval
 
 from AIPUBuilder.Optimizer.ops.stridedslice import *
 
@@ -32,6 +33,13 @@ def slice_forward(self, *args):
         self.params['strides'] = steps
         self.params['begin'] = begin
         self.params['end'] = end
+    elif 'dynamic_symbols' in self.attrs and 'ds_output_shape' in self.params:
+        dynamic_symbols_map = self.attrs['dynamic_symbols']
+        self.params['begin'] = ds_expr_eval(self.params.get('ds_begin', self.params['begin']), dynamic_symbols_map)
+        self.params['end'] = ds_expr_eval(self.params.get('ds_end', self.params['end']), dynamic_symbols_map)
+        self.params['strides'] = ds_expr_eval(self.params.get(
+            'ds_strides', self.params['strides']), dynamic_symbols_map)
+
     stridedslice(self, *args)
     if dynamic_slice:
         self.params.pop('strides')

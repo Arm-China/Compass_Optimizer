@@ -327,15 +327,15 @@ def str2dtype(name):
         return Dtype.FP64
     elif dname in ['bool', 'boolean', 'dtype.bool', 'dtype.boolean', ]:
         return Dtype.BOOL
-    elif dname in ['float8_e5m2', 'fp8_e5m2', 'dtype.float8_e5m2', 'dtype.fp8_e5m2', ]:
+    elif dname in ['float8_e5m2', 'fp8_e5m2', 'dtype.float8_e5m2', 'dtype.fp8_e5m2', 'float8e5m2', 'fp8e5m2']:
         return Dtype.FP8_E5M2
-    elif dname in ['float8_e4m3fn', 'fp8_e4m3fn', 'dtype.float8_e4m3fn', 'dtype.fp8_e4m3fn', ]:
+    elif dname in ['float8_e4m3fn', 'fp8_e4m3fn', 'dtype.float8_e4m3fn', 'dtype.fp8_e4m3fn', 'float8e4m3fn', 'fp8e4m3fn']:
         return Dtype.FP8_E4M3FN
-    elif dname in ['float4_e2m1fn', 'fp4_e2m1fn', 'dtype.float4_e2m1fn', 'dtype.fp4_e2m1fn', ]:
+    elif dname in ['float4_e2m1fn', 'fp4_e2m1fn', 'dtype.float4_e2m1fn', 'dtype.fp4_e2m1fn', 'float4e2m1fn', 'fp4e2m1fn']:
         return Dtype.FP4_E2M1FN
-    elif dname in ['float6_e2m3fn', 'fp6_e2m3fn', 'dtype.float6_e2m3fn', 'dtype.fp6_e2m3fn', ]:
+    elif dname in ['float6_e2m3fn', 'fp6_e2m3fn', 'dtype.float6_e2m3fn', 'dtype.fp6_e2m3fn', 'float6e2m3fn', 'fp6e2m3fn', ]:
         return Dtype.FP6_E2M3FN
-    elif dname in ['float6_e3m2fn', 'fp6_e3m2fn', 'dtype.float6_e3m2fn', 'dtype.fp_e3m2fn', ]:
+    elif dname in ['float6_e3m2fn', 'fp6_e3m2fn', 'dtype.float6_e3m2fn', 'dtype.fp6_e3m2fn', 'float6e3m2fn', 'fp6e3m2fn', ]:
         return Dtype.FP6_E3M2FN
     elif dname in ['int8', 'dtype.int8', ]:
         return Dtype.INT8
@@ -697,6 +697,7 @@ def dtype2torch_type(tp):
     th_dict = {
         Dtype.BOOL:         torch.bool,
         # torch.float8 only valid on cpu or specific gpu
+        Dtype.FP4_E2M1FN:     torch.float8_e4m3fn,
         Dtype.FP6_E2M3FN:     torch.float8_e4m3fn,
         Dtype.FP6_E3M2FN:     torch.float8_e4m3fn,
         Dtype.FP4_E2M1FN:     torch.float8_e4m3fn,
@@ -794,6 +795,8 @@ def get_round_mode_func(round_mode):
 def get_round_func_according_to_dtype(round_mode, dtype: Optional[Dtype] = None):
     if dtype is not None and dtype in [Dtype.FP8_E4M3FN, Dtype.FP8_E5M2]:
         def round_func(x): return round_to_fp8(x, dtype, round_mode=round_mode)
+    elif dtype in [Dtype.FP4_E2M1FN]:
+        def round_func(x): return round_to_fp4(x, dtype, round_mode=round_mode)
     elif dtype is None or (not is_float(dtype) and dtype2bits(dtype) <= 16):
         round_func = get_round_mode_func(round_mode)
     else:
@@ -894,6 +897,47 @@ def uint8_to_fp8(x: torch.Tensor, dtype: Dtype):
     return out
 
 
+def fp32_to_fp4(x: torch.tensor, round_mode='ROUND_TO_EVEN'):
+    # current only support round_mode = 'ROUND_TO_EVEN'
+    signed = torch.sign(x)
+    abs_x = torch.abs(x.float())
+    abs_x = torch.where((abs_x > 0) & (abs_x <= 0.25), 0, abs_x)
+    abs_x = torch.where((abs_x > 0.25) & (abs_x <= 0.75), 0.5, abs_x)
+    abs_x = torch.where((abs_x > 0.75) & (abs_x <= 1.25), 1.0, abs_x)
+    abs_x = torch.where((abs_x > 1.25) & (abs_x < 1.75), 1.5, abs_x)
+    abs_x = torch.where((abs_x >= 1.75) & (abs_x <= 2.5), 2.0, abs_x)
+    abs_x = torch.where((abs_x > 2.5) & (abs_x < 3.5), 3.0, abs_x)
+    abs_x = torch.where((abs_x >= 3.5) & (abs_x < 5.0), 4.0, abs_x)
+    abs_x = torch.where((abs_x >= 5.0),  6.0, abs_x)
+    fp4_value = abs_x * signed
+    return fp4_value
+
+
+def uint8_to_fp4(x: torch.Tensor):
+    uint8_x = x.to(torch.uint8)
+    lookup_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=x.device).float()
+    index = uint8_x & 0x07
+    lut = lookup_table[torch.reshape(index, (-1,)).long()]
+    lut = torch.reshape(lut, index.shape)
+    out = torch.where((uint8_x >> 3) == 0, lut, -lut)
+    return out
+
+
+def fp4_to_uint4(x: torch.Tensor):
+    fp4_uint4_table = [(0.0, 0b00000000), (0.5, 0b00000001), (1.0, 0b00000010), (1.5, 0b00000011),
+                       (2.0, 0b00000100), (3.0, 0b00000101), (4.0, 0b00000110), (6.0, 0b00000111)]
+    fp4_value = fp32_to_fp4(x)
+    signed = torch.sign(fp4_value)
+    fp4_value_abs = torch.abs(fp4_value)
+    uint4_value = torch.zeros_like(x, device=x.device).to(torch.uint8)
+    for fp4_v, uint4_v in fp4_uint4_table:
+        mask = fp4_value_abs == fp4_v
+        uint4_value[mask] = torch.tensor(uint4_v, device=x.device).to(torch.uint8)
+    uint4_value = torch.where(signed == -1, torch.bitwise_or(uint4_value,
+                              torch.tensor(0b00001000, device=x.device)).to(torch.uint8), uint4_value)
+    return uint4_value
+
+
 def round_to_fp8(a: torch.Tensor, dtype: Dtype, round_mode='ROUND_TO_EVEN'):
     assert dtype in [Dtype.FP8_E4M3FN, Dtype.FP8_E5M2], "dtype must in {[Dtype.FP8_E4M3FN, Dtype.FP8_E5M2]}"
     uint8_value = fp8_to_uint8(a, dtype, round_mode=round_mode)
@@ -902,3 +946,9 @@ def round_to_fp8(a: torch.Tensor, dtype: Dtype, round_mode='ROUND_TO_EVEN'):
     fp8_value = torch.where(torch.isnan(fp8_value), 0, fp8_value)
     fp8_value = torch.where(torch.isinf(fp8_value), max_norm, fp8_value)
     return fp8_value
+
+
+def round_to_fp4(a: torch.Tensor, dtype: Dtype, round_mode='ROUND_TO_EVEN'):
+    assert dtype in [Dtype.FP4_E2M1FN], "dtype must in {[Dtype.FP4_E2M1FN]}"
+    fp4_value = fp32_to_fp4(a, round_mode=round_mode)
+    return fp4_value

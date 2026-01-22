@@ -69,7 +69,7 @@ def clip_quantize(self, *args):
             out.dtype = inp.dtype
             out.qmin, out.qmax = dtype2range(out.dtype)
         else:
-            out.dtype = QuantType.activation_type(quant_type)
+            out.dtype = QuantType._to_Dtype(QuantType.activation_type(quant_type))
             out.qbits = dtype2bits(out.dtype)
             out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
                 out, q_mode_activation, out.dtype)

@@ -163,16 +163,43 @@ class InsertFakeOp(BaseQDQOp):
     def __call__(self):
         # When cast_dtype_for_lib is set to True, since lib currently does not support cast op for fp8<->int8;
         # it is currently implemented by dequantize(fp8->fp16)+quantize(fp16->int8)
-        def is_fp8_int(node, parent_node):
-            if (node.attrs['quant_type'] == 'disable' or not QuantType.is_float(node.attrs['quant_type'])) and \
-                    (parent_node.attrs['quant_type'] != 'disable' and QuantType.is_float(parent_node.attrs['quant_type'])):
-                return True
-
-            if (parent_node.attrs['quant_type'] == 'disable' or not QuantType.is_float(parent_node.attrs['quant_type'])) and \
-                    (node.attrs['quant_type'] != 'disable' and QuantType.is_float(node.attrs['quant_type'])):
-                return True
-
-            return False
+        # def is_fpx_int(node, parent_node):
+        #     if (node.attrs['quant_type'] == 'disable' or not QuantType.is_float(node.attrs['quant_type'])) and \
+        #             (parent_node.attrs['quant_type'] != 'disable' and QuantType.is_float(parent_node.attrs['quant_type'])):
+        #         return True
+        #
+        #     if (parent_node.attrs['quant_type'] == 'disable' or not QuantType.is_float(parent_node.attrs['quant_type'])) and \
+        #             (node.attrs['quant_type'] != 'disable' and QuantType.is_float(node.attrs['quant_type'])):
+        #         return True
+        #
+        #     return False
+        def is_fpx1fpx2_fpxint(node, parent_node):
+            node_quant_type = node.attrs['quant_type']
+            parent_quant_type = parent_node.attrs['quant_type']
+            if node_quant_type != 'disable' and parent_quant_type != 'disable':
+                if QuantType.is_float(node_quant_type) and QuantType.is_float(parent_quant_type):
+                    node_activation_type = QuantType._to_Dtype(QuantType.activation_type(node_quant_type))
+                    parent_activation_type = QuantType._to_Dtype(QuantType.activation_type(parent_quant_type))
+                    if node_activation_type != parent_activation_type:
+                        return True
+                    else:
+                        return False
+                elif not QuantType.is_float(node_quant_type) and not QuantType.is_float(parent_quant_type):
+                    return False
+                else:
+                    return True
+            elif node_quant_type == 'disable' and parent_quant_type != 'disable':
+                if QuantType.is_float(parent_quant_type):
+                    return True
+                else:
+                    return False
+            elif node_quant_type != 'disable' and parent_quant_type == 'disable':
+                if QuantType.is_float(node_quant_type):
+                    return True
+                else:
+                    return False
+            else:
+                return False
 
         def set_cast_dtypes_for_fp8_int(node, config):
             if node.type not in OP_ONLY_CHANGE_SHAPE:
@@ -187,7 +214,7 @@ class InsertFakeOp(BaseQDQOp):
                 not parent_node.get_param('unquantifiable', optional=True, default_value=True) and
                 not node.get_param('unquantifiable', optional=True, default_value=True) and
                 not edge_tensor.qinvariant and
-                is_fp8_int(node, parent_node))
+                is_fpx1fpx2_fpxint(node, parent_node))
         ]
 
         for idx, cond_func in enumerate(_conditions):
@@ -329,7 +356,7 @@ class InsertCastOp(BaseInsertOp):
 
         def get_output_dtype(n, edge_tensor):
             if n.attrs.get('quant_type') != 'disable' and QuantType.is_float(n.attrs.get('quant_type')):
-                out_dtype = QuantType.activation_type(n.attrs.get('quant_type'))
+                out_dtype = QuantType._to_Dtype(QuantType.activation_type(n.attrs.get('quant_type')))
             else:
                 out_dtype = bits2dtype(n.attrs['q_bits_activation'], is_signed(edge_tensor.dtype))
             return out_dtype

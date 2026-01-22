@@ -35,9 +35,10 @@ class PerNodeFieldDict:
 
     def __init__(self, default_value=None) -> None:
         self.global_value = string_to_base_type(default_value) if isinstance(default_value, str) else default_value
-        self.tdict = {}
-        self.rdict = {}
-        self.ndict = {}
+        from collections import OrderedDict
+        self.tdict = OrderedDict()
+        self.rdict = OrderedDict()
+        self.ndict = OrderedDict()
 
     def __repr__(self):
         from collections import defaultdict
@@ -1174,7 +1175,7 @@ class ActivationBitsField(BaseField):
 
 @field_register('quant_type', 'default')
 class QuantTypeField(BaseField):
-    # quantization type for activations, like 'int8, int16, float8_e5m3, float8_e4m3fn', default to 'disable'
+    # quantization type for activations, like 'w8a8, w16a16, wfp4afp8e4m3, wfp8e5m2afp8e5m2', default to 'disable'
     @staticmethod
     def _quant_type():
         return list(QuantType.quant_names())
@@ -1200,7 +1201,10 @@ class QuantTypeField(BaseField):
     @staticmethod
     def message():
         all_type = QuantTypeField._quant_type()
-        return f"quant_type for quantizating activation data and weight/bias data. When quant_type is 'disable', parameters such as activation_bits, weight_bits, and bias_bits are mainly used for quantization. When quant_type is not set to 'disable', the corresponding configuration of quant_type will be used to override activation_bits, weight_bits, and bias_bitsNow Optimizer supports quant_type :{all_type}, default value = 'disable'. {BaseField.per_node_cfg_usage}"
+        return (f"quant_type for quantizating activation data and weight/bias data. When quant_type is 'disable', parameters such as activation_bits, weight_bits, and bias_bits are mainly used for quantization. When quant_type is not set to 'disable', the corresponding configuration of quant_type will be used to override activation_bits, weight_bits, and bias_bits."
+                f"quant_type=wfp8e4m3afp8e4m3 means weights type is float8_e4m3fn and activation type is float8_e4m3fn"
+                f"quant_type=w4afp8e5m2 means weights type is aligned_int4 and activation type is float8_e5m2"
+                f"Now Optimizer supports quant_type :{all_type}, default value = 'disable'. {BaseField.per_node_cfg_usage}")
 
 
 @field_register('lut_items_in_bits', 'default')
@@ -1909,7 +1913,8 @@ class TriggerFloatOpField(BaseField):
 
     @staticmethod
     def parse(tfo):
-        tf_pattern = r'((disable)|(float16_preferred)|(bfloat16_preferred)|(float32_preferred)|(float16_act_int_wht)|(bfloat16_act_int_wht)|(float32_act_int_wht))(!)?'
+        tf_pattern = r'((disable)|(float16_preferred)|(bfloat16_preferred)|(float32_preferred)|(float16_act_int_wht)|(bfloat16_act_int_wht)|(float32_act_int_wht)|(float16_act_fp8e4m3fn_wht)|' \
+                     r'(float16_act_fp4e2m1fn_wht)|(bfloat16_act_fp8e4m3fn_wht)|(bfloat16_act_fp4e2m1fn_wht)|(float32_act_fp8e4m3fn_wht)|(float32_act_fp4e2m1fn_wht))(!)?'
         return BaseField._re_parse(tfo, tf_pattern)
 
     @staticmethod
@@ -1926,8 +1931,14 @@ float16_preferred
 bfloat16_preferred
 float32_preferred
 float16_act_int_wht
+float16_act_fp8e4m3fn_wht
+float16_act_fp4e2m1fn_wht
 float32_act_int_wht
 bfloat16_act_int_wht
+bfloat16_act_fp8e4m3fn_wht
+bfloat16_act_fp4e2m1fn_wht
+float32_act_fp8e4m3fn_wht
+float32_act_fp4e2m1fn_wht
 
 Where 'float16_preferred', 'bfloat16_preferred' and 'float32_preferred' means corresponding float type will be selected preferentially if existed
 (the calibration dataset may still needed, as probably not all of the model's operators do have float type layer lib implementation

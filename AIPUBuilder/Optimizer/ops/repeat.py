@@ -41,13 +41,17 @@ def repeat(self, *args):
         OPT_FATAL("repeats number are greater than output size ")
     out = torch.repeat_interleave(inp_betensors, inp_repeats, axis)
     # clone_out = torch.zeros(out_shape,device=self.inputs[0].betensor.device)
-    # out shape maybe less than output assigned shape, such as output is 1000,but actual get out result is 500
-    # so fill small out to big clone_out
-    pad_params = []
-    for p in range(out.ndim):
-        pad_params.append(0)
-        pad_params.append(out_shape[out.ndim - 1 - p] - out.shape[out.ndim - 1 - p])
-    self.outputs[0].betensor = torch.nn.functional.pad(out, tuple(pad_params), "constant", 0)
+    if 'ds_output_shape' not in self.attrs or len(self.attrs['ds_output_shape']) == 0:
+        # out shape maybe less than output assigned shape, such as output is 1000,but actual get out result is 500
+        # so fill small out to big clone_out
+        pad_params = []
+        for p in range(out.ndim):
+            pad_params.append(0)
+            pad_params.append(out_shape[out.ndim - 1 - p] - out.shape[out.ndim - 1 - p])
+        self.outputs[0].betensor = torch.nn.functional.pad(out, tuple(pad_params), "constant", 0)
+    else:
+        # dynamic shape
+        self.outputs[0].betensor = out
 
     return self.outputs[0].betensor
 

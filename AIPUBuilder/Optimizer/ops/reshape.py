@@ -206,9 +206,13 @@ def reshape(self, *args):
     inp = self.inputs[0].betensor.clone()
     out = self.outputs[0]
     try:
-        shape, false_or_symb_shape = get_ds_shape(list(self.inputs[0].ir_shape), list(out.ir_shape), list(inp.shape))
+        if 'ds_output_shape' in self.attrs:
+            shape, false_or_symb_shape = self.attrs['ds_output_shape'][0], False
+        else:
+            shape, false_or_symb_shape = get_ds_shape(
+                list(self.inputs[0].ir_shape), list(out.ir_shape), list(inp.shape))
         out.betensor = torch.reshape(inp, shape)
-        if self.is_dynamic:
+        if hasattr(self, 'is_dynamic') and self.is_dynamic:
             if isinstance(false_or_symb_shape, bool):
                 if 'ds_output_shape' not in self.params:
                     self.params['ds_output_shape'] = [f"{shape}".replace(" ", "")]

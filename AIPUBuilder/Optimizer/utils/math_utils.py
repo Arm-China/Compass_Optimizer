@@ -256,7 +256,8 @@ def lookup_float_index_lut(t: torch.Tensor, lut: torch.Tensor, index_scale: floa
         y = torch.where(left_mask, y_left, y_middle)
         y = torch.where(right_mask, y_right, y)
         return y
-    x_t = t * index_scale - index_offset
+    x_t = torch.where(torch.isnan(t), torch.zeros_like(t), t)
+    x_t = x_t * index_scale - index_offset
     if mirror_mode:
         y_pos = lookup_lut(x_t)
         y_neg = lookup_lut(x_t.negative()).negative()

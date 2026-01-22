@@ -216,6 +216,7 @@ class BilinearResizeSubgraph(OptSubgraph):
 
         conv_attrs = resize_attrs
         conv_attrs['conv_from_resize_opt'] = True
+        conv_attrs['trigger_float_op'] = 'disable'
         if (ResH >= H) or (ResW >= W):
             K = i_scale + 1
             stride_x = K - 1
@@ -256,6 +257,20 @@ class BilinearResizeSubgraph(OptSubgraph):
         lid = self._update_layer_id(conv.attrs, layer_id, lid)
         conv.constants["weights"] = PyTensor("resize_weights", conv_weight)
         conv.constants["biases"] = PyTensor("resize_biases", conv_bias)
+
+        fwt = conv.constants["weights"]
+        fwt.scale = 1 / 127.0
+        fwt.zerop = 0
+        fwt.qmin = -128.0
+        fwt.qmax = 127.0
+        fwt.betensor = linear_quantize_clip(fwt.betensor, 1. / fwt.scale, fwt.zerop, fwt.qmin, fwt.qmax)
+        fwt.dtype = Dtype.INT8
+
+        fbt = conv.constants['biases']
+        fbt.scale = 1 / 127.0
+        fbt.zerop = 0
+        fbt.betensor = fbt.betensor.int()
+        fbt.dtype = Dtype.INT32
 
         if i_c > 1:
             split_out_list = []

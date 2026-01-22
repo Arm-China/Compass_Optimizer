@@ -10,6 +10,7 @@ from . import aipubt_dataset_aishell
 from . import aipubt_dataset_mtcnn
 from . import aipubt_dataset_librispeech
 from . import aipubt_dataset_numpymultiinput
+from . import aipubt_dataset_numpymultiinputllm
 from . import aipubt_dataset_generaldict
 from . import aipubt_dataset_iwslt
 from . import aipubt_dataset_fasterrcnnvoc

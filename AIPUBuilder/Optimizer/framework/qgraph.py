@@ -5,6 +5,7 @@
 # -*- coding: UTF-8 -*-
 # cython: language_level=3
 from AIPUBuilder.Optimizer.framework.pycore.pygraph import PyGraph
+import re
 
 __all__ = [
     'graph_inference',
@@ -74,6 +75,88 @@ class QuantizeGraph(PyGraph):
         clone_graph = super().clone()
         clone_graph.constants_statisticed = self.constants_statisticed
         return clone_graph
+
+    def init_all_nodes_attrs(self, config_info, default_argv):
+        from AIPUBuilder.Optimizer.framework import OP_DICT, QUANT_OP_DICT
+        from AIPUBuilder.Optimizer.framework import Dtype, OpType
+        from AIPUBuilder.Optimizer.utils import QuantMode, AIFF_AHEAD_SHIFT_OP
+        from AIPUBuilder.Optimizer.logger import OPT_ERROR
+        for node in self.nodes:
+            # check if each op exists in registered dict
+            if node.type not in OP_DICT:
+                OPT_ERROR('unsupported op "%s", can not find it in OP_DICT, please implement this op firstly' % str(
+                    node.type))
+            if node.type not in QUANT_OP_DICT:
+                OPT_ERROR(
+                    'unsupported op "%s", can not find it in QUANT_OP_DICT, please implement this op firstly' % str(
+                        node.type))
+
+            properties = config_info[node.name] if node.name in config_info else {}
+
+            def init_attrs(key, default_value=None):
+                node.attrs[key] = properties[key] if key in properties else default_value
+
+            init_attrs('layer_id')
+            init_attrs('layer_top_type_original')
+            init_attrs('q_mode_activation', default_argv.quantize_method_for_activation.get(node))
+            init_attrs('q_mode_weight', default_argv.quantize_method_for_weight.get(node))
+            if node.type in [OpType.DepthwiseConv] and 'q_mode_weight' not in properties:
+                node.attrs['q_mode_weight'] = QuantMode.to_per_channel(node.attrs['q_mode_weight'])
+            # bias and weight better to have the same quantize_method
+            init_attrs('q_mode_bias', node.attrs['q_mode_weight'])
+            init_attrs('q_bits_activation', default_argv.activation_bits.get(node))
+            init_attrs('q_bits_weight', default_argv.weight_bits.get(node))
+            if node.type == OpType.BatchNorm and 'q_bits_weight' not in properties:
+                node.attrs['q_bits_weight'] = 16
+            init_attrs('q_bits_bias', default_argv.bias_bits.get(node))
+            init_attrs('quant_type', default_argv.quant_type.get(node))
+            init_attrs('weight_block_size', default_argv.weight_block_size.get(node))
+            init_attrs('activation_block_size', default_argv.activation_block_size.get(node))
+            init_attrs('q_strategy_activation', default_argv.calibration_strategy_for_activation.get(node))
+            init_attrs('q_strategy_weight', default_argv.calibration_strategy_for_weight.get(node))
+            init_attrs('q_strategy_bias', default_argv.calibration_strategy_for_weight.get(node))
+            init_attrs('running_statistic_momentum', default_argv.running_statistic_momentum.get(node))
+            init_attrs('histc_bins', default_argv.histc_bins.get(node))
+            init_attrs('debug_fake_quantize', False)
+            init_attrs('activation_perchannel_min_elements', default_argv.activation_perchannel_min_elements)
+            init_attrs('regularize_activation_perchannel_scales',
+                       default_argv.regularize_activation_perchannel_scales.get(node))
+
+            if node.type in [OpType.Resize, OpType.Interp, ]:
+                init_attrs('resize_degrade_to_nearest', default_argv.resize_degrade_to_nearest.get(node))
+            if node.type in [OpType.Convolution, OpType.DepthwiseConv, OpType.ConvTranspose, OpType.Convolution3D,
+                             OpType.ConvTranspose3D]:
+                init_attrs('with_winograd', default_argv.with_winograd.get(node)),
+            init_attrs('lut_items_in_bits', default_argv.lut_items_in_bits.get(node))
+            init_attrs('multiplier_bits', node.attrs['q_bits_activation'] if default_argv.multiplier_bits == ''
+                       else default_argv.multiplier_bits.get(node))
+            init_attrs('force_dtype_int', default_argv.force_dtype_int.get(node))
+            init_attrs('force_shift_positive', default_argv.force_shift_positive.get(node))
+            init_attrs('min_compatible_zhouyi_target', default_argv.min_compatible_zhouyi_target)
+            # init_attrs('force_dtype_int', False)
+            init_attrs('bias_effective_bits', node.attrs['q_bits_bias'] if default_argv.bias_effective_bits == ''
+                       else default_argv.bias_effective_bits.get(node))
+            init_attrs('bias_effective_bits_auto_adaption', default_argv.bias_effective_bits_auto_adaption.get(node))
+            init_attrs('unify_shifts_for_aiff', default_argv.unify_shifts_for_aiff.get(node))
+            init_attrs('trim_infinity_before_statistic', default_argv.trim_infinity_before_statistic.get(node))
+            init_attrs('trigger_float_op', default_argv.trigger_float_op.get(node))
+            init_attrs('optimize_wdc_for_x2', default_argv.optimize_wdc_for_x2.get(node))
+            if node.type in AIFF_AHEAD_SHIFT_OP and default_argv.remain_shift != '':
+                init_attrs('remain_shift', default_argv.remain_shift.get(node))
+            if node.type == OpType.Concat:
+                init_attrs('unify_scales_for_multi_inputs_operator_threshold',
+                           default_argv.unify_scales_for_concat_threshold)
+                init_attrs('unify_scales_for_kvc_concat', default_argv.unify_scales_for_kvc_concat.get(node))
+            init_attrs('unify_scales_for_multi_inputs_operators',
+                       default_argv.unify_scales_for_multi_inputs_operators.get(node))
+            init_attrs('ds_output_shape_constant', default_argv.ds_output_shape_constant.get(node))
+            init_attrs('ds_parameter_constant', default_argv.ds_parameter_constant.get(node))
+            init_attrs('enable_ds', default_argv.enable_ds.get(node))
+            node.attrs['optimization_info'] = {}
+            node.attrs['batch_size_in_IR'] = config_info['batch_size']
+            node.attrs['calculate_running_time'] = False
+            node.attrs['trigger_float_op_bkup'] = node.attrs['trigger_float_op']
+            node.params['is_perf_mode'] = default_argv.perf_mode_for_lib.get(node)
 
     def feed_inputs_data(self, inputs_data):
         from AIPUBuilder.Optimizer.framework.pycore.pytensor import opt_use_cuda
@@ -418,6 +501,8 @@ class QuantizeGraph(PyGraph):
         from AIPUBuilder.Optimizer.framework import OpType, Dtype, PyTensor, PyNode
         from AIPUBuilder.Optimizer.utils import (is_float, is_signed, str2dtype, QuantMode,
                                                  get_linear_quant_params_from_tensor,
+                                                 get_fpx_quant_params_from_tensor,
+                                                 get_round_func_according_to_dtype,
                                                  torch_type2dtype, dtype2bits,
                                                  linear_quantize_clip)
 
@@ -500,20 +585,9 @@ class QuantizeGraph(PyGraph):
                         t.qmax = None
                         t.qinvariant = None
                     if all(sname in qn.constants.keys() for sname in ['weights', 'scale0', 'scale1']):
-                        # print("pop scale0")
                         qn.constants.pop('scale0')
                         qn.constants.pop('scale1')
                         qn.constants.pop('zp0')
-                        # v = qn.constants['weights']
-                        # scales = v.scale
-                        # zps = v.zerop
-                        # ir_shape_len = len(v.ir_shape)
-                        # if ir_shape_len and ir_shape_len - 1 >= v.key_axis:
-                        #     channel_num = v.ir_shape[v.key_axis]
-                        #     if scales.numel() == zps.numel() and scales.numel() > 1 and scales.numel() > channel_num:
-                        #         ic = qn.inputs[0].ir_shape[-1]
-                        #         group_size = ic // (scales.numel() // channel_num)
-                        #         qn.params['weight_block_size'] = group_size
 
                 o_dtype = str2dtype(fd)
                 o_int_index = []
@@ -658,7 +732,9 @@ class QuantizeGraph(PyGraph):
 
                 if qn.type != OpType.Quantize and qn.type != OpType.DeQuantize:  # per-channel scale/zp would be in constants
                     for key, ct in qn.constants.items():
-                        if is_float(ct.ir_dtype) and (not all(sname in qn.constants.keys() for sname in ['scale0', 'scale1'])):
+                        # there are some fc weight,which is quantized fp4 or int4,but activation need be quantized with fp16
+                        float_and_not4bits = dtype2bits(ct.ir_dtype) > 8 and is_float(ct.ir_dtype)
+                        if float_and_not4bits and (not all(sname in qn.constants.keys() for sname in ['scale0', 'scale1'])):
                             ct.dtype = Dtype.FP32 if key in ['biases', 'negative_slope'] else o_dtype
 
                 if "weights" in qn.constants.keys() and qn.get_attrs("weight_only_quantization", optional=True, default_value=False):
@@ -672,6 +748,10 @@ class QuantizeGraph(PyGraph):
                         if bkey in qn.attrs['gptq_weights'].keys():
                             OPT_DEBUG(f'gptq optimization was applied on {qn}')
                             w.betensor = qn.attrs['gptq_weights'][bkey]
+                    ori_trigger_float_op = qn.attrs['ori_trigger_float_op']
+                    match = re.search(r'act_([a-zA-Z0-9]+)_wht', ori_trigger_float_op)
+                    weight_type = match.group().split('_')[1]
+                    is_fpx_weight = False if weight_type == 'int' else True
                     if QuantMode.is_per_block(q_mode_weight):
                         w.block_size = qn.attrs["weight_block_size"]
                         from AIPUBuilder.Optimizer.features import statistic_and_calibration
@@ -679,13 +759,26 @@ class QuantizeGraph(PyGraph):
                         wb.betensor = w.betensor.reshape(-1, w.block_size)
                         wb.key_axis = 0
                         statistic_and_calibration(wb, qn.attrs, is_constant_tensor=True)
-                        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
-                            wb, QuantMode.to_per_channel(q_mode_weight), w.qbits, is_signed=True)
+                        if is_fpx_weight:
+                            w.dtype = str2dtype(weight_type)
+                            w.qbits = dtype2bits(w.dtype)
+                            w.scale, w.zerop, w.qmin, w.qmax = get_fpx_quant_params_from_tensor(
+                                wb, QuantMode.to_symmetric(QuantMode.to_per_channel(q_mode_weight)), w.dtype)
+                        else:
+                            w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
+                                wb, QuantMode.to_per_channel(q_mode_weight), w.qbits, is_signed=True)
                         qn.params['weight_block_size'] = w.block_size
                     else:
-                        w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
-                            w, q_mode_weight, w.qbits, is_signed=True)
-                    w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax)
+                        if is_fpx_weight:
+                            w.dtype = str2dtype(weight_type)
+                            w.qbits = dtype2bits(w.dtype)
+                            w.scale, w.zerop, w.qmin, w.qmax = get_fpx_quant_params_from_tensor(
+                                w, QuantMode.to_symmetric(q_mode_weight), w.dtype)
+                        else:
+                            w.scale, w.zerop, w.qmin, w.qmax, w.dtype = get_linear_quant_params_from_tensor(
+                                w, q_mode_weight, w.qbits, is_signed=True)
+                    w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop,
+                                                      w.qmin, w.qmax, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', w.dtype))
                     # currently lib can detect weight only quantization through IR Dtype info
                     # qn.params['approximate_method'] = 'weight_only_quantization'
                 if qn.get_param('is_perf_mode', optional=True, default_value=True):

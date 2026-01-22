@@ -184,16 +184,38 @@ class QuantMode:
 
 class QuantType:
     Support_quantType = namedtuple('QuantType', ['name', 'activation_bits', 'weight_bits',
-                                   'bias_bits', 'lut_items_in_bits', 'activation_type', 'weight_type', 'bias_type'])
+                                   'bias_bits', 'lut_items_in_bits', 'activation_type', 'weight_type', 'bias_type', 'is_weight_only_quantization'])
     quant_type = [
-        Support_quantType("int8", 8, 8, 32, 8, Dtype.INT8, Dtype.INT8, Dtype.INT32),
-        Support_quantType("int16", 16, 16, 48, 10, Dtype.INT16, Dtype.INT16, Dtype.INT64),
-        Support_quantType("fp8_e4m3fn", 8, 8, 32, 8, Dtype.FP8_E4M3FN, Dtype.FP8_E4M3FN, Dtype.FP32),
-        Support_quantType("fp8_e5m2", 8, 8, 32, 8, Dtype.FP8_E5M2, Dtype.FP8_E5M2, Dtype.FP32),
+        Support_quantType("w8a8", 8, 8, 32, 8, 'int8', 'int8', 'int32', False),
+        Support_quantType("w16a16", 16, 16, 48, 10, 'int16', 'int16', 'int64', False),
+
+        Support_quantType("w4", 16, 4, 32, 10, 'float16', 'aligned_int4', 'float32', True),
+        Support_quantType("w8", 16, 8, 32, 10, 'float16', 'int8', 'float32', True),
+        Support_quantType("w4afp16", 16, 4, 32, 10, 'float16', 'aligned_int4', 'float32', True),
+        Support_quantType("w8afp16", 16, 8, 32, 10, 'float16', 'int8', 'float32', True),
+        Support_quantType("w4abfp16", 16, 4, 32, 10, 'bfloat16', 'aligned_int4', 'float32', True),
+        Support_quantType("w8abfp16", 16, 8, 32, 10, 'bfloat16', 'int8', 'float32', True),
+
+        Support_quantType("wfp4", 16, 4, 32, 10, 'float16', 'float4_e2m1fn', 'float32', True),
+        Support_quantType("wfp4afp16", 16, 4, 32, 10, 'float16', 'float4_e2m1fn', 'float32', True),
+        Support_quantType("wfp4abfp16", 16, 4, 32, 10, 'bfloat16', 'float4_e2m1fn', 'float32', True),
+        Support_quantType("wfp4afp32", 32, 4, 32, 10, 'float32', 'float4_e2m1fn', 'float32', True),
+
+        Support_quantType("w4afp8e5m2", 8, 4, 32, 8, 'float8_e5m2', 'aligned_int4', 'float32', False),
+        Support_quantType("w4afp8e4m3", 8, 4, 32, 8, 'float8_e4m3fn', 'aligned_int4', 'float32', False),
+        Support_quantType("wfp4afp8e5m2", 8, 4, 32, 8, 'float8_e5m2', 'float4_e2m1fn', 'float32', False),
+        Support_quantType("wfp4afp8e4m3", 8, 4, 32, 8, 'float8_e4m3fn', 'float4_e2m1fn', 'float32', False),
+        Support_quantType("wfp8afp8", 8, 8, 32, 8, 'float8_e4m3fn', 'float8_e4m3fn', 'float32', False),
+        Support_quantType("wfp8e5m2afp8e5m2", 8, 8, 32, 8, 'float8_e5m2', 'float8_e5m2', 'float32', False),
+        Support_quantType("wfp8e4m3afp8e4m3", 8, 8, 32, 8, 'float8_e4m3fn', 'float8_e4m3fn', 'float32', False),
+
+        Support_quantType("fp16", 16, 16, 32, 8, 'float16', 'float16', 'float32', False),
+        Support_quantType("bf16", 16, 16, 32, 8, 'bfloat16', 'bfloat16', 'float32', False),
+        Support_quantType("bfp16", 16, 16, 32, 8, 'bfloat16', 'bfloat16', 'float32', False),
     ]
     name_list_ = [quant.name for quant in quant_type]
+    quant_modes = {quant.name: quant for quant in quant_type}
     is_valid_ = defaultdict(lambda: False, {quant.name: True for quant in quant_type})
-    is_float_ = {quant.name: is_float(str2dtype(quant.name)) for quant in quant_type}
     activation_bits_ = {quant.name: quant.activation_bits for quant in quant_type}
     weight_bits_ = {quant.name: quant.weight_bits for quant in quant_type}
     bias_bits_ = {quant.name: quant.bias_bits for quant in quant_type}
@@ -201,13 +223,62 @@ class QuantType:
     weight_type_ = {quant.name: quant.weight_type for quant in quant_type}
     bias_type_ = {quant.name: quant.bias_type for quant in quant_type}
     lut_items_in_bits_ = {quant.name: quant.lut_items_in_bits for quant in quant_type}
+    is_float_ = {quant.name: is_float(str2dtype(quant.activation_type)) for quant in quant_type}
     # For now, let's simply set up support
     supprot_fp_quant_type_op_type_ = {
         # 'int8' : all_opType,
         # 'int16' : all_opType,
-        "fp8_e4m3fn": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
-        "fp8_e5m2": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+        "wfp8e4m3afp8e4m3": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+        'wfp8afp8': [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+        "wfp8e5m2afp8e5m2": [OpType.Convolution, OpType.FullyConnected, OpType.DepthwiseConv, OpType.MatMul, OpType.Input, OpType.Constant] + OP_ONLY_CHANGE_SHAPE,
+        "wfp4afp8e4m3": [OpType.FullyConnected] + OP_ONLY_CHANGE_SHAPE,
+        "w4afp8e4m3": [OpType.FullyConnected] + OP_ONLY_CHANGE_SHAPE,
     }
+    for name in name_list_:
+        if name not in supprot_fp_quant_type_op_type_:
+            supprot_fp_quant_type_op_type_[name] = []
+
+    @classmethod
+    def supported_quant_mode(cls):
+        return cls.quant_modes
+
+    @classmethod
+    def _to_quant_mode(cls, name_or_quantmode):
+        nq = name_or_quantmode
+        if isinstance(nq, str):
+            nq = cls.quant_modes.get(nq, None)
+        if nq is None or (isinstance(nq, cls.Support_quantType) and nq not in cls.quant_modes.values()):
+            OPT_ERROR(
+                f"the quant_type = {str(name_or_quantmode)} is not supported, only supports: {cls.quant_modes}.")
+        return nq
+
+    @classmethod
+    def is_weight_only_quantization(cls, name_or_quantmode):
+        nq = cls._to_quant_mode(name_or_quantmode)
+        return nq.is_weight_only_quantization if nq is not None else False
+
+    @classmethod
+    def is_keep_unquantized(cls, name_or_quantmode):
+        nq = cls._to_quant_mode(name_or_quantmode)
+        ret = False
+        if nq in [cls.quant_modes['fp16'], cls.quant_modes['bfp16'], cls.quant_modes['bf16']]:
+            ret = True
+        return ret
+
+    @classmethod
+    def qmode_to_weight_and_activation_pair(cls, name_or_quantmode):
+        qm = cls._to_quant_mode(name_or_quantmode)
+
+        wht_act_pair = {}
+        if qm is not None:
+            wht_act_pair.update({'weight_type': qm.weight_type})
+            wht_act_pair.update({'activation_type': qm.activation_type})
+        return wht_act_pair
+
+    @classmethod
+    def is_supported_quant_mode(cls, name_or_quantmode):
+        nq = cls._to_quant_mode(name_or_quantmode)
+        return True if nq is not None else False
 
     @classmethod
     def quant_names(cls):
@@ -234,12 +305,36 @@ class QuantType:
         return cls.bias_bits_[quant_name.lower()]
 
     @classmethod
-    def activation_type(cls, quant_name):
-        return cls.activation_type_[quant_name.lower()]
+    def activation_type(cls, name_or_quantmode):
+        activation_dtype = None
+        if cls.is_supported_quant_mode(name_or_quantmode):
+            qm = cls._to_quant_mode(name_or_quantmode)
+            activation_dtype = qm.activation_type
+        else:
+            OPT_WARN(
+                f"the quant_type = {str(name_or_quantmode)} is not supported, only supports: {cls.quant_modes}.")
+        return activation_dtype
 
     @classmethod
-    def weight_type(cls, quant_name):
-        return cls.weight_type_[quant_name.lower()]
+    def weight_type(cls, name_or_quantmode):
+        weight_dtype = None
+        if cls.is_supported_quant_mode(name_or_quantmode):
+            qm = cls._to_quant_mode(name_or_quantmode)
+            weight_dtype = qm.weight_type
+        else:
+            OPT_WARN(
+                f"the quant_type = {str(name_or_quantmode)} is not supported, only supports: {cls.quant_modes}.")
+        return weight_dtype
+
+    @classmethod
+    def _to_Dtype(cls, str_or_dtype):
+        if isinstance(str_or_dtype, str):
+            return str2dtype(str_or_dtype)
+        elif isinstance(str_or_dtype, Dtype):
+            return str_or_dtype
+        else:
+            OPT_ERROR(
+                f"the string[{str_or_dtype}] converted to Dtype is invalid.")
 
     @classmethod
     def bias_type(cls, quant_name):
@@ -418,7 +513,7 @@ def get_linear_quant_params_from_tensor(x, quant_mode, bits, is_signed):
     f_ranges = torch.where(f_ranges < QUANTIZE_ZERO_BAND, q_ranges, f_ranges)
     f_ranges = torch.where(torch.isnan(f_ranges), q_ranges, f_ranges)
     scale = q_ranges / f_ranges
-    zerop = torch.clamp(scale.mul(f_zfactor).round() - f_zoffset, -2 ** (bits - 1) + 1, 2 ** (bits - 1)-1)
+    zerop = torch.clamp(scale.mul(f_zfactor).round() - f_zoffset, -2 ** (bits - 1) + 1, 2 ** (bits - 1)-1).int()
 
     return scale, zerop, q_min, q_max, bits2dtype(bits, is_signed)
 
@@ -456,12 +551,12 @@ def linear_dequantize_for_gptq_w4afp8(self_constants):
     wt = self_constants["weights"].clone()
     scale0 = self_constants["scale0"].betensor.clone()
     scale1 = self_constants["scale1"].betensor.clone()
-
+    zp0 = self_constants["zp0"].betensor.clone()
     block_size = wt.ir_shape[1]//self_constants["scale0"].ir_shape[-1]
     bshape = list(wt.ir_shape)
     bshape[-1] = int(wt.ir_shape[-1] / block_size)
     scale = scale0.flatten().reshape(bshape).repeat_interleave(block_size, dim=-1)
-    zero_point = wt.zerop.flatten().reshape(bshape).repeat_interleave(block_size, dim=-1)
+    zero_point = zp0.flatten().reshape(bshape).repeat_interleave(block_size, dim=-1)
     w = wt.betensor
     dev = w.device if isinstance(w, torch.Tensor) else None
     w_t, scale_t, zero_point_t = batch_construct_torch_tensor([w, scale, zero_point], device=dev)

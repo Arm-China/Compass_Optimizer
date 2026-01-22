@@ -52,7 +52,7 @@ def prelu_quantize(self, *args):
     q_mode_activation = self.attrs["q_mode_activation"]
     quant_type = self.attrs.get('quant_type')
     if quant_type != 'disable' and QuantType.is_float(quant_type):
-        out.dtype = QuantType.activation_type(quant_type)
+        out.dtype = QuantType._to_Dtype(QuantType.activation_type(quant_type))
         out.qbits = dtype2bits(out.dtype)
         out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(out, q_mode_activation, out.dtype)
         out.qinvariant = False

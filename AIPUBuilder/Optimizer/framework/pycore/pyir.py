@@ -150,7 +150,6 @@ def convert_aipu_node_to_opt_node(cn):
     dt_dict = {dt.name: dt for dt in Dtype}
     pn = PyNode(cn.name, OpTypeValue(str(cn.type)))
     pn.attrs['layer_id'] = str(cn.attrs.get("layer_id", 0))
-    is_quantized = False
     for k, v in cn.params.items():
         # when scale_type is a list,like scale_type=[uint16, uint16 uint16] in eltwise, and actuallly
         # scale_type[0] is a _C.Dtype, when str(scale_type), it is
@@ -166,7 +165,6 @@ def convert_aipu_node_to_opt_node(cn):
         pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
         pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
         pn.constants[k] = pv
-        is_quantized = v.quantization.quantized or is_quantized
         if v.quantization.quantized:
             pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
             pv.qbits = v.quantization.bits
@@ -181,9 +179,8 @@ def convert_aipu_node_to_opt_node(cn):
         pv.ir_shape = tuple(v.shape)
         pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
         pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
-        is_quantized = v.quantization.quantized or is_quantized
         pv.key_axis = None if not is_torch_tensor_with_multi_data(pv.scale) else -1  # qtlib not key_axis, so tmp -1
-        if is_quantized:
+        if v.quantization.quantized:
             pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
             pv.qbits = v.quantization.bits
             pv.qinvariant = v.quantization.qinvariant
@@ -200,9 +197,8 @@ def convert_aipu_node_to_opt_node(cn):
         pv.ir_shape = tuple(v.shape)
         pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
         pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
-        is_quantized = v.quantization.quantized or is_quantized
         pv.key_axis = None if not is_torch_tensor_with_multi_data(pv.scale) else -1  # qtlib not key_axis, so tmp -1
-        if is_quantized:
+        if v.quantization.quantized:
             pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
             pv.qbits = v.quantization.bits
             pv.qinvariant = v.quantization.qinvariant
@@ -211,8 +207,45 @@ def convert_aipu_node_to_opt_node(cn):
         if 'range' in v._attrs:
             pv.ir_range = v._attrs['range']
         pn.add_output(pv)
-    pn.quantized = is_quantized
+    PyNode.deduce_quantization_infos(pn)
     return pn
+
+
+def ds_expr_to_str(exprs):
+    from AIPUBuilder._C._tongue import Symbol, Expr
+    if isinstance(exprs, str):
+        return exprs
+
+    if isinstance(exprs, (Expr, Symbol)):
+        str_expr = str(exprs)
+        if str_expr.isdigit():
+            str_expr = int(str_expr)
+        return str_expr
+
+    if isinstance(exprs, (list, tuple)):
+        expr_str = []
+        for expr in exprs[:]:
+            expr_str.append(ds_expr_to_str(expr))
+        return expr_str
+
+
+def str_to_ds_expr(exprs):
+    from AIPUBuilder._C._tongue import Symbol, Expr
+    if isinstance(exprs, (int, str)):
+        return Expr(exprs)
+    # if isinstance(exprs, str):
+    #     if '*' in exprs:
+    #         exprs = '(' + exprs + ')'
+    #     return Expr(exprs)
+
+    if isinstance(exprs, (Expr, Symbol)):
+        return exprs
+
+    if isinstance(exprs, (list, tuple)):
+        expr_str = []
+        for expr in exprs[:]:
+            expr_str.append(str_to_ds_expr(expr))
+        return expr_str
 
 
 def convert_aipu_graph_to_opt_graph(cg):
@@ -221,7 +254,7 @@ def convert_aipu_graph_to_opt_graph(cg):
     from AIPUBuilder.Optimizer.framework.pycore.pytensor import PyTensor, TensorShape
     from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype, OpTypeValue
     from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
-    from AIPUBuilder.Optimizer.utils import dtype2range, is_torch_tensor_with_multi_data
+    from AIPUBuilder.Optimizer.utils import dtype2range, is_torch_tensor_with_multi_data, dtype2bits, is_float
 
     g = QuantizeGraph()
     g.name = cg.name
@@ -230,24 +263,26 @@ def convert_aipu_graph_to_opt_graph(cg):
     emap = {}
     for n in cg.nodes:
         pn = PyNode(n.name, OpTypeValue(str(n.type)))
-        pn.attrs['layer_id'] = str(n.attrs["layer_id"])
-        is_quantized = False
+        pn.attrs['layer_id'] = str(n.attrs.get("layer_id", cg.nodes.index(n)))
         for k, v in n.params.items():
             # when scale_type is a list,like scale_type=[uint16, uint16 uint16] in eltwise, and actuallly
             # scale_type[0] is a _C.Dtype, when str(scale_type), it is
             # '[<Dtype.UINT16: 4>, <Dtype.UINT16: 4>, <Dtype.UINT16: 4>]'
             # and cast_from_NodeParamValue_string() cannot parse these.
+            if k.startswith('ds_'):
+                pn.params[k] = ds_expr_to_str(v)
+                continue
             vv = str(v) if not isinstance(v, (list, tuple)) else str([str(ve) for ve in v])
             pn.params[k] = cast_from_NodeParamValue_string(str(vv))
+
         for k, v in n.constants.items():
-            pv = PyTensor(v.name, v.data())
-            pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
+            dtype = dt_dict[v._dtype().__to_str__().upper()]
+            pv = PyTensor(v.name, v.numpy(), dtype)
             pv.ir_dtype = pv.dtype
             pv.ir_shape = TensorShape(tuple(v.shape))
-            pv.scale = v.quantization.scales
-            pv.zerop = v.quantization.offsets
+            pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
+            pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
             pn.constants[k] = pv
-            is_quantized = v.quantization.quantized or is_quantized
             if v.quantization.quantized:
                 pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
                 pv.qbits = v.quantization.bits
@@ -259,16 +294,21 @@ def convert_aipu_graph_to_opt_graph(cg):
         nmap[pn.name] = pn
         # store edges
         for v in n.outputs:
-            pv = PyTensor(v.name, v.data())
+            dtype = dt_dict[v._dtype().__to_str__().upper()]
+            if dtype2bits(dtype) <= 8 and is_float(dtype):
+                # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
+                pv = PyTensor(v.name, v.betensor.bfloat16(), dtype)
+            else:
+                pv = PyTensor(v.name, v.betensor, dtype)
+            # pv = PyTensor(v.name, v.betensor)
             pv.is_act = True
-            pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
+            # pv.dtype = dt_dict[v._dtype().__to_str__().upper()]
             pv.ir_dtype = pv.dtype
-            pv.ir_shape = tuple(v.shape)
-            pv.scale = v.quantization.scales
-            pv.zerop = v.quantization.offsets
-            is_quantized = v.quantization.quantized or is_quantized
+            pv.ir_shape = TensorShape(tuple(v.shape))
+            pv.scale = v.quantization.scales if len(v.quantization.scales) > 0 else 1.0
+            pv.zerop = v.quantization.offsets if len(v.quantization.offsets) > 0 else 0
             pv.key_axis = None if not is_torch_tensor_with_multi_data(pv.scale) else -1  # qtlib not key_axis, so tmp -1
-            if is_quantized:
+            if v.quantization.quantized:
                 pv.qmin, pv.qmax = dtype2range(pv.ir_dtype)
                 pv.qbits = v.quantization.bits
                 pv.qinvariant = v.quantization.qinvariant
@@ -277,7 +317,7 @@ def convert_aipu_graph_to_opt_graph(cg):
             if 'range' in v._attrs:
                 pv.ir_range = v._attrs['range']
             emap[pv.name] = pv
-        pn.quantized = is_quantized
+
     # connect edges
     for i, n in enumerate(cg.nodes):
         pn = g.nodes[i]
@@ -308,12 +348,20 @@ def convert_aipu_graph_to_opt_graph(cg):
     for t in cg.output_tensors:
         olist.append(emap[t.name])
     g.output_tensors = tuple(olist)
+    g.init_networkx()
     return g
 
 
+def set_default_layout(tensor_shape):
+    from AIPUBuilder._C._core import DataLayout
+    if tensor_shape.layout == DataLayout.Flat:
+        if len(tensor_shape) == 4:
+            tensor_shape.layout = DataLayout.NHWC
+
+
 def convert_opt_graph_to_aipu_graph(g):
+    from AIPUBuilder.core import Tensor as _Tensor
     from AIPUBuilder._C._core import Graph as _Graph
-    from AIPUBuilder._C._core import Tensor as _Tensor
     from AIPUBuilder._C._core import TensorList as _TensorList
     from AIPUBuilder._C._core import TensorShape as _TensorShape
     from AIPUBuilder._C._core import Node as _Node
@@ -321,20 +369,7 @@ def convert_opt_graph_to_aipu_graph(g):
     from AIPUBuilder._C._core import Dtype as _Dtype
     from AIPUBuilder._C._core import _py_register_optype
     from AIPUBuilder.Optimizer.utils.dtype_utils import dtype2torch_type
-
-    def _convert_scale_zp_to_list(data):
-        import torch
-        import numpy as np
-        if isinstance(data, (float, int)):
-            ret_data = [data]
-        elif isinstance(data, np.ndarray):
-            ret_data = [data.tolist()] if data.ndim == 0 else data.tolist()
-        elif isinstance(data, torch.Tensor):
-            data = data.flatten()
-            ret_data = [data.tolist()] if data.dim() == 0 else data.tolist()
-        else:
-            ret_data = data
-        return ret_data
+    from AIPUBuilder.Optimizer.framework import OpType
 
     def _register_optype(t: str):
         if t not in _OpType.__entries:
@@ -354,8 +389,8 @@ def convert_opt_graph_to_aipu_graph(g):
         for i, v in enumerate(n.outputs):
             ct = _Tensor(v.name, _TensorShape(list(v.ir_shape)), dt_dict[v.dtype.name])
             # ct._set_dtype(dt_dict[v.dtype.name])
-            ct.quantization.scales = _convert_scale_zp_to_list(v.scale)
-            ct.quantization.offsets = [int(zp) for zp in _convert_scale_zp_to_list(v.zerop)]
+            ct.quantization.scales = v.scale.flatten().cpu()
+            ct.quantization.offsets = v.zerop.flatten().cpu()
             ct.quantization.bits = v.qbits if v.qbits else n.attrs['q_bits_activation'] if 'q_bits_activation' in n.attrs else -1
             ct.quantization.qinvariant = v.qinvariant
             if 'layer_top_range' in n.params:
@@ -363,22 +398,51 @@ def convert_opt_graph_to_aipu_graph(g):
                 tmaxs = n.params['layer_top_range'][i][1]
                 ct.quantization.mins = tmins if isinstance(tmins, list) else [tmins]
                 ct.quantization.maxs = tmaxs if isinstance(tmaxs, list) else [tmaxs]
+            # elif v.ir_range is not None:
+            #     ct.quantization.mins = [v.ir_range[0]]
+            #     ct.quantization.maxs = [v.ir_range[1]]
             emap[ct.name] = ct
+
         if 'layer_top_range' in n.params:
             n.params.pop('layer_top_range')
+    has_ds = False
     for n in g.nodes:
-        cn = _Node(n.name, ot_dict[str(n.type)] if str(n.type) in ot_dict.keys() else _register_optype(n.type.name))
+        if n.type == OpType.Input and 'ds_output_shape' in n.params:
+            has_ds = True
+            from AIPUBuilder import ops
+            with cg:
+                c_out = ops.input(_TensorShape(list(n.outputs[0].ir_shape)),
+                                  dt_dict[n.outputs[0].dtype.name],
+                                  name=n.outputs[0].name,
+                                  exprs=n.params['ds_output_shape'][0])
+                cn = c_out.op
+                cn.name = n.name
+                org_ct = emap[n.outputs[0].name]
+                c_out.quantization.scales = org_ct.quantization.scales
+                c_out.quantization.offsets = org_ct.quantization.offsets
+                c_out.quantization.bits = org_ct.quantization.bits
+                c_out.quantization.qinvariant = org_ct.quantization.qinvariant
+                c_out.quantization.mins = org_ct.quantization.mins
+                c_out.quantization.maxs = org_ct.quantization.maxs
+                emap[n.outputs[0].name] = c_out
+        else:
+            cn = _Node(n.name, ot_dict[str(n.type)] if str(n.type) in ot_dict.keys() else _register_optype(n.type.name))
         for k, v in n.params.items():
+            if k.startswith('ds_'):
+                if n.type == OpType.Input:
+                    continue
+                cn.params[k] = str_to_ds_expr(v)
+                continue
             try:
                 cn.params[k] = cast_to_NodeParamValue(v)
             except Exception as e:
                 cn.params[k] = cast_to_NodeParamValue_string(v)
         for k, v in n.constants.items():
-            ct = _Tensor(v.name, v.to_numpy())
-            ct.betensor = ct.betensor.to(dtype2torch_type(v.dtype))
-            ct._set_dtype(dt_dict[v.dtype.name])
-            ct.quantization.scales = _convert_scale_zp_to_list(v.scale)
-            ct.quantization.offsets = [int(z) for z in _convert_scale_zp_to_list(v.zerop)]
+            dtype = dt_dict[v.dtype.name]
+            ct = _Tensor.new(v.to_numpy().astype(dtype.np))
+            ct.dtype = dtype
+            ct.quantization.scales = v.scale.flatten().cpu()
+            ct.quantization.offsets = v.zerop.flatten().cpu()
             if v.qbits:
                 ct.quantization.bits = v.qbits
             elif 'weights' == k:
@@ -395,15 +459,26 @@ def convert_opt_graph_to_aipu_graph(g):
         for v in n.inputs:
             cn.add_input(emap[v.name])
         for v in n.outputs:
-            cn.add_output(emap[v.name])
+            t = emap[v.name]
+            set_default_layout(t.shape)
+            cn.add_output(t)
+
         for ak, av in n.attrs.items():
-            try:
-                cn.attrs[ak] = cast_to_NodeParamValue(av)
-            except:
-                cn.attrs[ak] = av
+            if ak in cn.attrs:  # like workspace/.dot_section has existed when Node.create
+                continue
+            else:
+                try:
+                    cn.attrs[ak] = cast_to_NodeParamValue(av)
+                except:
+                    cn.attrs[ak] = av
         cg.add_node(cn)
     cg.input_tensors = _TensorList([emap[v.name] for v in g.input_tensors])
     cg.output_tensors = _TensorList([emap[v.name] for v in g.output_tensors])
+    cg.topological_sort()
+    cg.reset_layer_id()
+    if has_ds:
+        for n in cg.nodes:
+            n.infer_shape()
     return cg
 
 
@@ -464,6 +539,8 @@ def parse_graph_from_ir(ir_txt, ir_bin):
                 g.name = abstract['model_name']
                 if 'compat_quantized_model' in abstract:
                     g.compat_quantized_model = True if abstract['compat_quantized_model'].lower() == 'true' else False
+                if 'dynamic_symbols' in abstract:
+                    g.dynamic_symbols = cast_from_NodeParamValue_string(abstract['dynamic_symbols'])
                 inp_tensor_names = cast_from_NodeParamValue_string(
                     abstract['input_tensors']) if 'input_tensors' in abstract.keys() else []
                 inp_tensor_names = [str(s) for s in inp_tensor_names]
@@ -768,7 +845,7 @@ def parse_graph_from_ir(ir_txt, ir_bin):
 
 def serialize_graph_to_ir(g, ir_txt, ir_bin):
     from AIPUBuilder.Optimizer.utils import (dtype2str, dtype2range, dtype2bytes, make_path, torch_type2dtype,
-                                             is_torch_tensor_with_multi_data, is_torch_tensor, is_float)
+                                             is_torch_tensor_with_multi_data, is_torch_tensor, is_float, dtype2bits)
     from AIPUBuilder.Optimizer.logger import OPT_INFO, OPT_ERROR, OPT_WARN, tqdm
     from AIPUBuilder.Optimizer.framework import PyTensor, Dtype
     import mmap
@@ -908,6 +985,14 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
                 if is_torch_tensor_with_multi_data(scale):
                     node.constants[s_key] = PyTensor(s_key, scale)
                     node.constants[z_key] = PyTensor(z_key, zerop)
+                    # if weight is fp4/fp8 quantization, lib requires the zp's dtype == weights's dtype
+                    # so change the n.constants['weights_zp'].dtype from bfloat16 to weight's dtype
+                    # and the n.constants['weights_zp'] data dtype(now still is bfloat16) will
+                    # change at pytensor.tobytes() when serializing bin
+                    if key == "weights":
+                        weight_dtype = node.constants["weights"].dtype
+                        if is_float(weight_dtype) and (dtype2bits(weight_dtype)) <= 8:
+                            node.constants[z_key].dtype = weight_dtype
                 elif is_torch_tensor(scale) and scale.numel() == 1:
                     node.params[s_key] = scale.item()
                     node.params[z_key] = zerop.item()
@@ -933,7 +1018,7 @@ def serialize_graph_to_ir(g, ir_txt, ir_bin):
             min_v, max_v = dtype2range(ct.dtype)
             if not is_float(ct.dtype) and (ct_value.betensor.max() > max_v or ct_value.betensor.min() < min_v):
                 OPT_WARN(
-                    f"Node: {n}, constant: {c} : data overflow, with min/max {ct_value.min()}/{ct_value.max()} under dtype {ct.dtype}")
+                    f"Node: {n}, constant: {c} : data overflow, with min/max {ct_value.betensor.min()}/{ct_value.betensor.max()} under dtype {ct.dtype}")
             tensor_list.append([offset, c_size, ct_value])
             offset += c_size
 

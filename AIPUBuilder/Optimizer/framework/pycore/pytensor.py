@@ -153,11 +153,11 @@ class PyTensor:
         th_dict = {
             # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
             None:                   None,
-            Dtype.FP6_E2M3FN:       torch.float32,
-            Dtype.FP6_E3M2FN:       torch.float32,
-            Dtype.FP4_E2M1FN:       torch.float32,
-            Dtype.FP8_E5M2:         torch.float32,
-            Dtype.FP8_E4M3FN:       torch.float32,
+            Dtype.FP6_E2M3FN:       torch.bfloat16,
+            Dtype.FP6_E3M2FN:       torch.bfloat16,
+            Dtype.FP4_E2M1FN:       torch.bfloat16,
+            Dtype.FP8_E5M2:         torch.bfloat16,
+            Dtype.FP8_E4M3FN:       torch.bfloat16,
             Dtype.FP16:             torch.float16,
             Dtype.BFP16:            torch.bfloat16,
             Dtype.FP32:             torch.float32,
@@ -322,7 +322,7 @@ class PyTensor:
             return super().__setattr__(key, value.to(device_cluster[device]))
 
     def fit_dtype(self, dtype: Union[Dtype, None] = None):
-        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, has_inf, dtype2range, dtype2torch_type, dtype2bits, dtype2bytes, torch_type2dtype, round_to_fp8, uint8_to_fp8
+        from AIPUBuilder.Optimizer.utils.dtype_utils import is_float, has_inf, dtype2range, dtype2torch_type, dtype2bits, dtype2bytes, torch_type2dtype, round_to_fp8, uint8_to_fp8, fp32_to_fp4
         from AIPUBuilder.Optimizer.framework.pycore.pytype import Dtype
         from AIPUBuilder.Optimizer.logger import OPT_WARN, OPT_ERROR
         if dtype is not None:
@@ -332,7 +332,7 @@ class PyTensor:
             # no restricts
             pass
         elif is_float(self.dtype):
-            if self.dtype in [Dtype.FP8_E5M2, Dtype.FP8_E4M3FN, Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
+            if self.dtype in [Dtype.FP4_E2M1FN, Dtype.FP8_E5M2, Dtype.FP8_E4M3FN, Dtype.BFP16, Dtype.FP16, Dtype.FP32, Dtype.FP64]:
                 if dtype2bytes(self.dtype) > self.betensor.itemsize:
                     self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
                 else:
@@ -342,16 +342,18 @@ class PyTensor:
                         OPT_WARN(
                             f'tensor "{self.name}" contains inf values in fit_dtype() function.')
                     fmin, fmax = dtype2range(self.dtype)
+                    binfo = torch.finfo if torch.is_floating_point(self.betensor) else torch.iinfo
+                    fmin = max(fmin, binfo(self.betensor.dtype).min)
+                    fmax = min(fmax, binfo(self.betensor.dtype).max)
                     self.betensor = torch.where(inf_mask, self.betensor, torch.clamp(self.betensor, fmin, fmax))
-                    self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
+                    if self.dtype == Dtype.FP4_E2M1FN:
+                        self.betensor = fp32_to_fp4(self.betensor).to(dtype2torch_type(self.dtype))
+                    else:
+                        self.betensor = self.betensor.to(dtype2torch_type(self.dtype))
                     if dtype2bits(self.dtype) <= 8:
                         # torch.float8 only valid on cpu or specific gpu, and only valid for few operators
                         self.betensor = self.betensor.bfloat16()
-            # elif self.dtype in [Dtype.FP8_E5M2, Dtype.FP8_E4M3FN]:
-            #     if torch.is_floating_point(self.betensor):
-            #         self.betensor = round_to_fp8(self.betensor, self.dtype, round_mode='ROUND_TO_EVEN')
-            #     else:
-            #         self.betensor = uint8_to_fp8(self.betensor.to(torch.uint8), self.dtype)
+
             else:
                 #self.betensor = to_fp24(self.betensor) if self.dtype == Dtype.FP24 else self.betensor
                 OPT_ERROR(f'unsupported dtype "{self.dtype}" when calling fit_dtype function on tensor "{self.name}".')
@@ -439,7 +441,8 @@ class PyTensor:
         from AIPUBuilder.Optimizer.utils import OPT_INT_MAX, OPT_INT_MIN, OPT_EPSILON
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         tdevice = self.device
-        fbetensor = self.betensor.float() if self.betensor.numel() > 0 else torch.zeros(self.ir_shape, device=tdevice).float()
+        fbetensor = self.betensor.float() if self.betensor.numel() > 0 else torch.zeros(
+            1 if torch.tensor(self.ir_shape).abs().min() < 1 else self.ir_shape, device=tdevice).float()
         OPT_INT_MIN_t = torch_tensor(OPT_INT_MIN, device=tdevice)
         OPT_INT_MAX_t = torch_tensor(OPT_INT_MAX, device=tdevice)
 
@@ -662,7 +665,7 @@ class PyTensor:
         import torch
         from AIPUBuilder.Optimizer.utils import construct_torch_tensor as torch_tensor
         if isinstance(zerop, torch.Tensor):
-            self._zerop = zerop.reshape([-1]).int().to(self.device)
+            self._zerop = zerop.reshape([-1]).to(self.device)
         elif zerop is None:
             self._zerop = zerop
         else:

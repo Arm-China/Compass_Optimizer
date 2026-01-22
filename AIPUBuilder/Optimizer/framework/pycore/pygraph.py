@@ -35,6 +35,9 @@ class PyGraph:
         # all subgraph have empty subgraph_map, only root graph has root graph == None
         self.root_graph = None
 
+        # store the dynamic_symbols in IR header
+        self.dynamic_symbols = None
+
     def subgraph_view(self, nodes):
         from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
         gview = PyGraphView()
@@ -470,6 +473,25 @@ class PyGraph:
         self.nodes = left_nodes
         return sg
 
+    def update_dynamic_symbols(self):
+        from AIPUBuilder.Optimizer.framework.pycore.pytype import OpType
+        from AIPUBuilder.Optimizer.logger import OPT_WARN
+        if self.dynamic_symbols is not None:
+            cur_ds_symbol_and_data_map = {}
+            for n in self.nodes:
+                if n.type == OpType.Input and 'ds_output_shape' in n.params:
+                    ds_output_shape = n.params['ds_output_shape'][0]
+                    cur_data_shape = n.outputs[0].betensor.shape
+                    if len(ds_output_shape) != len(cur_data_shape):
+                        OPT_WARN(
+                            f"ds_output_shape(={ds_output_shape})'s length is not equal to cur_data_shape(={cur_data_shape})'s length.")
+                    for cur_shape, ds_symbol in zip(cur_data_shape[::-1], ds_output_shape[::-1]):
+                        if isinstance(ds_symbol, str) and ds_symbol not in cur_ds_symbol_and_data_map:
+                            cur_ds_symbol_and_data_map.update({ds_symbol: cur_shape})
+            if len(cur_ds_symbol_and_data_map):
+                for n in self.nodes:
+                    n.attrs['dynamic_symbols'] = cur_ds_symbol_and_data_map
+
     def forward(self, feed_data, disable_pbar=True, keep_tensors=False):
         return self.forward_to(None, feed_data, disable_pbar, keep_tensors)
 
@@ -484,6 +506,9 @@ class PyGraph:
             data = [feed_data, ]
         for inp, d in zip(self.input_tensors, data):
             inp.betensor = PyTensor('tmp', d).betensor
+
+        # update dynamic_symbols and its value
+        self.update_dynamic_symbols()
 
         import sys
         from AIPUBuilder.Optimizer.logger import tqdm

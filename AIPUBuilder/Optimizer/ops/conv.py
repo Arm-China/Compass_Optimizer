@@ -77,35 +77,32 @@ def conv2d(self, *args):
     return self.outputs[0].betensor
 
 
-def conv2d_fpx_quantize(self, *args):
+def fpx_weight_quantize(self, *args):
     quant_type = self.attrs.get('quant_type')
-    q_type_activation = QuantType.activation_type(quant_type)
-    q_type_weight = QuantType.weight_type(quant_type)
-    q_type_bias = QuantType.bias_type(quant_type)
-
+    q_type_weight = QuantType._to_Dtype(QuantType.weight_type(quant_type))
     q_mode_weight = self.attrs["q_mode_weight"]
-    q_mode_activation = self.attrs["q_mode_activation"]
-    q_bits_weight = self.attrs["q_bits_weight"]
-    q_bits_activation = self.attrs["q_bits_activation"]
 
-    inp = self.inputs[0]
-    out = self.outputs[0]
     w = self.constants["weights"]
     key_axis = w.key_axis
     w_out_cnum = w.shape[key_axis]
     group = self.get_param('group', optional=True, default_value=1)
 
-    out.qbits = q_bits_activation
-    out.dtype = q_type_activation
-    out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
-        out, q_mode_activation, q_type_activation)
-    out.qinvariant = False
-
     w.dtype = q_type_weight
     w.qbits = dtype2bits(w.dtype)
     w.qinvariant = False
 
-    if not all(sname in self.constants.keys() for sname in ['scale0', 'scale1']):
+    # if activation_type is fp8/fp4(ab. fpx), weight_type support int4 or fpx
+    if (q_type_weight == Dtype.ALIGNED_INT4) or (q_type_weight == Dtype.FP4_E2M1FN):
+        # GPTQ quantization, scale0 and scale1 are necessary
+        if all(sname in self.constants.keys() for sname in ['scale0', 'scale1']):
+            w.qmin, w.qmax = dtype2range(w.dtype)
+        else:
+            # opt do quantization
+            w.scale, w.zerop, w.qmin, w.qmax, _ = get_linear_quant_params_from_tensor(
+                w, q_mode_weight, w.qbits, is_signed=True)
+            w.betensor = linear_quantize_clip(w.betensor, w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax,
+                                              round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', w.dtype))
+    else:
         if group > 1 or QuantMode.is_per_channel(q_mode_weight):
             if QuantMode.is_per_channel(q_mode_weight):
                 initial_group = w_out_cnum
@@ -127,18 +124,41 @@ def conv2d_fpx_quantize(self, *args):
 
             w.scale = w.scale.repeat_interleave(current_per_group_cnum)[:snum]
             w.zerop = w.zerop.repeat_interleave(current_per_group_cnum)[:snum]
-
         else:
             w.scale, w.zerop, w.qmin, w.qmax = get_fpx_quant_params_from_tensor(w, q_mode_weight, q_type_weight)
-        # quantize weights
-        wscale, wzerop = w.scale, w.zerop
-        w.betensor = linear_quantize_clip(w.betensor.float(), w.broadcast_scale, w.broadcast_zerop,
-                                          w.qmin, w.qmax, round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', w.dtype))
-    else:
-        wscale, wzerop = 1.0, 0.0
-        w.dtype = Dtype.ALIGNED_INT4
-        w.qbits = dtype2bits(w.dtype)
+        w.betensor = linear_quantize_clip(w.betensor.float(), w.broadcast_scale, w.broadcast_zerop, w.qmin, w.qmax,
+                                          round_func=get_round_func_according_to_dtype('ROUND_TO_EVEN', w.dtype))
 
+
+def conv2d_fpx_quantize(self, *args):
+    quant_type = self.attrs.get('quant_type')
+    q_type_activation = QuantType._to_Dtype(QuantType.activation_type(quant_type))
+    q_type_weight = QuantType._to_Dtype(QuantType.weight_type(quant_type))
+    q_type_bias = QuantType._to_Dtype(QuantType.bias_type(quant_type))
+
+    q_mode_weight = self.attrs["q_mode_weight"]
+    q_mode_activation = self.attrs["q_mode_activation"]
+    q_bits_weight = self.attrs["q_bits_weight"]
+    q_bits_activation = self.attrs["q_bits_activation"]
+
+    inp = self.inputs[0]
+    out = self.outputs[0]
+    # key_axis = w.key_axis
+    # w_out_cnum = w.shape[key_axis]
+    # group = self.get_param('group', optional=True, default_value=1)
+
+    out.qbits = q_bits_activation
+    out.dtype = q_type_activation
+    out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
+        out, q_mode_activation, q_type_activation)
+    out.qinvariant = False
+
+    fpx_weight_quantize(self, *args)
+    w = self.constants["weights"]
+
+    wscale = w.scale
+    if all(sname in self.constants.keys() for sname in ['scale0', 'scale1']):
+        wscale = 1.0
     local_rescale = out.scale / (inp.scale * wscale)
     do_scale = local_rescale
     do_scale_type = Dtype.FP32

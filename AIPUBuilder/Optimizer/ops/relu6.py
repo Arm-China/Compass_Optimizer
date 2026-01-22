@@ -19,7 +19,7 @@ def relu6_quantize(self, *args):
     inp = self.inputs[0]
     out = self.outputs[0]
     if fpx_quantize:
-        out.dtype = QuantType.activation_type(quant_type)
+        out.dtype = QuantType._to_Dtype(QuantType.activation_type(quant_type))
         out.qbits = dtype2bits(out.dtype)
         out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(out, q_mode_activation, out.dtype)
         out.qinvariant = False

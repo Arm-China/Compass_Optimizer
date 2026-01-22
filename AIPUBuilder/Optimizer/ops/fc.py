@@ -76,11 +76,11 @@ def fc_quantize(self, *args):
         out_signed = with_activation_out_is_signed(self) or self.force_dtype_int
         out.qbits = q_bits_activation
         if fpx_quantize:
-            q_type_activation = QuantType.activation_type(quant_type)
+            q_type_activation = QuantType._to_Dtype(QuantType.activation_type(quant_type))
             out.dtype = q_type_activation
             out.scale, out.zerop, out.qmin, out.qmax = get_fpx_quant_params_from_tensor(
                 out, q_mode_activation, q_type_activation)
-            q_type_weight = QuantType.weight_type(quant_type)
+            q_type_weight = QuantType._to_Dtype(QuantType.weight_type(quant_type))
             w.dtype = q_type_weight
             w.qbits = dtype2bits(w.dtype)
             w.scale, w.zerop, w.qmin, w.qmax = get_fpx_quant_params_from_tensor(w, q_mode_weight, q_type_weight)
