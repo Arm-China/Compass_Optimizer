@@ -120,12 +120,12 @@ def regionfuse(self, *args):
                 fuse_ps += num_perclass1
                 out_num_perclass[b][i] = num_perclass0 + num_perclass1
 
-        self.outputs[0].betensor = out_score
-        self.outputs[1].betensor = out_box
-        self.outputs[2].betensor = out_num_perclass
-        self.outputs[3].betensor = out_label
-        self.outputs[4].betensor = out_total_class_num
-        return [o.betensor for o in self.outputs]
+    self.outputs[0].betensor = out_score
+    self.outputs[1].betensor = out_box
+    self.outputs[2].betensor = out_num_perclass
+    self.outputs[3].betensor = out_label
+    self.outputs[4].betensor = out_total_class_num
+    return [o.betensor for o in self.outputs]
 
 
 @quant_register(OpType.RegionFuse)
